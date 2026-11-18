@@ -1,8 +1,8 @@
 ---
-status: proposed
+status: completed
 last_reviewed: 2026-11-18
 superseded_by: []
-related_code: []
+related_code: [src/pyerp]
 ---
 
 # Execution Plan: pyerp reusable workflow engine
