@@ -123,10 +123,17 @@ async def db():
 
 @pytest_asyncio.fixture
 async def env(db):
+    from chancy.plugins.leadership import Leadership
     from chancy.plugins.recovery import Recovery
 
     async with Chancy(
-        DSN, prefix=CHANCY_PREFIX, plugins=[Recovery(poll_interval=2)]
+        DSN, prefix=CHANCY_PREFIX,
+        plugins=[
+            # short leadership TTL so the replacement worker can lead
+            # (and run Recovery) quickly after the first worker dies
+            Leadership(poll_interval=1, timeout=3),
+            Recovery(poll_interval=2),
+        ],
     ) as kernel:
         await kernel.migrate()
         await kernel.declare(
@@ -293,8 +300,10 @@ async def test_e2e_scenario(env, db):
             sref = await env["jobs"].builder("slow@v1").context(ctx)\
                 .payload({"sleep": 0.4}).enqueue(cur)
         await w.stop(timeout=0.1)   # hard-ish stop
-        # start a fresh worker; chancy recovery reclaims the lease
-        w2 = Worker(env["kernel"], shutdown_timeout=5)
+        # start a fresh worker; chancy recovery reclaims the abandoned job
+        # once the dead worker's heartbeat_timeout (3s) lapses
+        w2 = Worker(env["kernel"], shutdown_timeout=5, heartbeat_poll_interval=1,
+                    heartbeat_timeout=3)
         await w2.start()
         try:
             for _ in range(300):
