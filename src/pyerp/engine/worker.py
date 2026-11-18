@@ -110,6 +110,8 @@ async def dispatch(job_id: str, step_run_id: str | None = None) -> None:
             return
 
         ctx = ctx_from_dict(ctx_json)
+        # Handlers get job_id via extra (context stays read-only elsewhere).
+        ctx.extra["job_id"] = job_id
         jlog = _job_logger(job_id, type_name, ctx.correlation_id)
         jlog.info("claimed")
 
@@ -132,6 +134,10 @@ async def dispatch(job_id: str, step_run_id: str | None = None) -> None:
             raise
 
         status = JobStatus.DONE if result.status == "done" else JobStatus.FAILED
+        if result.outputs.get("_bulk_parent"):
+            # bulk parent: partitions are out; fan-in flips to done/failed.
+            status = JobStatus.RUNNING
+            result.outputs.pop("_bulk_parent", None)
         await _finish(
             conn, job_id, status, result=result.outputs, error=result.error
         )
