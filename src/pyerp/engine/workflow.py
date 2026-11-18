@@ -166,7 +166,8 @@ async def advance_run(
     step_runs = await _fetch_steps(cursor, run_id)
 
     # terminal state check
-    active = [s for s in step_runs if s["status"] in ("pending", "claimed", "running")]
+    active = [s for s in step_runs
+              if s["status"] in ("pending", "claimed", "running", "blocked")]
     failed = [s for s in step_runs if s["status"] == "failed"]
     if failed:
         await _set_run_status(cursor, run_id, JobStatus.FAILED)
@@ -296,8 +297,7 @@ async def _enqueue_human_step(
             job_id, spec_step.type, JobStatus.PENDING.value,
             json.dumps(inputs), json.dumps(ctx_to_dict(child_ctx)),
             spec.retry.max_attempts if spec.retry else 3,
-            _spec_assignee(spec),
-            now, now, now,
+            now, _spec_assignee(spec), now, now,
         ),
     )
     await cursor.execute(
@@ -382,16 +382,14 @@ _ALLOWED_NODES = (
 _ALLOWED_NAMES = {"inputs", "steps", "True", "False", "None"}
 
 
-def eval_guard(expr: str, run_inputs: dict, step_runs: list[dict], _registry=None) -> bool:
-    """Evaluate an `if:` guard. `${{ a.b }}` refs substitute before parse."""
-    substituted = _REF_INLINE.sub(
-        lambda m: repr(_lookup(m.group(1), {
-            "inputs": run_inputs,
-            "steps": {s["step_id"]: s["outputs"] or {} for s in step_runs},
-        })),
-        expr,
-    )
+def validate_guard(expr: str) -> None:
+    """Syntax + whitelist check for an `if:` guard (used at load time).
 
+    Raises TypeError on invalid/disallowed expressions. Evaluation is a
+    separate step (`eval_guard`) since refs resolve at run time.
+    """
+    # substitute refs with a placeholder literal — only shape is validated.
+    substituted = _REF_INLINE.sub("1", expr)
     try:
         tree = ast.parse(substituted, mode="eval")
     except SyntaxError as exc:
@@ -403,6 +401,19 @@ def eval_guard(expr: str, run_inputs: dict, step_runs: list[dict], _registry=Non
             raise TypeError(f"guard '{expr}': disallowed name {node.id!r}")
         if isinstance(node, ast.Attribute | ast.Call):
             raise TypeError(f"guard '{expr}': attribute access/calls not allowed")
+
+
+def eval_guard(expr: str, run_inputs: dict, step_runs: list[dict], _registry=None) -> bool:
+    """Evaluate an `if:` guard. `${{ a.b }}` refs substitute before parse."""
+    validate_guard(expr)
+    substituted = _REF_INLINE.sub(
+        lambda m: repr(_lookup(m.group(1), {
+            "inputs": run_inputs,
+            "steps": {s["step_id"]: s["outputs"] or {} for s in step_runs},
+        })),
+        expr,
+    )
+    tree = ast.parse(substituted, mode="eval")
     scope = {
         "inputs": run_inputs,
         "steps": {s["step_id"]: s["outputs"] or {} for s in step_runs},

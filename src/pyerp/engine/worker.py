@@ -80,7 +80,7 @@ async def dispatch(job_id: str, step_run_id: str | None = None) -> None:
         if row is None:
             log.error("job %s not found in hd_flow_jobs", job_id)
             return
-        _, type_name, status, payload_json, ctx_json = row
+        _, type_name, status, payload_json, ctx_json, _ck = row
         # Re-claim of an already-terminal job (e.g. double execution):
         # mark kernel-side as done — but still advance the workflow run if
         # this job feeds a step (the first attempt may have died mid-advance).
@@ -124,6 +124,13 @@ async def dispatch(job_id: str, step_run_id: str | None = None) -> None:
             return
 
         await _set_status(conn, job_id, JobStatus.RUNNING, increment_attempts=True)
+
+        # Key-serialized execution (T10): jobs sharing a resolved
+        # concurrency_key never run in parallel. SKIP LOCKED in the claim
+        # query already serializes claim; this advisory lock covers the run.
+        lock = _KeyLock(conn, _ck) if _ck else _NullLock()
+        await lock.acquire()
+
         handler = spec.handler()  # type: ignore[misc]
         try:
             result: JobResult = await handler.run(ctx, payload)
@@ -131,7 +138,9 @@ async def dispatch(job_id: str, step_run_id: str | None = None) -> None:
             tb = traceback.format_exc(limit=10)
             await _finish(conn, job_id, JobStatus.FAILED, error=str(exc), trace=tb)
             jlog.error("handler failed: %s", exc)
+            await lock.release()
             raise
+        await lock.release()
 
         status = JobStatus.DONE if result.status == "done" else JobStatus.FAILED
         if result.outputs.get("_bulk_parent"):
@@ -173,6 +182,7 @@ def run_worker(
     *,
     queues: list[chancy.Queue] | None = None,
     prefix: str = "pyerp_",
+    event_bus=None,
 ) -> None:
     """Run a kernel worker claiming pyerp jobs. Blocks until SIGINT/SIGTERM.
 
@@ -198,7 +208,12 @@ def run_worker(
                 await client.declare(q, upsert=True)
             worker = chancy.Worker(client)
             await worker.start()
-            await worker.wait_for_shutdown()
+            tasks = [worker.wait_for_shutdown()]
+            if event_bus is not None:
+                from .events import dispatch_events
+
+                tasks.append(dispatch_events(dsn, event_bus))
+            await asyncio.gather(*tasks)
 
     asyncio.run(_run())
 
@@ -212,7 +227,8 @@ class _JobFailedError(RuntimeError):
 
 async def _load_job(conn, job_id: str):
     cur = await conn.execute(
-        "SELECT id, type, status, payload, context FROM hd_flow_jobs WHERE id=%s",
+        "SELECT id, type, status, payload, context, concurrency_key"
+        " FROM hd_flow_jobs WHERE id=%s",
         (job_id,),
     )
     row = await cur.fetchone()
@@ -228,7 +244,7 @@ async def _load_job(conn, job_id: str):
         import json
 
         context = json.loads(context)
-    return (row[0], row[1], row[2], payload, context)
+    return (row[0], row[1], row[2], payload, context, row[5])
 
 
 async def _set_status(
@@ -260,6 +276,30 @@ async def _finish(
          (error or "") + (("\n" + trace) if trace else "") or None, job_id),
     )
     await conn.commit()
+
+
+class _KeyLock:
+    """pg advisory session lock on a concurrency key."""
+
+    def __init__(self, conn, key: str) -> None:
+        self._conn = conn
+        self._key = key
+
+    async def acquire(self) -> None:
+        await self._conn.execute("SELECT pg_advisory_lock(hashtext(%s))", (self._key,))
+
+    async def release(self) -> None:
+        await self._conn.execute(
+            "SELECT pg_advisory_unlock(hashtext(%s))", (self._key,)
+        )
+
+
+class _NullLock:
+    async def acquire(self) -> None:
+        return None
+
+    async def release(self) -> None:
+        return None
 
 
 def _job_logger(job_id: str, type_name: str, correlation_id: str) -> logging.LoggerAdapter:

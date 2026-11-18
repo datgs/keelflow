@@ -147,7 +147,9 @@ class JobBuilder:
                 kwargs={"job_id": str(job_id)},
                 max_attempts=spec.retry.max_attempts,
                 scheduled_at=self._run_at or now,
-                unique_key=self._concurrency_key,
+                # NOTE: concurrency_key is NOT mapped to unique_key — it
+                # serializes *execution* (advisory lock in dispatch), not
+                # enqueue-time dedup.
                 meta={"job_id": str(job_id), "type": self._type},
             ),
         )

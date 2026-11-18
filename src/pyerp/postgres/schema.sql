@@ -106,6 +106,15 @@ CREATE INDEX IF NOT EXISTS ix_outbox_pending ON hd_flow_outbox (id)
     WHERE status = 'pending';
 
 
+-- Per-subscriber delivery log: at-least-once dedup across crashes.
+CREATE TABLE IF NOT EXISTS hd_flow_outbox_deliveries (
+    outbox_id  BIGINT NOT NULL REFERENCES hd_flow_outbox(id) ON DELETE CASCADE,
+    subscriber TEXT NOT NULL,
+    delivered_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    PRIMARY KEY (outbox_id, subscriber)
+);
+
+
 CREATE TABLE IF NOT EXISTS hd_flow_audit (
     id           BIGSERIAL PRIMARY KEY,
     occurred_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
@@ -119,6 +128,18 @@ CREATE TABLE IF NOT EXISTS hd_flow_audit (
 );
 CREATE INDEX IF NOT EXISTS ix_audit_entity ON hd_flow_audit (entity_type, entity_id);
 CREATE INDEX IF NOT EXISTS ix_audit_corr ON hd_flow_audit (correlation_id);
+
+
+-- Entity lifecycle state for the state-machine service (T12). Domain
+-- entities may keep their own status column; this is the engine's record.
+CREATE TABLE IF NOT EXISTS hd_flow_entity_state (
+    entity_type TEXT NOT NULL,
+    entity_id   TEXT NOT NULL,
+    state       TEXT NOT NULL,
+    version     INT  NOT NULL DEFAULT 1,
+    updated_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
+    PRIMARY KEY (entity_type, entity_id)
+);
 
 
 CREATE TABLE IF NOT EXISTS hd_flow_dlq (

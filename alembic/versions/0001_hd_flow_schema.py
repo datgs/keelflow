@@ -22,8 +22,8 @@ def downgrade() -> None:
     op.execute(
         """
         DROP TABLE IF EXISTS
-            hd_flow_dlq, hd_flow_audit, hd_flow_outbox,
-            hd_flow_row_status, hd_flow_chunks,
+            hd_flow_dlq, hd_flow_audit, hd_flow_outbox_deliveries,
+            hd_flow_outbox, hd_flow_row_status, hd_flow_chunks,
             hd_flow_step_runs, hd_flow_workflow_runs, hd_flow_jobs
         CASCADE
         """
