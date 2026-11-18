@@ -11,7 +11,6 @@ from .actor import Actor
 from .context import JobContext
 from .specs import JobResult, JobStatus
 
-
 # ── Common reference / record types ────────────────────────────────────
 
 
@@ -67,10 +66,12 @@ class Job:
     payload: dict[str, Any]
     context: JobContext
     attempts: int = 0
+    max_attempts: int = 3
     run_at: datetime | None = None
     claimed_by: str | None = None
     lease_until: datetime | None = None
     concurrency_key: str | None = None
+    assignee: str | None = None
     parent_job_id: str | None = None
     result: dict[str, Any] | None = None
     created_at: datetime | None = None
@@ -125,9 +126,16 @@ class RunFilter:
 
 
 class Transaction(Protocol):
-    """A caller-owned transaction/connection passed to engine writes."""
+    """A caller-owned transaction/connection passed to engine writes.
 
-    ...
+    Concrete: a psycopg3 ``AsyncConnection`` or ``AsyncCursor``. Engine
+    writes participate in the caller's transaction — commit makes intent
+    visible, rollback discards it.
+    """
+
+    async def execute(self, query: str, params: tuple | None = None): ...
+
+    def cursor(self, *args: Any, **kwargs: Any): ...
 
 
 # ── Service contracts ──────────────────────────────────────────────────
@@ -136,11 +144,11 @@ class Transaction(Protocol):
 class JobBuilder(Protocol):
     """Fluent factory. `.context()` is REQUIRED — no enqueue without it."""
 
-    def payload(self, p: BaseModel) -> "JobBuilder": ...
-    def context(self, ctx: JobContext) -> "JobBuilder": ...
-    def run_at(self, ts: datetime) -> "JobBuilder": ...
-    def concurrency_key(self, key: str) -> "JobBuilder": ...
-    def assignee(self, actor: Actor | str) -> "JobBuilder": ...
+    def payload(self, p: BaseModel) -> JobBuilder: ...
+    def context(self, ctx: JobContext) -> JobBuilder: ...
+    def run_at(self, ts: datetime) -> JobBuilder: ...
+    def concurrency_key(self, key: str) -> JobBuilder: ...
+    def assignee(self, actor: Actor | str) -> JobBuilder: ...
     async def enqueue(self, tx: Transaction) -> JobRef: ...
 
 
@@ -152,11 +160,11 @@ class JobService(Protocol):
     async def cancel(self, job_id: str, ctx: JobContext) -> None: ...
 
     # read (monitoring / Inbox)
-    async def list(self, f: JobFilter) -> Page[Job]: ...
+    async def list(self, f: JobFilter) -> Page[Job]: ...  # type: ignore[valid-type]
     async def get(self, job_id: str) -> Job: ...
 
     # worker protocol
-    async def claim_next(self, worker_id: str, types: list[str]) -> Job | None: ...
+    async def claim_next(self, worker_id: str, types: list[str]) -> Job | None: ...  # type: ignore[valid-type]
     async def heartbeat(self, job_id: str, worker_id: str) -> None: ...
     async def complete(self, job_id: str, result: JobResult) -> None: ...
 

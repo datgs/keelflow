@@ -25,20 +25,20 @@ class Actor:
 
     type: ActorType
     id: str
-    via: "Actor | None" = None
+    via: Actor | None = None
 
     @classmethod
-    def user(cls, user_id: str) -> "Actor":
+    def user(cls, user_id: str) -> Actor:
         return cls(ActorType.USER, user_id)
 
     @classmethod
-    def service(cls, identity_id: str) -> "Actor":
+    def service(cls, identity_id: str) -> Actor:
         return cls(ActorType.SERVICE, identity_id)
 
     @classmethod
-    def system(cls, name: str = "engine") -> "Actor":
+    def system(cls, name: str = "engine") -> Actor:
         return cls(ActorType.SYSTEM, name)
 
     @classmethod
-    def job(cls, job_id: str, via: "Actor") -> "Actor":
+    def job(cls, job_id: str, via: Actor) -> Actor:
         return cls(ActorType.JOB, job_id, via)

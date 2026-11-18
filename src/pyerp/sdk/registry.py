@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from typing import Protocol
 
-from .specs import JobTypeSpec, WorkflowDefinition, StateMachineDefinition
+from .specs import JobTypeSpec, StateMachineDefinition, WorkflowDefinition
 
 
 class Registry(Protocol):

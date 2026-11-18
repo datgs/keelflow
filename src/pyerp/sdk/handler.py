@@ -23,8 +23,8 @@ class JobHandler(ABC):
 
     async def heartbeat(self, ctx: JobContext) -> None:
         """Long-running jobs renew their lease. Default: no-op."""
-        return None
+        return
 
     async def on_cancel(self, ctx: JobContext) -> None:
         """Cooperative cancel hook. Default: no-op."""
-        return None
+        return

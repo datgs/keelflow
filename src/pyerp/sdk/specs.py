@@ -64,9 +64,9 @@ class JobTypeSpec:
     """Registered contract for one job type."""
 
     type: str                                    # "domain.action@vN"
-    input_schema: type[BaseModel]
-    output_schema: type[BaseModel] | None = None
-    handler: type[Any] = None                    # subclass of JobHandler
+    input_schema: type[BaseModel]  # type: ignore[valid-type]
+    output_schema: type[BaseModel] | None = None  # type: ignore[valid-type]
+    handler: type[Any] = None  # type: ignore[valid-type]  # subclass of JobHandler
     retry: RetryPolicy = field(default_factory=RetryPolicy)
     concurrency: ConcurrencySpec = field(default_factory=ConcurrencySpec)
     schedule: CronSpec | None = None

@@ -37,6 +37,7 @@ Build `pyerp`, a reusable Python library providing a durable job/workflow engine
 | T17 | Integration/acceptance suite: end-to-end demo app (order→review→approve→fulfill) exercising DAG, human task, bulk, SM, outbox, audit; benchmark report vs targets | All | `tests/e2e/` + `examples/` | all 8 must-prove items from design brief pass |
 
 ## Execution Guidance
+- Status: T0, T1, T3 done; **T2 done 2026-11-18 — Chancy adopted** (`docs/decisions/0001-kernel-chancy.md`, benchmarks in `.spikes/kernel/`). Next: T4 → T5 → T7 → T8.
 - Critical path: T0 → T1 → T3 → T4 → T5 → T7 → T8 → T17 (and T13 for outbox completeness).
 - Safe parallel work: T2 (spike) with T1/T3; T9 (compiler) with T7; T14/T15/T16 with T10–T12; T11 with T8/T10.
 - Shared hubs: `pyerp/sdk/` types (T1) — everything depends on it; DB schema (T3) — T4/T13/T15 build on it; `jobs` table + worker (T5) — human/bulk/scheduler all reuse.

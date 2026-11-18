@@ -9,6 +9,7 @@ authors = [
 requires-python = ">=3.11"
 dependencies = [
     "alembic>=1.20.1",
+    "chancy>=0.26.0",
     "psycopg[binary]>=3.3.9",
     "pydantic>=2.14.3",
     "pyyaml>=6.0.3",
@@ -24,4 +25,20 @@ dev = [
     "pytest>=9.2.0",
     "pytest-asyncio>=1.5.0",
     "ruff>=0.17.5",
+]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+
+[tool.mypy]
+python_version = "3.11"
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+module = "chancy.*"
+ignore_missing_imports = true
+
+[tool.uv.workspace]
+members = [
+    ".spikes/kernel",
 ]
