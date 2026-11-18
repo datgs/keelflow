@@ -1,0 +1,22 @@
+"""Registry — maps names to specs (job types, workflows, state machines)."""
+from __future__ import annotations
+
+from typing import Protocol
+
+from .specs import JobTypeSpec, WorkflowDefinition, StateMachineDefinition
+
+
+class Registry(Protocol):
+    """Registry of job types, workflows, and state machines.
+
+    Implementations raise KeyError on unknown names. Unknown permissions
+    or schema references must fail at load time, not at runtime.
+    """
+
+    def register_job_type(self, spec: JobTypeSpec) -> None: ...
+    def register_workflow(self, defn: WorkflowDefinition) -> None: ...
+    def register_state_machine(self, defn: StateMachineDefinition) -> None: ...
+
+    def job_type(self, name: str) -> JobTypeSpec: ...
+    def workflow(self, name: str) -> WorkflowDefinition: ...
+    def state_machine(self, name: str) -> StateMachineDefinition: ...
