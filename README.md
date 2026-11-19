@@ -1,5 +1,10 @@
 # keelflow
 
+[![PyPI](https://img.shields.io/pypi/v/keelflow)](https://pypi.org/project/keelflow/)
+[![Python](https://img.shields.io/pypi/pyversions/keelflow)](https://pypi.org/project/keelflow/)
+[![CI](https://github.com/datgs/keelflow/actions/workflows/ci.yml/badge.svg)](https://github.com/datgs/keelflow/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
+
 The keel of your business flows — a reusable **Postgres-native durable
 workflow engine** for Python. Reference implementation of the
 language-agnostic **keelflow spec** (`spec/`).
@@ -98,23 +103,64 @@ permissions, and transactions.
   (upstream issue); run workers under a restart supervisor — systemd,
   Docker restart policy, or a process manager.
 
-## What it gives you
+## Feature matrix
 
-- **Durable jobs** — transactional enqueue: job + outbox row commit with
-  your data change, or nothing commits.
-- **DAG workflows** — `needs`/`if:` guards/`${{ outputs }}` refs, YAML or
-  code definitions, human steps park a run until a person completes them.
-- **Bulk imports** — chunk + per-row status, `atomic='chunk'|'row'`,
-  kill-resume of pending rows only, error queue.
-- **Human tasks** — inbox (`user:`/`role:`), first-claim-wins, escalation.
-- **Entity state machines** — guarded transitions, `creates_job` /
-  `triggers_workflow` hooks, `allowed_actions`.
-- **Outbox events, audit, RBAC hooks, cron scheduling,
-  key-serialized execution** (`concurrency_key`), monitoring data APIs,
-  minimal SuperAdmin UI, read-only MCP tools.
+| Capability | Status | Notes |
+|---|---|---|
+| Durable jobs, transactional enqueue | ✅ | job + outbox row commit with your data, or nothing |
+| Payload schema validation | ✅ | pydantic, at enqueue **and** dispatch |
+| Retry with backoff | ✅ | per job type (`max_attempts`), kernel-tracked |
+| DAG workflows (`needs`, `if:`, `${{ }}` refs) | ✅ | parallel ready steps, code or YAML defs |
+| Human steps in a DAG | ✅ | `human.*` types park the run (`blocked`) |
+| Business vs technical failure | ✅ | `decision=reject` → `rejected`; retry exhaustion → `failed` |
+| Workflow triggers (SM → run → SM) | ✅ | `on_done/on_rejected/on_failed`, exactly-once callback |
+| Resume failed/rejected runs | ✅ | `resume_run` in-place, `resume_step` |
+| Entity state machines | ✅ | guards, `creates_job`, `allowed_actions`, row-lock serialization |
+| Human task inbox | ✅ | `user:`/`role:` assignees, first-claim-wins, escalation |
+| Bulk chunk/row processing | ✅ | `atomic='chunk'\|'row'`, kill-resume pending rows, error queue |
+| Bulk job as DAG step | ✅ | fan-in advances the run atomically |
+| Transactional outbox events | ✅ | per-subscriber dedup, at-least-once |
+| `concurrency_key` serialized execution | ✅ | pg advisory locks |
+| Cron scheduling | ✅ | window + overlap policies |
+| Audit trail | ✅ | append-only, `via` actor chains |
+| Monitoring APIs / SuperAdmin UI | ✅ | data APIs; SuperAdmin = no-auth, localhost |
+| Read-only MCP tools | ✅ | agent-inspectable jobs/runs/audit |
+| YAML definition compiler | ✅ | validated at load: cycles, unknown types, guards |
+| Language-agnostic spec | ✅ | `spec/` + conformance checklist |
+| Single-TX dispatch (`ctx.tx`) | ✅ | handler writes + finish + advance in one commit |
 
 Kernel lifecycle (claim/retry/schedule) rides on **Chancy**; everything
 differentiating is built in-house.
+
+## Roadmap
+
+**0.1.x (alpha — now):** API stabilization; the surface above is
+feature-complete for the spec. Expect minor breaking changes between
+alphas — pin `keelflow~=0.1.0a1`.
+
+**0.2** — hardening & ops
+- [ ] Admin UI auth (token or proxy-ready session)
+- [ ] `enqueue_many` batch API (5–10× enqueue throughput, same TX)
+- [ ] DLQ requeue UI + prune/archive policies
+- [ ] Per-job-type concurrency limits; queue metrics in SuperAdmin
+
+**0.3** — growth & interop
+- [ ] Second-language conformance harness (spec test suite as JSON cases)
+- [ ] LISTEN/NOTIFY wakeups for lower claim latency
+- [ ] Cron timezone DST audit + per-type rate limits
+
+**1.0** — stability promise
+- [ ] Frozen `JobTypeSpec`/`StepSpec`/`ctx` public API + deprecation policy
+- [ ] Migration-tested upgrades (alembic path CI)
+- [ ] Published throughput/latency benchmark suite
+
+**Deferred (intentionally, not forgotten)**
+- [ ] Message-broker delivery adapter — `dispatch(job_id)` seam already
+      exists; build when a real >thousands-jobs/s use case demands it
+      ([why](docs/guide.md))
+- [ ] Multi-backend storage — spec is portable; a second engine
+      implementation lands when someone ports it
+- [ ] Chancy 0.27+ kernel upgrade (breaking plugin API upstream)
 
 ## Quickstart
 
