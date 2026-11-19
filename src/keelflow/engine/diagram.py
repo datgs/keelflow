@@ -33,11 +33,11 @@ _WF_STYLE = {
     "blocked": ":::kfBlocked",
 }
 _WF_CLASSDEF = (
-    "classDef kfDone fill:#d9ecd9,color:#205f2a;\n"
-    "classDef kfActive fill:#d9e6f7,color:#1a4e8a;\n"
-    "classDef kfBlocked fill:#fdf0d5,color:#8a6410;\n"
-    "classDef kfFailed fill:#f8d7d5,color:#8a2020;\n"
-    "classDef kfSkipped fill:#eee,color:#a89f92,stroke-dasharray:3 3;\n"
+    "classDef kfDone fill:#1d3a24,color:#b8e6c2;\n"
+    "classDef kfActive fill:#1c3252,color:#bcd6f5;\n"
+    "classDef kfBlocked fill:#3a321a,color:#f0dcae;\n"
+    "classDef kfFailed fill:#3a1c1c,color:#f5bcbc;\n"
+    "classDef kfSkipped fill:#262626,color:#8a8a8a,stroke-dasharray:3 3;\n"
 )
 
 
@@ -118,8 +118,8 @@ def state_machine_mermaid(
             style = "  %% dimmed (not allowed for actor)"
         lines.append(f"  {t.from_state} --> {t.to_state} : {label}{style}")
     if current:
-        lines.append("  classDef kfCur fill:#fdf0d5,stroke:#8a6410,"
-                     "stroke-width:2px;")
+        lines.append(f"  classDef kfCur fill:#3a321a,stroke:#f0dcae,"
+                     "stroke-width:3px;")
         lines.append(f"  class {current} kfCur")
     return "\n".join(lines)
 
