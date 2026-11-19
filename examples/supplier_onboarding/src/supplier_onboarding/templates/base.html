@@ -51,7 +51,15 @@
 </style>
 <script type="module">
 import mermaid from "https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.esm.min.mjs";
-mermaid.initialize({startOnLoad:true, theme:"dark"});
+mermaid.initialize({startOnLoad:true, theme:"dark",
+  themeCSS:`
+    .edgeLabel{background:#232c36;padding:5px 8px;border-radius:6px;}
+    .edgeLabel p,.edgeLabel span,.edgeLabel rect{background:#232c36 !important;}
+    .edgeLabel .label{color:#e6e9f0 !important;}
+    .flowchart-link{stroke:#6b7684 !important;}
+    .edgeLabel .edgeLabel{color:#e6e9f0;}
+    foreignObject{overflow:visible;}
+  `});
 </script>
 </head>
 <body>
