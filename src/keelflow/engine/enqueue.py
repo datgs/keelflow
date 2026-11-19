@@ -35,7 +35,7 @@ from .context import ctx_to_dict
 
 #: Kernel job func that dispatches into our handler registry. The worker (T5)
 #: registers this name; kwargs carry the hd_flow_jobs id.
-DISPATCH_FUNC = "pyerp.engine.worker.dispatch"
+DISPATCH_FUNC = "keelflow.engine.worker.dispatch"
 
 DEFAULT_QUEUE = "default"
 

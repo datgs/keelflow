@@ -3,7 +3,7 @@
 Run against a local Postgres (docker run -e POSTGRES_PASSWORD=postgres
 -p 5544:5432 postgres:16-alpine) then:
 
-    PYERP_DSN=postgresql://postgres:postgres@localhost:5544/pyerp \\
+    KEELFLOW_DSN=postgresql://postgres:postgres@localhost:5544/keelflow \\
         python examples/order_flow.py
 """
 from __future__ import annotations
@@ -15,16 +15,16 @@ import psycopg
 from chancy import Chancy, Queue, Worker
 from pydantic import BaseModel
 
-from pyerp.engine import worker as worker_mod
-from pyerp.engine.bulk import BulkJobHandler, BulkJobPayload
-from pyerp.engine.bulk import register as register_bulk
-from pyerp.engine.enqueue import JobService
-from pyerp.engine.human import HumanTaskService
-from pyerp.engine.registry import InMemoryRegistry
-from pyerp.engine.statemachine import EngineStateMachineService
-from pyerp.engine.workflow import WorkflowService
-from pyerp.postgres.schema import apply_async
-from pyerp.sdk import (
+from keelflow.engine import worker as worker_mod
+from keelflow.engine.bulk import BulkJobHandler, BulkJobPayload
+from keelflow.engine.bulk import register as register_bulk
+from keelflow.engine.enqueue import JobService
+from keelflow.engine.human import HumanTaskService
+from keelflow.engine.registry import InMemoryRegistry
+from keelflow.engine.statemachine import EngineStateMachineService
+from keelflow.engine.workflow import WorkflowService
+from keelflow.postgres.schema import apply_async
+from keelflow.sdk import (
     Actor,
     EntityRef,
     JobContext,
@@ -38,7 +38,7 @@ from pyerp.sdk import (
 )
 
 DSN = os.environ.get(
-    "PYERP_DSN", "postgresql://postgres:postgres@localhost:5544/pyerp"
+    "KEELFLOW_DSN", "postgresql://postgres:postgres@localhost:5544/keelflow"
 )
 
 
@@ -61,7 +61,7 @@ async def main() -> None:
     conn = await psycopg.AsyncConnection.connect(DSN, autocommit=True)
     await apply_async(conn)
 
-    async with Chancy(DSN, prefix="pyerp_") as kernel:
+    async with Chancy(DSN, prefix="keelflow_") as kernel:
         await kernel.migrate()
         await kernel.declare(
             Queue("default", concurrency=8, executor=Chancy.Executor.Async,

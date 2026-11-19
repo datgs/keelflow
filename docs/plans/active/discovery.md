@@ -5,10 +5,10 @@ superseded_by: []
 related_code: []
 ---
 
-# Discovery: pyerp — reusable Postgres-backed workflow engine
+# Discovery: keelflow — reusable Postgres-backed workflow engine
 
 ## Outcome and Scope
-- Desired behavior: a reusable Python library (`pyerp`) providing a durable job/workflow engine: DAG workflows, bulk chunk+row processing, human-in-the-loop tasks, entity state machines, transactional outbox, RBAC hooks, audit, monitoring data APIs.
+- Desired behavior: a reusable Python library (`keelflow`) providing a durable job/workflow engine: DAG workflows, bulk chunk+row processing, human-in-the-loop tasks, entity state machines, transactional outbox, RBAC hooks, audit, monitoring data APIs.
 - Users: engineering teams building internal business applications (internal ERP and other projects).
 - Non-goals: no domain logic (inventory, invoices, RBAC rules, host screens), no UI product, no standalone service, no external broker, no dynamic UI workflow designer.
 

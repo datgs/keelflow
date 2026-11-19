@@ -11,12 +11,12 @@ import pytest_asyncio
 from chancy import Chancy, Queue, Worker
 from pydantic import BaseModel
 
-from pyerp.engine import worker as worker_mod
-from pyerp.engine.enqueue import JobService
-from pyerp.engine.registry import InMemoryRegistry
-from pyerp.engine.scheduler import next_fire, tick
-from pyerp.postgres.schema import apply_async
-from pyerp.sdk import (
+from keelflow.engine import worker as worker_mod
+from keelflow.engine.enqueue import JobService
+from keelflow.engine.registry import InMemoryRegistry
+from keelflow.engine.scheduler import next_fire, tick
+from keelflow.postgres.schema import apply_async
+from keelflow.sdk import (
     Actor,
     ConcurrencySpec,
     CronSpec,
@@ -27,9 +27,9 @@ from pyerp.sdk import (
 )
 
 DSN = os.environ.get(
-    "PYERP_TEST_DSN", "postgresql://postgres:postgres@localhost:5544/pyerp"
+    "KEELFLOW_TEST_DSN", "postgresql://postgres:postgres@localhost:5544/keelflow"
 )
-CHANCY_PREFIX = "pyerp_test_"
+CHANCY_PREFIX = "keelflow_test_"
 
 ACTIVE: dict[str, int] = {}
 MAX_SEEN: dict[str, int] = {}

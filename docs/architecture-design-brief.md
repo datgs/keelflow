@@ -1,16 +1,22 @@
-# Architecture Design Brief: pyerp
+# Architecture Design Brief: keelflow
 
 **Date:** 2026-11-17 \
-**Project:** pyerp — reusable workflow engine
+**Project:** keelflow — reusable workflow engine
 **Maintainer:** keelflow maintainers
 **Status:** Draft for technical review \
 **Related:** `docs/plans/active/execution-plan.md`
+
+> **Naming note (2026-11-19):** the engine originally called `hd-flow`
+> (and scaffolded as `pyerp`) is published as **`keelflow`** — the
+> language-agnostic contract lives in `spec/` (“hd-flow spec”).
+> Mentions of `hd-flow`/`pyerp` elsewhere in this brief refer to the
+> same engine.
 
 ---
 
 ## 1. Purpose
 
-This brief records the agreed technical direction for the pyerp platform foundations: the workflow/job engine, bulk processing, module isolation, model extension, authentication, authorization, and audit. It is the reference for the prototype in Phase 1 and for the technical design review gate.
+This brief records the agreed technical direction for the keelflow platform foundations: the workflow/job engine, bulk processing, module isolation, model extension, authentication, authorization, and audit. It is the reference for the prototype in Phase 1 and for the technical design review gate.
 
 ### 1.1 The unified execution model
 

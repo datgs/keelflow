@@ -12,7 +12,7 @@ import sys
 import psycopg
 
 DSN = os.environ.get(
-    "BENCH_DSN", "postgresql://postgres:postgres@localhost:5544/pyerp"
+    "BENCH_DSN", "postgresql://postgres:postgres@localhost:5544/keelflow"
 )
 
 SCHEMA_SQL = """

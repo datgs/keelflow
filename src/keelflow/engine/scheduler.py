@@ -27,7 +27,7 @@ from croniter import croniter
 
 from ..sdk import Actor, JobContext, Registry
 
-log = logging.getLogger("pyerp.scheduler")
+log = logging.getLogger("keelflow.scheduler")
 
 
 def next_fire(spec_cron, *, after: datetime | None = None) -> datetime:

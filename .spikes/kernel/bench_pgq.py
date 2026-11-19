@@ -32,7 +32,7 @@ from pgqueuer.domain.types import QueueExecutionMode
 from pgqueuer.models import Job
 
 DSN = os.environ.get(
-    "BENCH_DSN", "postgresql://postgres:postgres@localhost:5544/pyerp"
+    "BENCH_DSN", "postgresql://postgres:postgres@localhost:5544/keelflow"
 )
 
 

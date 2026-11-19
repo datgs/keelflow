@@ -1,3 +1,3 @@
 def test_package_imports():
-    import pyerp
-    assert pyerp.__version__ == "0.1.0"
+    import keelflow
+    assert keelflow.__version__ == "0.1.0"

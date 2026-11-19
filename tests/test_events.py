@@ -1,6 +1,6 @@
 """T13 contract tests: EventBus + outbox dispatcher.
 
-Requires Postgres at PYERP_TEST_DSN.
+Requires Postgres at KEELFLOW_TEST_DSN.
 """
 from __future__ import annotations
 
@@ -10,12 +10,12 @@ import psycopg
 import pytest
 import pytest_asyncio
 
-from pyerp.engine.events import OutboxEventBus, dispatch_once
-from pyerp.postgres.schema import apply_async
-from pyerp.sdk import DomainEvent
+from keelflow.engine.events import OutboxEventBus, dispatch_once
+from keelflow.postgres.schema import apply_async
+from keelflow.sdk import DomainEvent
 
 DSN = os.environ.get(
-    "PYERP_TEST_DSN", "postgresql://postgres:postgres@localhost:5544/pyerp"
+    "KEELFLOW_TEST_DSN", "postgresql://postgres:postgres@localhost:5544/keelflow"
 )
 
 RECEIVED: list[tuple[str, dict]] = []

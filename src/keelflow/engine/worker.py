@@ -1,7 +1,7 @@
 """Worker runtime (T5).
 
-The chancy kernel claims `pyerp.engine.worker.dispatch` for every enqueued
-pyerp job (`DISPATCH_FUNC`). Dispatch resolves the handler from the
+The chancy kernel claims `keelflow.engine.worker.dispatch` for every enqueued
+keelflow job (`DISPATCH_FUNC`). Dispatch resolves the handler from the
 configured registry, re-validates the payload at execution time (jobs may
 have been written by older code), rebuilds the JobContext, and writes the
 result back to `hd_flow_jobs`.
@@ -11,7 +11,7 @@ re-queued by chancy's Recovery plugin and `dispatch` runs again —
 handlers must be idempotent.
 
 Configuration (process-global, set by `configure` before the worker starts):
-    PYERP_DSN, PYERP_REGISTRY   — env fallbacks used by `dispatch`
+    KEELFLOW_DSN, KEELFLOW_REGISTRY   — env fallbacks used by `dispatch`
 """
 from __future__ import annotations
 
@@ -27,10 +27,10 @@ from pydantic import ValidationError
 from ..sdk import JobResult, JobStatus, Registry
 from .context import ctx_from_dict
 
-log = logging.getLogger("pyerp.worker")
+log = logging.getLogger("keelflow.worker")
 
-DSN_ENV = "PYERP_DSN"
-REGISTRY_ENV = "PYERP_REGISTRY"  # dotted path, e.g. "myapp.jobs:registry"
+DSN_ENV = "KEELFLOW_DSN"
+REGISTRY_ENV = "KEELFLOW_REGISTRY"  # dotted path, e.g. "myapp.jobs:registry"
 
 _REGISTRY: Registry | None = None
 _kernel_client = None  # chancy.Chancy, set by configure()/run_worker
@@ -181,12 +181,12 @@ def run_worker(
     dsn: str | None = None,
     *,
     queues: list[chancy.Queue] | None = None,
-    prefix: str = "pyerp_",
+    prefix: str = "keelflow_",
     event_bus=None,
 ) -> None:
-    """Run a kernel worker claiming pyerp jobs. Blocks until SIGINT/SIGTERM.
+    """Run a kernel worker claiming keelflow jobs. Blocks until SIGINT/SIGTERM.
 
-    Equivalent of `python -m pyerp.engine.worker`.
+    Equivalent of `python -m keelflow.engine.worker`.
     """
     import asyncio
 

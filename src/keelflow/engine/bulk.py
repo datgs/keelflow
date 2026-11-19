@@ -45,7 +45,7 @@ from ..sdk.handler import JobHandler
 from . import worker as _worker
 from .worker import DSN_ENV, _get_registry
 
-log = logging.getLogger("pyerp.bulk")
+log = logging.getLogger("keelflow.bulk")
 
 CHUNK_TYPE = "bulk.chunk@v1"
 PARENT_HOLD = "_bulk_parent"
@@ -168,7 +168,7 @@ class ChunkJobHandler(JobHandler):
                     "UPDATE hd_flow_chunks SET status='running',"
                     " claimed_by=%s, lease_until=now() + interval '15 minutes',"
                     " attempts=attempts+1, updated_at=now() WHERE id=%s",
-                    (os.environ.get("PYERP_WORKER_ID", "worker-0"),
+                    (os.environ.get("KEELFLOW_WORKER_ID", "worker-0"),
                      payload.chunk_id),
                 )
                 await cur.execute(

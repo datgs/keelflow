@@ -38,7 +38,7 @@ from ..sdk import (
 from .context import ctx_to_dict
 from .enqueue import DEFAULT_QUEUE, DISPATCH_FUNC, _as_cursor
 
-log = logging.getLogger("pyerp.workflow")
+log = logging.getLogger("keelflow.workflow")
 
 _REF = re.compile(r"^\s*\$\{\{\s*(.+?)\s*\}\}\s*$")
 _REF_INLINE = re.compile(r"\$\{\{\s*(.+?)\s*\}\}")

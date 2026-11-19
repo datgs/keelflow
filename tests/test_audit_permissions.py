@@ -7,13 +7,13 @@ import psycopg
 import pytest
 import pytest_asyncio
 
-from pyerp.engine.audit import PostgresAuditService
-from pyerp.engine.permissions import DefaultPermissionService
-from pyerp.postgres.schema import apply_async
-from pyerp.sdk import Actor, AuditEvent, EntityRef, JobContext
+from keelflow.engine.audit import PostgresAuditService
+from keelflow.engine.permissions import DefaultPermissionService
+from keelflow.postgres.schema import apply_async
+from keelflow.sdk import Actor, AuditEvent, EntityRef, JobContext
 
 DSN = os.environ.get(
-    "PYERP_TEST_DSN", "postgresql://postgres:postgres@localhost:5544/pyerp"
+    "KEELFLOW_TEST_DSN", "postgresql://postgres:postgres@localhost:5544/keelflow"
 )
 
 

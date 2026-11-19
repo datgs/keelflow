@@ -13,18 +13,18 @@ import time
 import psycopg
 from chancy import Chancy, Queue, Worker
 
-from pyerp.engine import worker as worker_mod
-from pyerp.engine.bulk import BulkJobHandler, BulkJobPayload
-from pyerp.engine.bulk import register as register_bulk
-from pyerp.engine.enqueue import JobService
-from pyerp.engine.registry import InMemoryRegistry
-from pyerp.postgres.schema import apply_async
-from pyerp.sdk import Actor, JobContext, JobTypeSpec
+from keelflow.engine import worker as worker_mod
+from keelflow.engine.bulk import BulkJobHandler, BulkJobPayload
+from keelflow.engine.bulk import register as register_bulk
+from keelflow.engine.enqueue import JobService
+from keelflow.engine.registry import InMemoryRegistry
+from keelflow.postgres.schema import apply_async
+from keelflow.sdk import Actor, JobContext, JobTypeSpec
 
 DSN = os.environ.get(
-    "PYERP_DSN", "postgresql://postgres:postgres@localhost:5544/pyerp"
+    "KEELFLOW_DSN", "postgresql://postgres:postgres@localhost:5544/keelflow"
 )
-PREFIX = "pyerp_bench_"
+PREFIX = "keelflow_bench_"
 N = int(sys.argv[1]) if len(sys.argv) > 1 else 100_000
 
 

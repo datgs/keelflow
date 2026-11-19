@@ -1,12 +1,12 @@
 # Kernel benchmark spike (T2)
 
 Compares **Chancy 0.26.0** vs **PgQueuer 2.0.0** as the adopted job kernel for
-pyerp. Decision memo: `docs/decisions/0001-kernel-chancy.md`.
+keelflow. Decision memo: `docs/decisions/0001-kernel-chancy.md`.
 
 ## Setup
 
-- Postgres: `postgres:16-alpine` container `pyerp-postgres`, DSN
-  `postgresql://postgres:postgres@localhost:5544/pyerp` (override via `BENCH_DSN`)
+- Postgres: `postgres:16-alpine` container `keelflow-postgres`, DSN
+  `postgresql://postgres:postgres@localhost:5544/keelflow` (override via `BENCH_DSN`)
 - Venv: `.spikes/kernel/.venv` with `chancy==0.26.0`, `pgqueuer==2.0.0`,
   `psycopg[binary]`, `asyncpg`
 - Schema: `pgq install` (pgqueuer objects); chancy self-migrates on `Chancy(DSN).migrate()`

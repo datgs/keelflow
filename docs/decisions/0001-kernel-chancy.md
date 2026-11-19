@@ -13,7 +13,7 @@ kernel for claim/retry/lease mechanics rather than building one, with Chancy and
 PgQueuer as the candidates, decided by a benchmark spike (plan task T2).
 Benchmark code and raw numbers: `.spikes/kernel/README.md`.
 
-What pyerp needs from a kernel: claim with SKIP LOCKED, retries with backoff and
+What keelflow needs from a kernel: claim with SKIP LOCKED, retries with backoff and
 max-attempts, job cancellation, scheduling (`run_at`, cron), rate limits,
 priority, kill-resume (dead worker → work reclaimed), dedup key, and
 transactional enqueue in the caller's transaction. Everything else (DAG,

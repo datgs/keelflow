@@ -45,7 +45,7 @@ def make_app(dsn: str, host: str = "127.0.0.1", port: int = 8410):
             p = urlparse(self.path)
             path, qs = p.path, parse_qs(p.query)
             if path == "/":
-                return self._page("pyerp admin", self._home())
+                return self._page("keelflow admin", self._home())
             if path == "/jobs":
                 return self._page("jobs", self._jobs(qs))
             if path.startswith("/jobs/") and path.endswith("/rows"):
@@ -180,11 +180,11 @@ def make_app(dsn: str, host: str = "127.0.0.1", port: int = 8410):
             )
 
     server = ThreadingHTTPServer((host, port), H)
-    print(f"pyerp admin → http://{host}:{port}")
+    print(f"keelflow admin → http://{host}:{port}")
     server.serve_forever()
 
 
 if __name__ == "__main__":  # pragma: no cover
     import os
 
-    make_app(os.environ["PYERP_DSN"])
+    make_app(os.environ["KEELFLOW_DSN"])

@@ -22,19 +22,19 @@ import pytest_asyncio
 from chancy import Chancy, Queue, Worker
 from pydantic import BaseModel
 
-from pyerp.engine import worker as worker_mod
-from pyerp.engine.audit import PostgresAuditService
-from pyerp.engine.bulk import (
+from keelflow.engine import worker as worker_mod
+from keelflow.engine.audit import PostgresAuditService
+from keelflow.engine.bulk import (
     BulkJobHandler,
     BulkJobPayload,
 )
-from pyerp.engine.bulk import register as register_bulk
-from pyerp.engine.enqueue import JobService
-from pyerp.engine.human import HumanTaskService
-from pyerp.engine.registry import InMemoryRegistry
-from pyerp.engine.statemachine import EngineStateMachineService
-from pyerp.postgres.schema import apply_async
-from pyerp.sdk import (
+from keelflow.engine.bulk import register as register_bulk
+from keelflow.engine.enqueue import JobService
+from keelflow.engine.human import HumanTaskService
+from keelflow.engine.registry import InMemoryRegistry
+from keelflow.engine.statemachine import EngineStateMachineService
+from keelflow.postgres.schema import apply_async
+from keelflow.sdk import (
     Actor,
     EntityRef,
     JobContext,
@@ -48,9 +48,9 @@ from pyerp.sdk import (
 )
 
 DSN = os.environ.get(
-    "PYERP_TEST_DSN", "postgresql://postgres:postgres@localhost:5544/pyerp"
+    "KEELFLOW_TEST_DSN", "postgresql://postgres:postgres@localhost:5544/keelflow"
 )
-CHANCY_PREFIX = "pyerp_test_"
+CHANCY_PREFIX = "keelflow_test_"
 
 FLAKY_ATTEMPTS: dict[str, int] = {}
 
@@ -325,7 +325,7 @@ async def test_e2e_scenario(env, db):
             logging.getLogger("test").debug("stop: %s", e)
 
     # ── 5. audit trail ──────────────────────────────────────────────
-    from pyerp.sdk import AuditEvent
+    from keelflow.sdk import AuditEvent
 
     async with (
         await _conn(autocommit=False) as conn,

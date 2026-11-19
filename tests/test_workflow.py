@@ -1,6 +1,6 @@
 """T7 contract tests: workflow DAG engine.
 
-Requires Postgres at PYERP_TEST_DSN.
+Requires Postgres at KEELFLOW_TEST_DSN.
 """
 from __future__ import annotations
 
@@ -13,12 +13,12 @@ import pytest_asyncio
 from chancy import Chancy, Queue, Worker
 from pydantic import BaseModel
 
-from pyerp.engine import worker as worker_mod
-from pyerp.engine.enqueue import JobService
-from pyerp.engine.registry import InMemoryRegistry
-from pyerp.engine.workflow import WorkflowService, eval_guard, resolve_inputs
-from pyerp.postgres.schema import apply_async
-from pyerp.sdk import (
+from keelflow.engine import worker as worker_mod
+from keelflow.engine.enqueue import JobService
+from keelflow.engine.registry import InMemoryRegistry
+from keelflow.engine.workflow import WorkflowService, eval_guard, resolve_inputs
+from keelflow.postgres.schema import apply_async
+from keelflow.sdk import (
     Actor,
     JobContext,
     JobHandler,
@@ -29,9 +29,9 @@ from pyerp.sdk import (
 )
 
 DSN = os.environ.get(
-    "PYERP_TEST_DSN", "postgresql://postgres:postgres@localhost:5544/pyerp"
+    "KEELFLOW_TEST_DSN", "postgresql://postgres:postgres@localhost:5544/keelflow"
 )
-CHANCY_PREFIX = "pyerp_test_"
+CHANCY_PREFIX = "keelflow_test_"
 
 RUNS: list[dict] = []
 

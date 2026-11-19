@@ -1,4 +1,4 @@
-"""pyerp SDK — public contracts for applications.
+"""keelflow SDK — public contracts for applications.
 
 Only this package is imported by applications. Engine internals are private.
 """

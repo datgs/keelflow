@@ -1,5 +1,5 @@
 [project]
-name = "pyerp"
+name = "keelflow"
 version = "0.1.0"
 description = "Reusable Postgres-backed durable workflow engine"
 readme = "README.md"

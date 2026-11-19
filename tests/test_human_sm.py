@@ -9,14 +9,14 @@ import pytest_asyncio
 from chancy import Chancy, Queue, Worker
 from pydantic import BaseModel
 
-from pyerp.engine import worker as worker_mod
-from pyerp.engine.enqueue import JobService
-from pyerp.engine.human import HumanTaskService
-from pyerp.engine.registry import InMemoryRegistry
-from pyerp.engine.statemachine import EngineStateMachineService
-from pyerp.engine.workflow import WorkflowService
-from pyerp.postgres.schema import apply_async
-from pyerp.sdk import (
+from keelflow.engine import worker as worker_mod
+from keelflow.engine.enqueue import JobService
+from keelflow.engine.human import HumanTaskService
+from keelflow.engine.registry import InMemoryRegistry
+from keelflow.engine.statemachine import EngineStateMachineService
+from keelflow.engine.workflow import WorkflowService
+from keelflow.postgres.schema import apply_async
+from keelflow.sdk import (
     Actor,
     JobContext,
     JobHandler,
@@ -29,9 +29,9 @@ from pyerp.sdk import (
 )
 
 DSN = os.environ.get(
-    "PYERP_TEST_DSN", "postgresql://postgres:postgres@localhost:5544/pyerp"
+    "KEELFLOW_TEST_DSN", "postgresql://postgres:postgres@localhost:5544/keelflow"
 )
-CHANCY_PREFIX = "pyerp_test_"
+CHANCY_PREFIX = "keelflow_test_"
 
 
 class P(BaseModel):
@@ -106,7 +106,7 @@ async def test_transition_valid_and_guard(env, db):
     ctx = JobContext(actor=Actor.user("u1"),
                      permissions=frozenset({"inv.submit"}))
     entity = type("E", (), {"type": "invoice", "id": "inv-1"})()
-    from pyerp.sdk import EntityRef
+    from keelflow.sdk import EntityRef
     entity = EntityRef(type="invoice", id="inv-1")
 
     async with await _conn(autocommit=False) as conn:
@@ -149,7 +149,7 @@ async def test_creates_job_and_workflow(env, db):
         steps=(StepSpec(id="s1", type="wf.step@v1"),),
     ))
     ctx = JobContext(actor=Actor.user("u1"), permissions=frozenset({"*"}))
-    from pyerp.sdk import EntityRef
+    from keelflow.sdk import EntityRef
     entity = EntityRef(type="invoice", id="inv-2")
 
     async with (

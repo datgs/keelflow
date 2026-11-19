@@ -26,7 +26,7 @@ import psycopg
 from chancy import Chancy, Job, Queue, Worker
 
 DSN = os.environ.get(
-    "BENCH_DSN", "postgresql://postgres:postgres@localhost:5544/pyerp"
+    "BENCH_DSN", "postgresql://postgres:postgres@localhost:5544/keelflow"
 )
 QUEUE = "bench"
 PREFIX = "chancy_bench_"

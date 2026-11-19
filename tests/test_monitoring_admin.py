@@ -7,11 +7,11 @@ import psycopg
 import pytest
 import pytest_asyncio
 
-from pyerp.engine.monitoring import MonitoringService
-from pyerp.postgres.schema import apply_async
+from keelflow.engine.monitoring import MonitoringService
+from keelflow.postgres.schema import apply_async
 
 DSN = os.environ.get(
-    "PYERP_TEST_DSN", "postgresql://postgres:postgres@localhost:5544/pyerp"
+    "KEELFLOW_TEST_DSN", "postgresql://postgres:postgres@localhost:5544/keelflow"
 )
 
 
@@ -115,6 +115,6 @@ def test_admin_serves():
 
 
 def _serve(port):
-    from pyerp.admin.app import make_app
+    from keelflow.admin.app import make_app
 
-    make_app(os.environ["PYERP_TEST_DSN"], port=port)
+    make_app(os.environ["KEELFLOW_TEST_DSN"], port=port)

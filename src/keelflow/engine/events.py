@@ -23,7 +23,7 @@ from psycopg.rows import dict_row
 from ..sdk import DomainEvent, EventBus, EventHandler, JobContext, Transaction
 from .enqueue import _as_cursor
 
-log = logging.getLogger("pyerp.events")
+log = logging.getLogger("keelflow.events")
 
 
 class OutboxEventBus(EventBus):

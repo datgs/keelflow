@@ -4,9 +4,9 @@ from __future__ import annotations
 import pytest
 from pydantic import BaseModel
 
-from pyerp.compiler import DefinitionError, load_state_machine, load_workflow
-from pyerp.engine.registry import InMemoryRegistry
-from pyerp.sdk import JobHandler, JobResult, JobTypeSpec
+from keelflow.compiler import DefinitionError, load_state_machine, load_workflow
+from keelflow.engine.registry import InMemoryRegistry
+from keelflow.sdk import JobHandler, JobResult, JobTypeSpec
 
 
 class P(BaseModel):

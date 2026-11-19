@@ -1,4 +1,4 @@
-"""MCP server exposing read-only pyerp data APIs."""
+"""MCP server exposing read-only keelflow data APIs."""
 from __future__ import annotations
 
 import json
@@ -13,11 +13,11 @@ from ..engine.monitoring import MonitoringService
 
 
 def make_server(dsn: str | None = None) -> MCPServer:
-    """Build the MCP server. `dsn` defaults to $PYERP_DSN."""
-    dsn = dsn or os.environ["PYERP_DSN"]
+    """Build the MCP server. `dsn` defaults to $KEELFLOW_DSN."""
+    dsn = dsn or os.environ["KEELFLOW_DSN"]
     svc = MonitoringService()
     audit = PostgresAuditService()
-    app = MCPServer("pyerp")
+    app = MCPServer("keelflow")
 
     async def _conn():
         return await psycopg.AsyncConnection.connect(dsn, autocommit=True)

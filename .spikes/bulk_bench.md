@@ -17,4 +17,4 @@ transaction itself.
 Status transitions observed live: parent `pending → running → done`,
 chunks `pending → running → done`, rows `pending → processing → done`.
 
-Reproduce: `PYERP_DSN=… uv run python .spikes/bulk_bench.py 100000`.
+Reproduce: `KEELFLOW_DSN=… uv run python .spikes/bulk_bench.py 100000`.

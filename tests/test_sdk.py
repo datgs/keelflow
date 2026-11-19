@@ -1,7 +1,7 @@
 import pytest
 from pydantic import BaseModel
 
-from pyerp.sdk import (
+from keelflow.sdk import (
     Actor,
     ActorType,
     ConcurrencySpec,

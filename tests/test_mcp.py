@@ -7,11 +7,11 @@ import psycopg
 import pytest
 import pytest_asyncio
 
-from pyerp.mcp.server import make_server
-from pyerp.postgres.schema import apply_async
+from keelflow.mcp.server import make_server
+from keelflow.postgres.schema import apply_async
 
 DSN = os.environ.get(
-    "PYERP_TEST_DSN", "postgresql://postgres:postgres@localhost:5544/pyerp"
+    "KEELFLOW_TEST_DSN", "postgresql://postgres:postgres@localhost:5544/keelflow"
 )
 
 
@@ -40,7 +40,7 @@ async def test_tool_surface_registered(db):
 
 @pytest.mark.asyncio
 async def test_call_tool_returns_json(db, monkeypatch):
-    monkeypatch.setenv("PYERP_DSN", DSN)
+    monkeypatch.setenv("KEELFLOW_DSN", DSN)
     await db.execute(
         "INSERT INTO hd_flow_jobs (id, type, status, payload, context)"
         " VALUES (gen_random_uuid(), 'x@v1', 'pending', '{}', '{}')"

@@ -12,7 +12,7 @@ import uuid
 
 import psycopg
 
-DSN = "postgresql://postgres:postgres@localhost:5544/pyerp"
+DSN = "postgresql://postgres:postgres@localhost:5544/keelflow"
 
 
 def fast(job_id: str) -> None:

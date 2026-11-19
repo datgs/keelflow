@@ -1,7 +1,7 @@
 """T4 contract tests: transactional enqueue.
 
-Requires Postgres at PYERP_TEST_DSN (default: spike container DSN).
-Run: `docker start pyerp-postgres` then `uv run pytest tests/test_enqueue.py`.
+Requires Postgres at KEELFLOW_TEST_DSN (default: spike container DSN).
+Run: `docker start keelflow-postgres` then `uv run pytest tests/test_enqueue.py`.
 """
 from __future__ import annotations
 
@@ -14,10 +14,10 @@ import pytest_asyncio
 from chancy import Chancy
 from pydantic import BaseModel
 
-from pyerp.engine.enqueue import EnqueueError, JobService
-from pyerp.engine.registry import InMemoryRegistry
-from pyerp.postgres.schema import apply_async
-from pyerp.sdk import (
+from keelflow.engine.enqueue import EnqueueError, JobService
+from keelflow.engine.registry import InMemoryRegistry
+from keelflow.postgres.schema import apply_async
+from keelflow.sdk import (
     Actor,
     JobContext,
     JobHandler,
@@ -27,9 +27,9 @@ from pyerp.sdk import (
 )
 
 DSN = os.environ.get(
-    "PYERP_TEST_DSN", "postgresql://postgres:postgres@localhost:5544/pyerp"
+    "KEELFLOW_TEST_DSN", "postgresql://postgres:postgres@localhost:5544/keelflow"
 )
-CHANCY_PREFIX = "pyerp_test_"
+CHANCY_PREFIX = "keelflow_test_"
 
 
 class Payload(BaseModel):
