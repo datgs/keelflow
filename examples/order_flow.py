@@ -22,14 +22,13 @@ from keelflow.engine.enqueue import JobService
 from keelflow.engine.human import HumanTaskService
 from keelflow.engine.registry import InMemoryRegistry
 from keelflow.engine.statemachine import EngineStateMachineService
-from keelflow.engine.workflow import WorkflowService
 from keelflow.postgres.schema import apply_async
 from keelflow.sdk import (
     Actor,
     EntityRef,
     JobContext,
-    JobResult,
     JobHandler,
+    JobResult,
     JobTypeSpec,
     StateMachineDefinition,
     StepSpec,
