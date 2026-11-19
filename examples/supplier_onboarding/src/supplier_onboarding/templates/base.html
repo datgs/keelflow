@@ -59,8 +59,8 @@ mermaid.initialize({startOnLoad:true, theme:"dark"});
   <strong>keelflow</strong>
   <a href="/?as={{ nav['as'] }}">suppliers</a>
   <a href="/inbox?as={{ nav['as'] }}">inbox</a>
-  <span class="who">acting as
-    <select onchange="location.search='?as='+this.value">
+  <span class="who">View as
+    <select onchange="const q=new URLSearchParams(location.search);q.set('as',this.value);location.search='?'+q.toString()">
       {% for a in nav['actors'] %}
       <option {{ 'selected' if a == nav['as'] }}>{{ a }}</option>
       {% endfor %}

@@ -61,10 +61,12 @@ mermaid.initialize({startOnLoad:true, theme:"dark"});
   <strong>keelflow · invoice_flow</strong>
   <a href="/?as={{ me }}">Invoices</a>
   <a href="/inbox?as={{ me }}">Inbox</a>
-  <span class="who">acting as
-    {% for u in ["u1","fin1","gl1","mgr"] %}
-      <a href="?as={{ u }}" style="color:{{ '#fff' if u==me else '#9ca3af' }}">{{ u }}</a>{{ "·" if not loop.last }}
-    {% endfor %}
+  <span class="who">View as&nbsp;
+    <select onchange="const q=new URLSearchParams(location.search);q.set('as',this.value);location.search='?'+q.toString()">
+      {% for u in ["u1","fin1","gl1","mgr"] %}
+      <option {{ 'selected' if u == me }}>{{ u }}</option>
+      {% endfor %}
+    </select>
     &nbsp;— demo only, no auth</span>
 </header>
 <main>
