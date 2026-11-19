@@ -37,6 +37,17 @@ CREATE TABLE IF NOT EXISTS keelflow_workflow_runs (
     status      TEXT NOT NULL DEFAULT 'running'
                 CHECK (status IN ('running','done','failed','cancelled','blocked')),
     inputs      JSONB NOT NULL DEFAULT '{}',
+    -- Workflow-trigger metadata: set when a state-machine transition
+    -- started this run so the terminal callback can find its target.
+    triggered_by_entity_type TEXT,
+    triggered_by_entity_id   TEXT,
+    trigger_config           JSONB,           -- on_done/on_rejected/on_failed/failure_job
+    trigger_ctx              JSONB,           -- serialized initiating JobContext
+    terminal_outcome         TEXT CHECK (terminal_outcome IN
+                                 ('succeeded','rejected','failed')),
+    callback_state           TEXT NOT NULL DEFAULT 'none'
+                           CHECK (callback_state IN
+                                  ('none','pending','done','failed')),
     created_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at  TIMESTAMPTZ NOT NULL DEFAULT now()
 );

@@ -24,7 +24,7 @@ import chancy
 import psycopg
 from pydantic import ValidationError
 
-from ..sdk import JobResult, JobStatus, Registry
+from ..sdk import JobStatus, Registry
 from .context import ctx_from_dict
 
 log = logging.getLogger("keelflow.worker")
@@ -81,24 +81,30 @@ async def dispatch(job_id: str, step_run_id: str | None = None) -> None:
             log.error("job %s not found in keelflow_jobs", job_id)
             return
         _, type_name, status, payload_json, ctx_json, _ck = row
-        # Re-claim of an already-terminal job (e.g. double execution):
-        # mark kernel-side as done — but still advance the workflow run if
-        # this job feeds a step (the first attempt may have died mid-advance).
-        if status in (JobStatus.DONE.value, JobStatus.CANCELLED.value):
+        # Re-claim of an already-terminal job (e.g. double execution or
+        # kernel retry of a declared-failed job): mark kernel-side done and
+        # idempotently advance the run — never re-run the handler, or
+        # domain effects would execute twice.
+        if status in (
+            JobStatus.DONE.value, JobStatus.CANCELLED.value,
+            JobStatus.FAILED.value,
+        ):
             log.info("job %s already %s; skipping", job_id, status)
             if step_run_id and _kernel_client is not None:
-                from .workflow import on_job_finished
+                async with conn.transaction():
+                    from .workflow import on_job_finished
 
-                sr = await conn.execute(
-                    "SELECT outputs FROM keelflow_step_runs WHERE id=%s",
-                    (step_run_id,),
-                )
-                sr_row = await sr.fetchone()
-                await on_job_finished(
-                    conn, _kernel_client, registry, job_id, step_run_id,
-                    JobStatus(status),
-                    (sr_row[0] or {}) if sr_row else {},
-                )
+                    sr = await conn.execute(
+                        "SELECT outputs FROM keelflow_step_runs WHERE id=%s",
+                        (step_run_id,),
+                    )
+                    sr_row = await sr.fetchone()
+                    await on_job_finished(
+                        conn, _kernel_client, registry, job_id, step_run_id,
+                        JobStatus(status),
+                        (sr_row[0] or {}) if sr_row else {},
+                    )
+                await conn.commit()
             return
         try:
             spec = registry.job_type(type_name)
@@ -132,43 +138,75 @@ async def dispatch(job_id: str, step_run_id: str | None = None) -> None:
         await lock.acquire()
 
         handler = spec.handler()  # type: ignore[misc]
+        # One TX: handler domain writes (via ctx.extra["tx"]) + job finish
+        # + workflow advance commit or roll back together.
+        status = None
+        result = None
         try:
-            result: JobResult = await handler.run(ctx, payload)
+            async with conn.transaction(), conn.cursor() as tx_cur:
+                object.__setattr__(ctx, "tx", tx_cur)
+                result = await handler.run(ctx, payload)
+                object.__setattr__(ctx, "tx", None)
+                status = JobStatus.DONE if result.status == "done" else JobStatus.FAILED
+                if result.outputs.get("_bulk_parent"):
+                    # bulk parent: partitions are out; fan-in flips to done/failed.
+                    status = JobStatus.RUNNING
+                    result.outputs.pop("_bulk_parent", None)
+                await _write_finish(
+                    tx_cur, job_id, status,
+                    result=result.outputs, error=result.error,
+                )
+                if step_run_id:
+                    kernel = _kernel_client
+                    if kernel is not None:
+                        from .workflow import on_job_finished
+
+                        await on_job_finished(
+                            conn, kernel, registry, job_id, step_run_id,
+                            status, result.outputs,
+                        )
+            # conn.transaction() above is a savepoint when an implicit TX
+            # is already open (the advisory-lock SELECT opened one) —
+            # explicit commit is required or close() rolls everything back.
+            await conn.commit()
         except Exception as exc:
             tb = traceback.format_exc(limit=10)
-            await _finish(conn, job_id, JobStatus.FAILED, error=str(exc), trace=tb)
-            jlog.error("handler failed: %s", exc)
+            cur = await conn.execute(
+                "SELECT attempts, max_attempts FROM keelflow_jobs WHERE id=%s",
+                (job_id,),
+            )
+            att = await cur.fetchone()
+            exhausted = bool(att and att[0] >= att[1])
+            if exhausted:
+                # Kernel retries are done → terminal failure.
+                await _finish(
+                    conn, job_id, JobStatus.FAILED,
+                    error=str(exc), trace=tb)
+                jlog.error("handler failed permanently: %s", exc)
+                if step_run_id and _kernel_client is not None:
+                    async with conn.transaction():
+                        from .workflow import on_job_finished
+
+                        await on_job_finished(
+                            conn, _kernel_client, registry, job_id,
+                            step_run_id, JobStatus.FAILED, {},
+                        )
+                    await conn.commit()
+            else:
+                # Kernel will re-deliver → stay 'running'; error is
+                # recorded on the row but status must not be 'failed'
+                # or the redelivered dispatch would skip the handler.
+                await conn.execute(
+                    "UPDATE keelflow_jobs SET error=%s, updated_at=now()"
+                    " WHERE id=%s",
+                    (str(exc), job_id),
+                )
+                await conn.commit()
+                jlog.error("handler failed (retryable): %s", exc)
             await lock.release()
             raise
         await lock.release()
-
-        status = JobStatus.DONE if result.status == "done" else JobStatus.FAILED
-        if result.outputs.get("_bulk_parent"):
-            # bulk parent: partitions are out; fan-in flips to done/failed.
-            status = JobStatus.RUNNING
-            result.outputs.pop("_bulk_parent", None)
-        await _finish(
-            conn, job_id, status, result=result.outputs, error=result.error
-        )
         jlog.info("%s", result.status)
-
-        if step_run_id:
-            # Step bookkeeping + advance; failures here retry via the kernel
-            # (re-delivery then takes the 'already done' path above and
-            # completes the advance idempotently).
-            kernel = _kernel_client
-            if kernel is not None:
-                from .workflow import on_job_finished
-
-                try:
-                    await on_job_finished(
-                        conn, kernel, registry, job_id, step_run_id,
-                        status, result.outputs,
-                    )
-                except Exception:
-                    jlog.exception("workflow advance failed for step_run %s",
-                                   step_run_id)
-                    raise
 
         if result.status != "done":
             raise _JobFailedError(result.error or "handler returned failed")
@@ -263,6 +301,26 @@ async def _set_status(
     await conn.commit()
 
 
+async def _write_finish(
+    cursor,
+    job_id: str,
+    status: JobStatus,
+    *,
+    result: dict[str, Any] | None = None,
+    error: str | None = None,
+    trace: str | None = None,
+) -> None:
+    """Finish write inside the caller's transaction — no commit."""
+    import json
+
+    await cursor.execute(
+        "UPDATE keelflow_jobs SET status=%s, result=%s, error=%s,"
+        " updated_at=now() WHERE id=%s",
+        (status.value, json.dumps(result) if result else None,
+         (error or "") + (("\n" + trace) if trace else "") or None, job_id),
+    )
+
+
 async def _finish(
     conn,
     job_id: str,
@@ -272,14 +330,10 @@ async def _finish(
     error: str | None = None,
     trace: str | None = None,
 ) -> None:
-    import json
-
-    await conn.execute(
-        "UPDATE keelflow_jobs SET status=%s, result=%s, error=%s,"
-        " updated_at=now() WHERE id=%s",
-        (status.value, json.dumps(result) if result else None,
-         (error or "") + (("\n" + trace) if trace else "") or None, job_id),
-    )
+    """Standalone finish — own TX (used outside the handler-run TX)."""
+    async with conn.transaction(), conn.cursor() as cur:
+        await _write_finish(
+            cur, job_id, status, result=result, error=error, trace=trace)
     await conn.commit()
 
 

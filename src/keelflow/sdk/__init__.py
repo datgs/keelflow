@@ -42,6 +42,7 @@ from .specs import (
     TaskUiSpec,
     TransitionSpec,
     WorkflowDefinition,
+    WorkflowTriggerSpec,
 )
 
 __all__ = [
@@ -83,4 +84,5 @@ __all__ = [
     "WorkflowDefinition",
     "WorkflowRun",
     "WorkflowService",
+    "WorkflowTriggerSpec",
 ]

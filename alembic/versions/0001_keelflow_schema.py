@@ -13,7 +13,7 @@ depends_on = None
 
 
 def upgrade() -> None:
-    from pyerp.postgres.schema import schema_sql
+    from keelflow.postgres.schema import schema_sql
 
     op.execute(schema_sql())
 

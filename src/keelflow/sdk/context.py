@@ -22,6 +22,9 @@ class JobContext:
     permissions: frozenset[str] = frozenset()
     request_id: str | None = None
     extra: dict[str, Any] = field(default_factory=dict)
+    # In-run cursor set by the dispatcher when the handler executes inside
+    # the finish TX. Never serialized (excluded from ctx_to_dict).
+    tx: Any = field(default=None, repr=False, compare=False)
 
     def require(self, permission: str) -> None:
         """Raise if the actor lacks a permission (service-layer check)."""

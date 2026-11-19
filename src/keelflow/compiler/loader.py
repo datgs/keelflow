@@ -25,6 +25,7 @@ from ..sdk import (
     StepSpec,
     TransitionSpec,
     WorkflowDefinition,
+    WorkflowTriggerSpec,
 )
 
 _NAME = re.compile(r"^[\w.\-]+@v\d+$")
@@ -116,12 +117,15 @@ def load_state_machine(path: str | Path, registry) -> StateMachineDefinition:
         actions.add(t["action"])
         if t.get("creates_job"):
             _check_known_type(t["creates_job"], registry, f"{name} transition")
-        if t.get("triggers_workflow") and not _is_registered_workflow(
-            t["triggers_workflow"], registry
-        ):
+        tw = t.get("triggers_workflow")
+        trigger = _parse_trigger(tw, name, i)
+        if trigger and not _is_registered_workflow(trigger.workflow, registry):
             raise DefinitionError(
-                f"{name}: triggers_workflow {t['triggers_workflow']!r} not registered"
+                f"{name}: triggers_workflow {trigger.workflow!r} not registered"
             )
+        if trigger and trigger.failure_job:
+            _check_known_type(trigger.failure_job, registry,
+                              f"{name} transition trigger")
         transitions.append(
             TransitionSpec(
                 from_state=t["from"],
@@ -129,7 +133,7 @@ def load_state_machine(path: str | Path, registry) -> StateMachineDefinition:
                 action=t["action"],
                 guard=dict(t.get("guard") or {}),
                 creates_job=t.get("creates_job"),
-                triggers_workflow=t.get("triggers_workflow"),
+                triggers_workflow=trigger,
                 notify=t.get("notify"),
             )
         )
@@ -164,6 +168,36 @@ def load_definitions(dir_: str | Path, registry) -> dict[str, int]:
 
 
 # ── helpers ────────────────────────────────────────────────────────────────
+
+
+def _parse_trigger(tw: Any, name: str, i: int) -> WorkflowTriggerSpec | None:
+    """`triggers_workflow` may be a string or a typed mapping."""
+    if tw is None:
+        return None
+    if isinstance(tw, str):
+        return WorkflowTriggerSpec(workflow=tw)
+    if isinstance(tw, dict):
+        unknown = set(tw) - {"workflow", "on_done", "on_rejected",
+                             "on_failed", "failure_job"}
+        if unknown:
+            raise DefinitionError(
+                f"{name}: transition[{i}] triggers_workflow unknown keys "
+                f"{sorted(unknown)}"
+            )
+        if not tw.get("workflow"):
+            raise DefinitionError(
+                f"{name}: transition[{i}] triggers_workflow needs 'workflow'"
+            )
+        return WorkflowTriggerSpec(
+            workflow=tw["workflow"],
+            on_done=tw.get("on_done"),
+            on_rejected=tw.get("on_rejected"),
+            on_failed=tw.get("on_failed"),
+            failure_job=tw.get("failure_job"),
+        )
+    raise DefinitionError(
+        f"{name}: transition[{i}] triggers_workflow must be str or mapping"
+    )
 
 
 def _check_name(name: Any, path) -> None:

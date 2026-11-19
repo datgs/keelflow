@@ -92,13 +92,35 @@ class WorkflowDefinition:
 
 
 @dataclass(frozen=True)
+class WorkflowTriggerSpec:
+    """Typed trigger contract for a state-machine transition.
+
+    When the transition runs, the named workflow starts with the entity
+    recorded on the run (`triggered_by_entity_*`). When the run reaches a
+    terminal outcome the engine applies the matching callback action to
+    the entity — in the same transaction that finalizes the run.
+
+    Outcomes: `on_done` (run finished), `on_rejected` (a human step
+    completed with `_rejected` marker — business rejection, not a
+    technical failure), `on_failed` (retry exhaustion). `failure_job`
+    is an optional human task type spawned on `on_failed`.
+    """
+
+    workflow: str                            # "name@vN"
+    on_done: str | None = None               # SM action on run success
+    on_rejected: str | None = None           # SM action on business reject
+    on_failed: str | None = None             # SM action on tech failure
+    failure_job: str | None = None           # human.* type on on_failed
+
+
+@dataclass(frozen=True)
 class TransitionSpec:
     from_state: str
     to_state: str
     action: str
     guard: dict[str, Any] = field(default_factory=dict)
-    creates_job: str | None = None            # job type to spawn
-    triggers_workflow: str | None = None     # workflow to start
+    creates_job: str | None = None           # job type to spawn
+    triggers_workflow: str | WorkflowTriggerSpec | None = None
     notify: str | None = None
 
 

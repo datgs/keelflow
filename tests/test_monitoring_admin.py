@@ -117,4 +117,4 @@ def test_admin_serves():
 def _serve(port):
     from keelflow.admin.app import make_app
 
-    make_app(os.environ["KEELFLOW_TEST_DSN"], port=port)
+    make_app(DSN, port=port)
