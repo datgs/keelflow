@@ -179,8 +179,8 @@ class HumanTaskService:
                 UPDATE keelflow_jobs SET assignee=%s, claimed_by=NULL,
                        status='pending', updated_at=now()
                 WHERE type LIKE 'human.%%' AND status IN ('pending','claimed')
-                  AND created_at < now() - interval '%s days'
+                  AND created_at < now() - %s * interval '1 day'
                 """,
-                (f"role:{to_role}", str(older_than_days)),
+                (f"role:{to_role}", int(older_than_days)),
             )
             return cur.rowcount

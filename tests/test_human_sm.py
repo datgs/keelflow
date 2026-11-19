@@ -195,6 +195,37 @@ async def test_creates_job_and_workflow(env, db):
 
 
 @pytest.mark.asyncio
+async def test_escalate_overdue(env, db):
+    """escalate_overdue reassigns stale tasks to a role (and the
+    interval parameterization actually executes)."""
+    from datetime import UTC, datetime, timedelta
+
+    async with (await _conn(False)) as conn:
+        await conn.execute(
+            "INSERT INTO keelflow_jobs (id, type, status, payload, context,"
+            " run_at, assignee, created_at, updated_at)"
+            " VALUES (gen_random_uuid(), 'human.review@v1', 'pending', "
+            " '{}', '{}', %s, 'role:finance', %s, %s)",
+            (datetime.now(UTC),
+             datetime.now(UTC) - timedelta(days=10),
+             datetime.now(UTC) - timedelta(days=10)),
+        )
+        await conn.commit()
+    n = await env["human"].escalate_overdue(
+        db, older_than_days=5, to_role="lead")
+    assert n == 1
+    row = await (await db.execute(
+        "SELECT assignee, status FROM keelflow_jobs"
+        " WHERE type='human.review@v1'"
+    )).fetchone()
+    assert row == ("role:lead", "pending")
+    # fresh task is not escalated
+    n2 = await env["human"].escalate_overdue(
+        db, older_than_days=30, to_role="lead")
+    assert n2 == 0
+
+
+@pytest.mark.asyncio
 async def test_human_step_parks_then_unblocks_run(env, db):
     env["reg"].register_workflow(WorkflowDefinition(
         name="wf.human@v1",
