@@ -56,3 +56,21 @@ uv run uvicorn invoice_flow.app:app --port 8501
 ```bash
 uv run pytest examples/invoice_flow
 ```
+
+## SDK extension points it uses
+
+All wiring lives in `registry.py` — these are the seams the library
+exposes and this demo fills in:
+
+| Extension point | Snippet |
+|---|---|
+| **`JobHandler.run`** — your code, runs in the engine's dispatch TX | `class PostLedgerH(JobHandler): async def run(self, ctx, payload: InvPayload): …` |
+| **`ctx.tx`** — write domain rows *in the same commit* as job finish + workflow advance | `await ctx.tx.execute("INSERT INTO demo_ledger_postings … ON CONFLICT …")` |
+| **`JobTypeSpec` + `register_job_type`** — declare a job type + its handler | `reg.register_job_type(JobTypeSpec(type="inv.post_ledger@v1", handler=PostLedgerH, …))` |
+| **`TaskUiSpec(assignee_role=…)`** — who may claim a human task | `ui=TaskUiSpec(assignee_role="gl")` |
+| **`StateMachineDefinition` / `TransitionSpec`** — entity lifecycle as data | `reg.register_state_machine(StateMachineDefinition(name="invoice@v1", … transitions=(…)))` |
+| **`creates_job`** — transition spawns a human task | `TransitionSpec("draft","in_review","submit", creates_job="human.review@v1")` |
+| **`triggers_workflow` + `WorkflowTriggerSpec`** — SM transition kicks a DAG, outcome maps back | `triggers_workflow=WorkflowTriggerSpec(workflow="post.wf@v1", on_done="posted", on_rejected=…, failure_job=…)` |
+| **`WorkflowDefinition` / `StepSpec` + `needs`/`input` refs** — a DAG of steps | `StepSpec(id="gl_check", type="human.gl_check@v1", input={"journal_ref": "${{ steps.record.outputs.journal_ref }}"}, needs=("record",))` |
+| **`human.*` step type** — step that blocks until a person acts in the Inbox | `StepSpec(id="gl_check", type="human.gl_check@v1", …)` |
+| **App-side services** — drive everything from your API in the caller TX | `EngineStateMachineService`, `WorkflowService`, `HumanTaskService`, `JobService` in `app.py` |

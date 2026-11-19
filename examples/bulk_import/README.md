@@ -67,3 +67,41 @@ Open http://127.0.0.1:8002/?as=u-ops1 → **generate sample.csv**
 
 Synthetic/sample CSVs only · file size/row limits enforced · no auth ·
 binds localhost · manual refresh.
+
+## SDK extension points it uses
+
+This demo's signature: it plugs **`BulkJobHandler`** into a DAG step, so
+a 250k-row import is just one node in a workflow.
+
+| Extension point | Snippet |
+|---|---|
+| **`BulkJobHandler`** — subclass for chunked row processing; engine fans out to `bulk.chunk` workers + fans back in | `class ValidateRowsH(_ImportBulk)` `class ProcessRowsH(_ImportBulk)` |
+| **`process_row(ctx, row, tx)`** — per-row business logic; engine owns chunking, retries, error queue | `async def process_row(self, ctx, row, tx): … if not sku: raise ValueError("missing sku")` |
+| **Stage rows before `super().run()`** — hook in `_ImportBulk.run` writes `keelflow_row_status` inside `ctx.tx`, then engine partitions | `await cur.executemany("INSERT INTO keelflow_row_status …", batch); return await super().run(ctx, payload)` |
+| **Row `data` self-contained** — chunk workers' ctx has no parent payload, so each row carries cells+mapping+import_id | `{"cells":…,"mapping":…,"import_id":…}` |
+| **`BulkJobPayload` via `${{ steps.*.outputs }}`** — feed a human step's output (mapping) into the bulk step's payload | `"mapping": "${{ steps.map.outputs.mapping }}"` |
+| **`atomic` + `chunk_size`** — engine bulk knobs on the step input | `"atomic": "row", "chunk_size": 5000` |
+| **bulk-as-DAG-step** — `imp.validate`/`imp.process` are normal `StepSpec`s; engine links the bulk parent to the step run | `StepSpec("process", "imp.process@v1", input=b, needs=("approve",), if_expr=…)` |
+| **`if_expr` on the bulk step** — only run the process pass when approved | `if_expr="${{ steps.approve.outputs.decision }} == 'approve'"` |
+| **`bulk.progress(conn, job_id)`** — engine-owned % / rate / ETA for the parent job | `await bulk.progress(conn, s["job_id"])` in `app.py` |
+| **`bulk.register(r)`** — registers the internal `bulk.chunk@v1` worker | `bulk.register(r)` |
+
+## SDK extension points it uses — code
+
+```python
+class _ImportBulk(BulkJobHandler):
+    async def run(self, ctx, payload: ImpBulk) -> JobResult:
+        # stage rows in the same TX the engine will partition from
+        await cur.executemany(
+            "INSERT INTO keelflow_row_status (job_id,row_key,status,data)"
+            " VALUES (%s,%s,'pending',%s)", batch)
+        return await super().run(ctx, payload)
+
+class ProcessRowsH(_ImportBulk):
+    async def process_row(self, ctx, row, tx):
+        d, mapping = row["data"]["cells"], row["data"]["mapping"]
+        sku = str(d.get(mapping["sku"], "")).strip()
+        if not sku: raise ValueError("missing sku")   # → error queue
+        await tx.execute("INSERT INTO demo_products … ON CONFLICT (sku) …")
+        return {"sku": sku}                            # row marked done
+```

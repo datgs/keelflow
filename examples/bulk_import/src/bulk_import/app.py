@@ -239,7 +239,11 @@ async def detail(request: Request, iid: int):
             " WHERE imported_by=%s", (iid,))).fetchone()
     layers = _layers(detail_["steps"]) if detail_ else []
     wf_diagram = None
+    blocked = []
     if detail_:
+        blocked = [st for st in detail_["steps"]
+                   if st["status"] in ("blocked", "claimed")
+                   and st["type"].startswith("human.")]
         meta = {}
         for st in detail_["steps"]:
             if st["type"].startswith("human."):
@@ -257,7 +261,8 @@ async def detail(request: Request, iid: int):
         "nav": _nav(request), "imp": imp, "run": detail_,
         "layers": layers, "stats": stats, "sample": sample,
         "columns": cols, "fields": FIELDS,
-        "n_products": n_products["n"], "wf_diagram": wf_diagram})
+        "n_products": n_products["n"], "wf_diagram": wf_diagram,
+        "blocked": blocked})
 
 
 # ── human tasks (map + approve — rendered inside the import page) ──────────

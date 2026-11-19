@@ -162,8 +162,12 @@ async def invoice_detail(request: Request, number: str):
         sm_def, current=(ent["state"] if ent else "draft"),
         allowed_actions=set(actions))
     wf_diagram = None
+    blocked = []
     if runs:
         detail = await app.state.wf.get_run(c, str(runs[-1]["id"]))
+        blocked = [st for st in detail["steps"]
+                   if st["status"] in ("blocked", "claimed")
+                   and st["type"].startswith("human.")]
         meta = {}
         for st in detail["steps"]:
             if st["type"].startswith("human."):
@@ -184,6 +188,7 @@ async def invoice_detail(request: Request, number: str):
          "actions": actions, "runs": runs, "gl": gl,
          "posting": posting, "trace": trace,
          "sm_diagram": sm_diagram, "wf_diagram": wf_diagram,
+         "blocked": blocked,
          "me": request.query_params.get("as", "u1"),
          "err": request.query_params.get("err")})
 

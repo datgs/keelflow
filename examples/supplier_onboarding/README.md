@@ -80,3 +80,42 @@ uv run --package keelflow-demo-supplier \
 
 Synthetic data only · no auth (`?as=` switches actor) · binds localhost ·
 manual refresh.
+
+## SDK extension points it uses
+
+Same seams as `invoice_flow`, plus the parts it adds — all in
+`registry.py`:
+
+| Extension point | Snippet |
+|---|---|
+| **`JobHandler.run`** — subclass a shared base for a family of adapters | `class _Adapter(JobHandler): async def run(self, ctx, payload: Sup): … await _record(ctx.tx, …)` then `class SanctionScreenH(_Adapter): check_type="sanction_screen"` |
+| **`ctx.tx`** — write check results in the handler's dispatch TX | `await _record(ctx.tx, payload.supplier_id, self.check_type, result)` |
+| **`ctx.tx` for a read inside a handler** | `s = await _sup_row(ctx.tx, payload.supplier_id)` |
+| **`StepSpec.needs` fan-out** — N siblings under one parent run in parallel | `StepSpec("sanction",…, needs=("validate",))` `media`/`credit`/`bank` likewise → all 4 run concurrently |
+| **`needs` fan-in** — a step waits on several parents | `StepSpec("risk_score",…, needs=("sanction","media","credit","bank"))` |
+| **`StepSpec.if_expr`** — conditional HITL: false → `skipped`, true → `blocked` | `if_expr="${{ steps.risk_score.outputs.risk }} == 'high'"` |
+| **skipped satisfies `needs`** — a branch you didn't take still unblocks dependents | `erp` needs `comp_review`+`credit_signoff`; only one runs, the other `skipped` → `erp` still proceeds |
+| **`TaskUiSpec(assignee_role)`** — which role may claim each human step | `ui=TaskUiSpec(assignee_role="finance")` etc. |
+| **Business reject via human decision** — completes the run with `terminal_outcome='rejected'` (not a job failure) | `human.*` step completed with `decision="reject"` |
+| **`resume_run`** — restart a `failed` run from the point of failure | `WorkflowService.resume_run(…)` on `/resume/{run_id}` |
+
+## SDK extension points it uses — code
+
+The DAG's shape is pure data (`StepSpec`/`if_expr`) — the only code is
+handler bodies:
+
+```python
+# one base, four adapters — each writes to ctx.tx and returns outputs
+class _Adapter(JobHandler):
+    check_type = "base"
+    async def run(self, ctx, payload: Sup) -> JobResult:
+        s = await _sup_row(ctx.tx, payload.supplier_id)
+        result = await self.check(ctx, s)
+        await _record(ctx.tx, payload.supplier_id, self.check_type, result)
+        return JobResult(status="done", outputs=result)
+
+# conditional human gate — engine decides run-vs-skip from the expr
+StepSpec("credit_signoff", "human.credit_signoff@v1", input=i,
+         needs=("risk_score",),
+         if_expr="${{ steps.risk_score.outputs.risk }} == 'high'")
+```

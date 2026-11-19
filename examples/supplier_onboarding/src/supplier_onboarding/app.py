@@ -126,9 +126,13 @@ async def supplier(request: Request, sid: int):
             "SELECT * FROM demo_vendor_accounts WHERE supplier_id=%s",
             (sid,))).fetchone()
         wf_diagram = None
+        blocked = []
         latest = runs[0] if runs else None
         if latest:
             detail = await app.state.wf.get_run(conn, str(latest["id"]))
+            blocked = [st for st in detail["steps"]
+                       if st["status"] in ("blocked", "claimed")
+                       and st["type"].startswith("human.")]
             meta = {}
             for st in detail["steps"]:
                 if st["type"].startswith("human."):
@@ -144,6 +148,7 @@ async def supplier(request: Request, sid: int):
         return templates.TemplateResponse(request, "supplier.html", {
             "nav": _nav(request), "s": s, "checks": checks,
             "runs": runs, "vendor": vendor, "wf_diagram": wf_diagram,
+            "blocked": blocked,
         })
 
 

@@ -1,5 +1,18 @@
 {% extends "base.html" %}
 {% block content %}
+{% if blocked %}
+<div class="card" style="border-left:4px solid #f0dcae;background:#2a2620">
+  <strong>⏳ Waiting on human</strong>
+  {% for b in blocked %}
+    <div style="margin-top:4px">
+      <code>{{ b.step_id }}</code> — {{ b.type }}
+      {% if b.assignee %}<span class="mut">(assignee: {{ b.assignee }})</span>{% endif %}
+      → <a href="/inbox?as={{ nav['as'] }}">open Inbox</a>
+    </div>
+  {% endfor %}
+</div>
+{% endif %}
+
 <div class="card">
   <h2>{{ s.name }}
     <span class="status st-{{ s.status }}">{{ s.status }}</span>
