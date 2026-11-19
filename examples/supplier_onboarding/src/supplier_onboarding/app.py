@@ -18,6 +18,7 @@ from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
 from psycopg.rows import dict_row
 
+from keelflow.engine.diagram import workflow_mermaid
 from keelflow.engine.enqueue import JobService
 from keelflow.engine.human import HumanTaskService
 from keelflow.engine.workflow import WorkflowService
@@ -54,6 +55,7 @@ async def _lifespan(app: FastAPI):
         upsert=True,
     )
     jobs = JobService(registry, kernel)
+    app.state.registry = registry
     app.state.wf = WorkflowService(registry, jobs)
     app.state.human = HumanTaskService(registry, kernel)
     async with kernel:
@@ -108,17 +110,33 @@ async def supplier(request: Request, sid: int):
             "SELECT * FROM demo_check_results WHERE supplier_id=%s"
             " ORDER BY check_type", (sid,))).fetchall()
         runs = await (await conn.execute(
-            "SELECT id, status, terminal_outcome, created_at"
+            "SELECT id, status, terminal_outcome, workflow, created_at"
             " FROM keelflow_workflow_runs"
             " WHERE inputs->>'supplier_id'=%s ORDER BY created_at DESC",
             (str(sid),))).fetchall()
         vendor = await (await conn.execute(
             "SELECT * FROM demo_vendor_accounts WHERE supplier_id=%s",
             (sid,))).fetchone()
-    return templates.TemplateResponse(request, "supplier.html", {
-        "nav": _nav(request), "s": s, "checks": checks,
-        "runs": runs, "vendor": vendor,
-    })
+        wf_diagram = None
+        latest = runs[0] if runs else None
+        if latest:
+            detail = await app.state.wf.get_run(conn, str(latest["id"]))
+            meta = {}
+            for st in detail["steps"]:
+                if st["type"].startswith("human."):
+                    spec = app.state.registry.job_type(st["type"])
+                    meta[st["type"]] = {
+                        "assignee": getattr(spec.ui, "assignee_role", None)
+                        if spec.ui else None}
+            wf_diagram = workflow_mermaid(
+                app.state.registry.workflow(latest["workflow"]),
+                step_status={st["step_id"]: st["status"]
+                             for st in detail["steps"]},
+                job_type_meta=meta)
+        return templates.TemplateResponse(request, "supplier.html", {
+            "nav": _nav(request), "s": s, "checks": checks,
+            "runs": runs, "vendor": vendor, "wf_diagram": wf_diagram,
+        })
 
 
 @app.post("/suppliers/{sid}/onboard")

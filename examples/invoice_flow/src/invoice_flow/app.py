@@ -22,6 +22,7 @@ from fastapi.templating import Jinja2Templates
 from psycopg.rows import dict_row
 
 from keelflow.engine.audit import PostgresAuditService
+from keelflow.engine.diagram import state_machine_mermaid, workflow_mermaid
 from keelflow.engine.enqueue import JobService
 from keelflow.engine.human import HumanTaskService
 from keelflow.engine.monitoring import MonitoringService
@@ -154,6 +155,27 @@ async def invoice_detail(request: Request, number: str):
     actions = await app.state.sm.allowed_actions(
         EntityRef(type="invoice", id=number), actor_for(request), c,
         permissions=ctx_for(request).permissions)
+    # diagrams: SM state view + latest workflow run live overlay
+    reg = app.state.registry
+    sm_def = reg.state_machine("invoice@v1")
+    sm_diagram = state_machine_mermaid(
+        sm_def, current=(ent["state"] if ent else "draft"),
+        allowed_actions=set(actions))
+    wf_diagram = None
+    if runs:
+        detail = await app.state.wf.get_run(c, str(runs[-1]["id"]))
+        meta = {}
+        for st in detail["steps"]:
+            if st["type"].startswith("human."):
+                spec = reg.job_type(st["type"])
+                meta[st["type"]] = {
+                    "assignee": getattr(spec.ui, "assignee_role", None)
+                    if spec.ui else None}
+        wf_diagram = workflow_mermaid(
+            reg.workflow(runs[-1]["workflow"]),
+            step_status={st["step_id"]: st["status"]
+                         for st in detail["steps"]},
+            job_type_meta=meta)
     await c.close()
     return templates.TemplateResponse(
         request, "invoice.html",
@@ -161,6 +183,7 @@ async def invoice_detail(request: Request, number: str):
          "state": (ent["state"] if ent else "draft"),
          "actions": actions, "runs": runs, "gl": gl,
          "posting": posting, "trace": trace,
+         "sm_diagram": sm_diagram, "wf_diagram": wf_diagram,
          "me": request.query_params.get("as", "u1"),
          "err": request.query_params.get("err")})
 

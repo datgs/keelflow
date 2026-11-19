@@ -22,6 +22,7 @@ from fastapi.responses import HTMLResponse, PlainTextResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
 from psycopg.rows import dict_row
 
+from keelflow.engine import bulk
 from keelflow.engine.enqueue import JobService
 from keelflow.engine.human import HumanTaskService
 from keelflow.engine.workflow import WorkflowService
@@ -33,8 +34,8 @@ DSN = os.environ.get("KEELFLOW_DSN",
                      "postgresql://postgres:postgres@localhost:5544/keelflow")
 TEMPLATES = os.path.join(os.path.dirname(__file__), "templates")
 
-MAX_BYTES = 2 * 1024 * 1024
-MAX_ROWS = 10_000
+MAX_BYTES = 64 * 1024 * 1024
+MAX_ROWS = 500_000
 
 _ACTORS = ("u-ops1", "u-rev1", "u-mgr")
 
@@ -59,6 +60,7 @@ async def _lifespan(app: FastAPI):
         upsert=True,
     )
     jobs = JobService(registry, kernel)
+    app.state.registry = registry
     app.state.wf = WorkflowService(registry, jobs)
     app.state.human = HumanTaskService(registry, kernel)
     async with kernel:
@@ -158,6 +160,8 @@ async def upload(
     else:
         if file is None or not file.filename:
             return RedirectResponse(f"/?as={ctx.actor.id}", status_code=303)
+        if not file.filename.lower().endswith(".csv"):
+            return RedirectResponse(f"/?as={ctx.actor.id}", status_code=303)
         raw = await file.read()
         if len(raw) > MAX_BYTES:
             return RedirectResponse(f"/?as={ctx.actor.id}", status_code=303)
@@ -191,15 +195,11 @@ async def start(request: Request, iid: int):
 # ── import detail: DAG + step views ─────────────────────────────────────────
 
 async def _step_stats(conn, steps: list[dict]) -> dict[str, dict]:
-    """Row-status counts for bulk steps (validate/process)."""
+    """Live progress for bulk steps (engine bulk.progress → %/rate/ETA)."""
     out = {}
     for s in steps:
         if s["job_id"] and s["type"].startswith("imp."):
-            rows = await (await conn.execute(
-                "SELECT status, count(*) AS n FROM keelflow_row_status"
-                " WHERE job_id=%s GROUP BY status",
-                (s["job_id"],))).fetchall()
-            out[s["step_id"]] = {r["status"]: r["n"] for r in rows}
+            out[s["step_id"]] = await bulk.progress(conn, s["job_id"])
     return out
 
 
@@ -232,11 +232,26 @@ async def detail(request: Request, iid: int):
             "SELECT count(*) AS n FROM demo_products"
             " WHERE imported_by=%s", (iid,))).fetchone()
     layers = _layers(detail_["steps"]) if detail_ else []
+    wf_diagram = None
+    if detail_:
+        meta = {}
+        for st in detail_["steps"]:
+            if st["type"].startswith("human."):
+                spec = app.state.registry.job_type(st["type"])
+                meta[st["type"]] = {
+                    "assignee": getattr(spec.ui, "assignee_role", None)
+                    if spec.ui else None}
+        from keelflow.engine.diagram import workflow_mermaid
+        wf_diagram = workflow_mermaid(
+            app.state.registry.workflow(detail_["workflow"]),
+            step_status={st["step_id"]: st["status"]
+                         for st in detail_["steps"]},
+            job_type_meta=meta)
     return templates.TemplateResponse(request, "import.html", {
         "nav": _nav(request), "imp": imp, "run": detail_,
         "layers": layers, "stats": stats, "sample": sample,
         "columns": cols, "fields": FIELDS,
-        "n_products": n_products["n"]})
+        "n_products": n_products["n"], "wf_diagram": wf_diagram})
 
 
 # ── human tasks (map + approve — rendered inside the import page) ──────────

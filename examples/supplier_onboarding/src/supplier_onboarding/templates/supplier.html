@@ -62,4 +62,12 @@
     {% endfor %}
   </table>
 </div>
+
+{% if wf_diagram %}
+<div class="card">
+  <h3>Onboarding DAG — latest run live status
+    <span class="muted">(👤 = human gate → assignee)</span></h3>
+  <pre class="mermaid">{{ wf_diagram | safe }}</pre>
+</div>
+{% endif %}
 {% endblock %}

@@ -44,14 +44,17 @@
         <span class="status st-{{ s.status }}">{{ s.status }}</span>
         {% set st = stats.get(s.step_id) %}
         {% if st %}
-          {% set total = (st.done or 0) + (st.failed or 0) + (st.pending or 0) + (st.processing or 0) %}
           <div class="bar" title="{{ st }}">
-            <span class="b-done" style="width:{{ 100 * (st.done or 0) / max(total,1) }}%"></span>
-            <span class="b-failed" style="width:{{ 100 * (st.failed or 0) / max(total,1) }}%"></span>
-            <span class="b-processing" style="width:{{ 100 * (st.processing or 0) / max(total,1) }}%"></span>
-            <span class="b-pending" style="width:{{ 100 * (st.pending or 0) / max(total,1) }}%"></span>
+            <span class="b-done" style="width:{{ st.pct }}%"></span>
+            <span class="b-failed" style="width:{{ 100 * st.failed / max(st.rows_total,1) }}%"></span>
+            <span class="b-processing" style="width:{{ 100 * st.processing / max(st.rows_total,1) }}%"></span>
+            <span class="b-pending" style="width:{{ 100 * st.pending / max(st.rows_total,1) }}%"></span>
           </div>
-          <small>{{ st.done or 0 }} done · {{ st.failed or 0 }} failed · {{ st.pending or 0 }} pending</small>
+          <small>{{ st.done }} done · {{ st.failed }} failed ·
+            {{ st.pending }} pending ({{ "%.1f"|format(st.pct) }}%)<br>
+            ⏱ {{ st.elapsed_s }}s elapsed · {{ st.rate_rows_per_s }}/s
+            {% if st.eta_s %}· ETA ~{{ st.eta_s }}s{% endif %}
+            {% if st.finished %}· <b>finished</b>{% endif %}</small>
         {% endif %}
         {% if s.job_id %}<small><a href="/jobs/{{ s.job_id }}?as={{ nav['as'] }}">job {{ (s.job_id|string)[:8] }}…</a></small>{% endif %}
       </div>
@@ -102,5 +105,13 @@
   <h3>Error rows — <a href="/imports/{{ imp.id }}/errors.csv?as={{ nav['as'] }}">download CSV</a></h3>
 </div>
 {% endif %}
+{% endif %}
+
+{% if wf_diagram %}
+<div class="card">
+  <h3>Import DAG — live status
+    <span class="muted">(👤 = human gate → assignee)</span></h3>
+  <pre class="mermaid">{{ wf_diagram | safe }}</pre>
+</div>
 {% endif %}
 {% endblock %}

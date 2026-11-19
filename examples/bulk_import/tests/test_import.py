@@ -185,7 +185,7 @@ async def test_full_import_approve(env, db):
         nchunks = await (await db.execute(
             "SELECT count(*) AS n FROM keelflow_chunks WHERE job_id=%s",
             (vjob["job_id"],))).fetchone()
-        assert nchunks["n"] == 3           # 120 rows / chunk_size 50
+        assert nchunks["n"] == 1           # 120 rows < chunk_size 5000
 
         # approve → process runs only on approve
         await _wait_step(db, ref.id, "approve", "blocked")

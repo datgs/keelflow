@@ -148,15 +148,18 @@ async def dispatch(job_id: str, step_run_id: str | None = None) -> None:
                 result = await handler.run(ctx, payload)
                 object.__setattr__(ctx, "tx", None)
                 status = JobStatus.DONE if result.status == "done" else JobStatus.FAILED
-                if result.outputs.get("_bulk_parent"):
-                    # bulk parent: partitions are out; fan-in flips to done/failed.
+                bulk_hold = bool(result.outputs.get("_bulk_parent"))
+                if bulk_hold:
+                    # bulk parent: partitions are out; fan-in flips to
+                    # done/failed AND advances the step. Reporting RUNNING
+                    # here would terminalize the step as 'cancelled'.
                     status = JobStatus.RUNNING
                     result.outputs.pop("_bulk_parent", None)
                 await _write_finish(
                     tx_cur, job_id, status,
                     result=result.outputs, error=result.error,
                 )
-                if step_run_id:
+                if step_run_id and not bulk_hold:
                     kernel = _kernel_client
                     if kernel is not None:
                         from .workflow import on_job_finished

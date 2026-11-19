@@ -70,7 +70,7 @@ def _dict_cur(tx):
             if hasattr(tx, "connection") else tx)
 
 
-def sample_csv(n_rows: int = 250, bad_frac: float = 0.08) -> str:
+def sample_csv(n_rows: int = 250_000, bad_frac: float = 0.08) -> str:
     """Deterministic synthetic CSV — 4 source columns, ~8% bad rows."""
     rnd = random.Random(42)
     out = io.StringIO()
@@ -126,13 +126,14 @@ class _ImportBulk(BulkJobHandler):
             "SELECT row_no, data FROM demo_import_raw WHERE import_id=%s",
             (payload.import_id,))
         rows = await cur.fetchall()
-        for r in rows:
-            data = {"cells": r["data"], "mapping": payload.mapping,
-                    "import_id": payload.import_id}
-            await cur.execute(
-                "INSERT INTO keelflow_row_status (job_id, row_key, status, data)"
-                " VALUES (%s, %s, 'pending', %s)",
-                (job_id, f"row-{r['row_no']}", json.dumps(data)))
+        batch = [
+            (job_id, f"row-{r['row_no']}", json.dumps(
+                {"cells": r["data"], "mapping": payload.mapping,
+                 "import_id": payload.import_id}))
+            for r in rows]
+        await cur.executemany(
+            "INSERT INTO keelflow_row_status (job_id, row_key, status, data)"
+            " VALUES (%s, %s, 'pending', %s)", batch)
         return await super().run(ctx, payload)
 
 
@@ -227,7 +228,7 @@ def build_registry() -> InMemoryRegistry:
     i = {"import_id": "${{ inputs.import_id }}"}
     b = {"import_id": "${{ inputs.import_id }}",
          "mapping": "${{ steps.map.outputs.mapping }}",
-         "atomic": "row", "chunk_size": 50}
+         "atomic": "row", "chunk_size": 5000}
     r.register_workflow(WorkflowDefinition(
         name="imp.import@v1",
         steps=(

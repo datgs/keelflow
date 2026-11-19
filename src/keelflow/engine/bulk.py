@@ -373,6 +373,56 @@ class ChunkJobHandler(JobHandler):
             log.exception("could not mark chunk %s failed", chunk_id)
 
 
+async def progress(conn, job_id) -> dict[str, Any]:
+    """Live progress snapshot for a bulk parent job.
+
+    Engine-owned counters (row_status, chunks, job timestamps) surfaced
+    as one dict so apps can render % / rate / ETA without touching
+    engine tables: rows_total/done/failed/pending/processing, chunks
+    per status, elapsed_s, rate_rows_per_s, eta_s (None while no row
+    has finished).
+    """
+    async with conn.cursor(row_factory=dict_row) as cur:
+        await cur.execute(
+            "SELECT status, count(*) AS n FROM keelflow_row_status"
+            " WHERE job_id=%s GROUP BY status", (job_id,))
+        rows = {r["status"]: int(r["n"]) for r in await cur.fetchall()}
+        await cur.execute(
+            "SELECT status, count(*) AS n FROM keelflow_chunks"
+            " WHERE job_id=%s GROUP BY status", (job_id,))
+        chunks = {r["status"]: int(r["n"]) for r in await cur.fetchall()}
+        await cur.execute(
+            "SELECT status, created_at, updated_at, result"
+            " FROM keelflow_jobs WHERE id=%s", (job_id,))
+        job = await cur.fetchone()
+    if job is None:
+        raise KeyError(f"bulk job {job_id} not found")
+
+    total = sum(rows.values())
+    done = rows.get("done", 0)
+    failed = rows.get("failed", 0)
+    settled = done + failed
+    elapsed = (job["updated_at"] - job["created_at"]).total_seconds()
+    rate = settled / elapsed if elapsed > 0 and settled else 0.0
+    remaining = total - settled
+    return {
+        "status": job["status"],
+        "rows_total": total,
+        "done": done,
+        "failed": failed,
+        "pending": rows.get("pending", 0),
+        "processing": rows.get("processing", 0),
+        "settled": settled,
+        "pct": (100.0 * settled / total) if total else 0.0,
+        "chunks": chunks,
+        "started_at": job["created_at"],
+        "elapsed_s": round(elapsed, 1),
+        "rate_rows_per_s": round(rate, 1),
+        "eta_s": (round(remaining / rate, 1) if rate else None),
+        "finished": job["status"] in ("done", "failed", "cancelled"),
+    }
+
+
 def register(registry, dsn: str | None = None) -> None:
     """Register the internal chunk job type on an InMemoryRegistry."""
     from ..sdk.specs import JobTypeSpec, RetryPolicy

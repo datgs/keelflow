@@ -63,4 +63,17 @@
     {% if not trace %}<tr><td colspan="4" class="mut">empty</td></tr>{% endif %}
   </table>
 </div>
+
+<div class="card">
+  <h3 style="margin-top:0">State machine — {{ 'you are here: ' + state }}</h3>
+  <pre class="mermaid">{{ sm_diagram | safe }}</pre>
+</div>
+
+{% if wf_diagram %}
+<div class="card">
+  <h3 style="margin-top:0">Workflow DAG — latest run live status
+    <span class="mut">(👤 = human gate → assignee)</span></h3>
+  <pre class="mermaid">{{ wf_diagram | safe }}</pre>
+</div>
+{% endif %}
 {% endblock %}
