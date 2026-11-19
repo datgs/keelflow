@@ -1,0 +1,58 @@
+{% extends "base.html" %}
+{% block title %}Inbox — invoice demo{% endblock %}
+{% block content %}
+<div class="card">
+  <h3 style="margin-top:0">My tasks ({{ me }})</h3>
+  <table>
+    <tr><th>Task</th><th>Invoice</th><th>Assignee</th><th>Claimed</th><th>Actions</th></tr>
+    {% for t in tasks %}
+    <tr>
+      <td>{{ t.kind }}<div class="mut">{{ t.type }}</div></td>
+      <td><a href="/invoices/{{ t.payload.entity_id }}?as={{ me }}">
+          {{ t.payload.entity_id }}</a></td>
+      <td class="mut">{{ t.assignee or "—" }}</td>
+      <td class="mut">{{ t.claimed_by or "unclaimed" }}</td>
+      <td>
+        {% if not t.claimed_by %}
+        <form method="post" action="/tasks/{{ t.id }}/claim?as={{ me }}"
+              style="display:inline">
+          <button>claim</button>
+        </form>
+        {% endif %}
+        {% if t.decisions %}
+          {% for d in t.decisions %}
+          <form method="post"
+                action="/tasks/{{ t.id }}/decision/{{ d }}?as={{ me }}"
+                style="display:inline">
+            <button class="{{ 'btn-primary' if d=='approve' else 'btn-danger' }}">
+              {{ d }}</button>
+          </form>
+          {% endfor %}
+        {% elif t.claimed_by or t.type != 'human.review@v1' %}
+          <form method="post"
+                action="/tasks/{{ t.id }}/decision/approve?as={{ me }}"
+                style="display:inline">
+            <button class="btn-primary">
+              {{ "re-post" if t.type=="human.posting_fix@v1" else "approve" }}
+            </button>
+          </form>
+          {% if t.type == "human.gl_check@v1" %}
+          <form method="post"
+                action="/tasks/{{ t.id }}/decision/reject?as={{ me }}"
+                style="display:inline">
+            <button class="btn-danger">reject</button>
+          </form>
+          {% endif %}
+        {% endif %}
+      </td>
+    </tr>
+    {% endfor %}
+    {% if not tasks %}
+    <tr><td colspan="5" class="mut">no open tasks for {{ me }} —
+      check role assignment (gl tasks → gl1, finance → fin1)</td></tr>
+    {% endif %}
+  </table>
+</div>
+<p class="mut">First claim wins — claiming as one user blocks completion by
+others. gl_check waits in the posting DAG; completing it finishes the run.</p>
+{% endblock %}

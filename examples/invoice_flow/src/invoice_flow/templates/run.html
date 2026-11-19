@@ -1,0 +1,36 @@
+{% extends "base.html" %}
+{% block title %}Run {{ run.id }}{% endblock %}
+{% block content %}
+<div class="card">
+  <h2 style="margin:0 0 8px">{{ run.workflow }}
+    <span class="state s-{{ 'posted' if run.status=='done' else 'posting_failed' }}">{{ run.status }}</span></h2>
+  <div class="mut">
+    id {{ run.id }} ·
+    {% if run.terminal_outcome %}outcome <strong>{{ run.terminal_outcome }}</strong> ·{% endif %}
+    callback {{ run.callback_state }} ·
+    {{ run.created_at }}
+  </div>
+
+  <h3>Steps</h3>
+  <div class="dag">
+    {% for s in run.steps %}
+    <div class="node {{ s.status }}">
+      <div class="nstatus">{{ s.status }}</div>
+      <div><strong>{{ s.step_id }}</strong></div>
+      <div class="mut">{{ s.type }}</div>
+      {% if s.job_id %}<div><a href="/jobs/{{ s.job_id }}?as={{ me }}">job →</a></div>{% endif %}
+      {% if s.outputs %}<div class="mut">{{ s.outputs | tojson }}</div>{% endif %}
+    </div>
+    {% if not loop.last %}<div class="edge {{ 'on' if s.status=='done' }}"></div>{% endif %}
+    {% endfor %}
+  </div>
+  <p class="mut">A <em>blocked</em> step is a human task parked in an inbox —
+  completing it unblocks the run. Refresh to see progress (manual refresh in
+  this demo).</p>
+</div>
+
+<div class="card">
+  <h3 style="margin-top:0">Run record</h3>
+  <pre>{{ run | json_pretty }}</pre>
+</div>
+{% endblock %}

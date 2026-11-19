@@ -1,0 +1,66 @@
+{% extends "base.html" %}
+{% block title %}{{ inv.number }} — invoice demo{% endblock %}
+{% block content %}
+<div class="card">
+  <h2 style="margin:0 0 8px">{{ inv.number }}
+    <span class="state s-{{ state }}">{{ state }}</span></h2>
+  <div class="mut">{{ inv.vendor }} · {{ "%.2f"|format(inv.amount) }}
+    {{ inv.currency }} · created {{ inv.created_at }}</div>
+  {% if gl %}<div class="mut">GL: {{ gl.journal_ref }}</div>{% endif %}
+  {% if posting %}<div class="mut">Posted {{ "%.2f"|format(posting.amount) }}
+    by {{ posting.posted_by }}</div>{% endif %}
+
+  <div style="margin-top:12px; display:flex; gap:8px; align-items:center">
+    {% for a in actions %}
+      {% if a in ("submit","resubmit","approve") %}
+      <form method="post" action="/invoices/{{ inv.number }}/action/{{ a }}?as={{ me }}">
+        <button class="{{ 'btn-primary' if a=='approve' else '' }}">{{ a }}</button>
+      </form>
+      {% elif a in ("repost","retry_post") %}
+      <form method="post" action="/invoices/{{ inv.number }}/resume?as={{ me }}">
+        <button class="btn-primary">{{ a }} (resume run)</button>
+      </form>
+      {% endif %}
+    {% endfor %}
+    {% if not actions %}<span class="mut">no actions for {{ me }}
+      in state {{ state }}</span>{% endif %}
+    <form method="post" action="/invoices/{{ inv.number }}/fail_toggle?as={{ me }}"
+          style="margin-left:auto">
+      <button class="btn-danger" title="demo: simulate posting failure">
+        {{ "☑" if inv.fail_post else "☐" }} fail next posting</button>
+    </form>
+  </div>
+</div>
+
+<div class="card">
+  <h3 style="margin-top:0">Posting workflow</h3>
+  {% if runs %}
+    {% for r in runs %}
+    <div>
+      <a href="/runs/{{ r.id }}?as={{ me }}">{{ r.workflow }}</a>
+      — <span class="state s-{{ 'posted' if r.status=='done' else 'posting_failed' }}">{{ r.status }}</span>
+      {% if r.terminal_outcome %}<span class="mut">outcome: {{ r.terminal_outcome }}</span>{% endif %}
+      <span class="mut">callback: {{ r.callback_state }}</span>
+    </div>
+    {% endfor %}
+  {% else %}
+    <div class="mut">no run yet — approve the invoice to trigger post.wf@v1</div>
+  {% endif %}
+</div>
+
+<div class="card">
+  <h3 style="margin-top:0">Audit trail</h3>
+  <table>
+    <tr><th>When</th><th>Actor</th><th>Action</th><th>Changes</th></tr>
+    {% for t in trace %}
+    <tr>
+      <td class="mut">{{ t.occurred_at }}</td>
+      <td>{{ t.actor.id }}<span class="mut"> ({{ t.actor.type }})</span></td>
+      <td>{{ t.action }}</td>
+      <td class="mut">{{ t.changes | tojson }}</td>
+    </tr>
+    {% endfor %}
+    {% if not trace %}<tr><td colspan="4" class="mut">empty</td></tr>{% endif %}
+  </table>
+</div>
+{% endblock %}

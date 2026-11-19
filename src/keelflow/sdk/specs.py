@@ -50,6 +50,7 @@ class TaskUiSpec:
     quick_actions: tuple[dict[str, Any], ...] = ()  # level 2 buttons
     form_schema: dict[str, Any] | None = None       # level 3 embedded form
     display_fields: tuple[str, ...] = ()            # summary card fields
+    assignee_role: str | None = None                # role:X inbox assignment
 
 
 @dataclass(frozen=True)

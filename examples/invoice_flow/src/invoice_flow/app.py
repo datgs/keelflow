@@ -1,40 +1,71 @@
 """invoice_flow demo — FastAPI app.
 
-Domain data lives in plain app tables (`demo_invoices`); engine data in
-`keelflow_*`. The app never writes engine tables directly — all mutations
-go through SM / HumanTaskService / JobService in the caller's TX.
+    KEELFLOW_DSN=postgresql://... uv run uvicorn invoice_flow.app:app --port 8501
+
+Demo only: no authentication. The acting user is chosen with `?as=<uid>`
+(u1=clerk, fin1=finance, gl1=GL, mgr=manager). All engine mutations go
+through SM / HumanTaskService / WorkflowService inside a real TX; the app
+never writes engine tables directly.
 """
 from __future__ import annotations
 
+import json
 import os
 from contextlib import asynccontextmanager
+from pathlib import Path
 
+import chancy
 import psycopg
 from fastapi import FastAPI, Form, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
 from psycopg.rows import dict_row
 
+from keelflow.engine.audit import PostgresAuditService
+from keelflow.engine.enqueue import JobService
 from keelflow.engine.human import HumanTaskService
 from keelflow.engine.monitoring import MonitoringService
 from keelflow.engine.statemachine import EngineStateMachineService
-from keelflow.engine.audit import PostgresAuditService
+from keelflow.engine.workflow import WorkflowService
 from keelflow.sdk import Actor, EntityRef, JobContext
 
-from .registry import build_registry
+from .registry import DSN_ENV, PERMISSIONS, ROLES, build_registry
 
-DSN = os.environ["KEELFLOW_DSN"]
-templates = Jinja2Templates(directory=os.path.join(os.path.dirname(__file__), "templates"))
+DSN = os.environ.get(
+    DSN_ENV, "postgresql://postgres:postgres@localhost:5544/keelflow")
+KERNEL_PREFIX = os.environ.get("KEELFLOW_KERNEL_PREFIX", "keelflow_kernel_")
+
+templates = Jinja2Templates(
+    directory=str(Path(__file__).parent / "templates"))
+templates.env.filters["json_pretty"] = lambda v: json.dumps(
+    v, indent=2, default=str)
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    app.state.registry = build_registry()
-    app.state.sm = EngineStateMachineService(app.state.registry)
-    app.state.human = HumanTaskService(app.state.registry)
+    registry = build_registry()
+    kernel_cm = chancy.Chancy(DSN, prefix=KERNEL_PREFIX)
+    kernel = await kernel_cm.__aenter__()
+    await kernel.migrate()
+    await kernel.declare(
+        chancy.Queue("default", concurrency=8,
+                     executor=chancy.Chancy.Executor.Async),
+        upsert=True,
+    )
+    audit = PostgresAuditService()
+    app.state.kernel = kernel
+    app.state.registry = registry
+    app.state.jobs = JobService(registry, kernel)
+    app.state.sm = EngineStateMachineService(registry, kernel, audit=audit)
+    app.state.human = HumanTaskService(registry, kernel,
+                                       sm=app.state.sm)
+    app.state.wf = WorkflowService(registry, app.state.jobs)
     app.state.monitoring = MonitoringService()
-    app.state.audit = PostgresAuditService()
-    yield
+    app.state.audit = audit
+    try:
+        yield
+    finally:
+        await kernel_cm.__aexit__(None, None, None)
 
 
 app = FastAPI(title="keelflow invoice demo", lifespan=lifespan)
@@ -44,87 +75,163 @@ async def conn():
     return await psycopg.AsyncConnection.connect(DSN, autocommit=True)
 
 
-def actor(request: Request) -> Actor:
+def ctx_for(request: Request) -> JobContext:
+    uid = request.query_params.get("as", "u1")
+    return JobContext(actor=Actor.user(uid),
+                      permissions=frozenset(PERMISSIONS.get(uid, set())))
+
+
+def actor_for(request: Request) -> Actor:
     return Actor.user(request.query_params.get("as", "u1"))
 
 
-ROLES = {"u1": [], "fin1": ["finance"], "mgr": ["finance", "manager"]}
-
-
-def ctx_for(request: Request) -> JobContext:
-    uid = request.query_params.get("as", "u1")
-    perms = {"u1": {"inv.submit", "perm:own"},
-             "fin1": {"inv.approve"},
-             "mgr": {"inv.submit", "inv.approve"}}.get(uid, set())
-    return JobContext(actor=Actor.user(uid), permissions=frozenset(perms))
+def roles_for(request: Request) -> list[str]:
+    return ROLES.get(request.query_params.get("as", "u1"), [])
 
 
 def back(request: Request, path: str) -> RedirectResponse:
-    q = request.query_params.get("as")
-    return RedirectResponse(f"{path}?as={q}" if q else path, status_code=303)
+    me = request.query_params.get("as", "u1")
+    sep = "&" if "?" in path else "?"
+    return RedirectResponse(f"{path}{sep}as={me}", status_code=303)
 
 
 # ── invoices ─────────────────────────────────────────────────────────────
 
 @app.get("/", response_class=HTMLResponse)
-async def list_invoices(request: Request):
+async def invoice_list(request: Request):
     c = await conn()
-    cur = await c.execute(
-        "SELECT i.id, i.number, i.amount, s.state"
-        " FROM demo_invoices i"
-        " LEFT JOIN keelflow_entity_state s"
-        "   ON s.entity_type='invoice' AND s.entity_id=i.id::text"
-        " ORDER BY i.id"
-    )
-    rows = await cur.fetchall()
-    me = actor(request)
-    enriched = []
-    for rid, number, amount, state in rows:
-        actions = await app.state.sm.allowed_actions(
-            EntityRef(type="invoice", id=str(rid)), me, c)
-        enriched.append({"id": rid, "number": number, "amount": amount,
-                         "state": state or "draft", "actions": actions})
+    async with c.cursor(row_factory=dict_row) as cur:
+        await cur.execute(
+            "SELECT i.number, i.vendor, i.amount, i.currency, i.fail_post,"
+            " COALESCE(e.state, 'draft') AS state"
+            " FROM demo_invoices i"
+            " LEFT JOIN keelflow_entity_state e"
+            "  ON e.entity_type='invoice' AND e.entity_id=i.number"
+            " ORDER BY i.number"
+        )
+        invoices = await cur.fetchall()
     await c.close()
     return templates.TemplateResponse(
-        "invoices.html", {"request": request, "rows": enriched,
-                          "me": me.id})
+        request, "invoices.html",
+        { "invoices": invoices,
+         "me": request.query_params.get("as", "u1"),
+         "roles": roles_for(request),
+         "err": request.query_params.get("err")})
 
 
-@app.get("/invoices/{iid}", response_class=HTMLResponse)
-async def invoice_detail(request: Request, iid: int):
+@app.get("/invoices/{number}", response_class=HTMLResponse)
+async def invoice_detail(request: Request, number: str):
     c = await conn()
-    row = await (await c.execute(
-        "SELECT id, number, amount FROM demo_invoices WHERE id=%s", (iid,)
-    )).fetchone()
-    state = await app.state.sm.current(EntityRef(type="invoice", id=str(iid)), c)
-    audit = await app.state.audit.trace(c, EntityRef(type="invoice", id=str(iid)))
-    steps = await (await c.execute(
-        "SELECT sr.step_id, sr.status, sr.job_id, wr.id AS run_id"
-        " FROM keelflow_step_runs sr"
-        " JOIN keelflow_workflow_runs wr ON wr.id = sr.run_id"
-        " WHERE wr.inputs->>'entity_id' = %s ORDER BY sr.created_at",
-        (str(iid),),
-    )).fetchall()
+    async with c.cursor(row_factory=dict_row) as cur:
+        await cur.execute(
+            "SELECT * FROM demo_invoices WHERE number=%s", (number,))
+        inv = await cur.fetchone()
+        if inv is None:
+            await c.close()
+            return HTMLResponse(f"invoice {number} not found", status_code=404)
+        await cur.execute(
+            "SELECT state, version FROM keelflow_entity_state"
+            " WHERE entity_type='invoice' AND entity_id=%s",
+            (number,))
+        ent = await cur.fetchone()
+        await cur.execute(
+            "SELECT id, workflow, status, terminal_outcome, callback_state,"
+            " created_at FROM keelflow_workflow_runs"
+            " WHERE triggered_by_entity_type='invoice'"
+            " AND triggered_by_entity_id=%s"
+            " ORDER BY created_at", (number,))
+        runs = await cur.fetchall()
+        await cur.execute(
+            "SELECT journal_ref FROM demo_gl_records WHERE invoice_no=%s",
+            (number,))
+        gl = await cur.fetchone()
+        await cur.execute(
+            "SELECT amount, posted_by, posted_at FROM demo_ledger_postings"
+            " WHERE invoice_no=%s", (number,))
+        posting = await cur.fetchone()
+    trace = await app.state.audit.trace(
+        c, EntityRef(type="invoice", id=number))
+    actions = await app.state.sm.allowed_actions(
+        EntityRef(type="invoice", id=number), actor_for(request), c,
+        permissions=ctx_for(request).permissions)
     await c.close()
     return templates.TemplateResponse(
-        "invoice.html", {"request": request, "inv": row,
-                         "state": state or "draft", "audit": audit,
-                         "steps": steps})
+        request, "invoice.html",
+        { "inv": inv,
+         "state": (ent["state"] if ent else "draft"),
+         "actions": actions, "runs": runs, "gl": gl,
+         "posting": posting, "trace": trace,
+         "me": request.query_params.get("as", "u1"),
+         "err": request.query_params.get("err")})
 
 
-@app.post("/invoices/{iid}/act/{action}")
-async def act(request: Request, iid: int, action: str):
+@app.post("/invoices")
+async def create_invoice(request: Request,
+                         number: str = Form(...),
+                         vendor: str = Form("Unknown Vendor"),
+                         amount: float = Form(...)):
     c = await conn()
-    ctx = ctx_for(request)
+    await c.execute(
+        "INSERT INTO demo_invoices (number, vendor, amount)"
+        " VALUES (%s, %s, %s) ON CONFLICT (number) DO NOTHING",
+        (number, vendor, amount))
+    await c.execute(
+        "INSERT INTO keelflow_entity_state (entity_type, entity_id, state)"
+        " VALUES ('invoice', %s, 'draft')"
+        " ON CONFLICT (entity_type, entity_id) DO NOTHING",
+        (number,))
+    await c.close()
+    return back(request, "/")
+
+
+@app.post("/invoices/{number}/fail_toggle")
+async def fail_toggle(request: Request, number: str):
+    c = await conn()
+    await c.execute(
+        "UPDATE demo_invoices SET fail_post = NOT fail_post WHERE number=%s",
+        (number,))
+    await c.close()
+    return back(request, f"/invoices/{number}")
+
+
+@app.post("/invoices/{number}/action/{action}")
+async def sm_action(request: Request, number: str, action: str):
+    """State-machine actions the user performs directly:
+    submit, resubmit, approve (which triggers post.wf@v1)."""
+    c = await conn()
     try:
-        async with c.transaction(), c.cursor() as cur:
+        async with c.transaction(), c.cursor(row_factory=dict_row) as cur:
             await app.state.sm.transition(
-                EntityRef(type="invoice", id=str(iid)), action, ctx, cur)
-        msg = "ok"
+                EntityRef(type="invoice", id=number), action,
+                ctx_for(request), cur)
+        err = None
     except (ValueError, PermissionError) as e:
-        msg = str(e)
+        err = str(e)
     await c.close()
-    return back(request, f"/invoices/{iid}" + (f"?msg={msg}" if msg != "ok" else ""))
+    return back(request, f"/invoices/{number}" + (f"?err={err}" if err else ""))
+
+
+@app.post("/invoices/{number}/resume")
+async def resume_run(request: Request, number: str):
+    """Repost / retry_post — resume the failed or rejected workflow run."""
+    c = await conn()
+    async with c.cursor(row_factory=dict_row) as cur:
+        await cur.execute(
+            "SELECT id FROM keelflow_workflow_runs"
+            " WHERE triggered_by_entity_type='invoice'"
+            " AND triggered_by_entity_id=%s AND status IN ('done','failed')"
+            " AND terminal_outcome IN ('rejected','failed')"
+            " ORDER BY created_at DESC LIMIT 1", (number,))
+        run = await cur.fetchone()
+    try:
+        if run is None:
+            raise ValueError("no resumable run for this invoice")
+        await app.state.wf.resume_run(c, str(run["id"]), ctx_for(request))
+        err = None
+    except (ValueError, KeyError) as e:
+        err = str(e)
+    await c.close()
+    return back(request, f"/invoices/{number}" + (f"?err={err}" if err else ""))
 
 
 # ── inbox ────────────────────────────────────────────────────────────────
@@ -132,34 +239,87 @@ async def act(request: Request, iid: int, action: str):
 @app.get("/inbox", response_class=HTMLResponse)
 async def inbox(request: Request):
     c = await conn()
-    me = actor(request)
-    tasks = await app.state.human.my_tasks(c, me, roles=ROLES.get(me.id, []))
+    tasks = await app.state.human.my_tasks(
+        c, actor_for(request), roles=roles_for(request))
+    for t in tasks:
+        t["decisions"] = sorted(
+            ((t["payload"] or {}).get("sm_actions") or {}).keys())
+        kind = {
+            "human.review@v1": "Finance review",
+            "human.gl_check@v1": "GL check (posting)",
+            "human.posting_fix@v1": "Posting fix-up",
+        }.get(t["type"], t["type"])
+        t["kind"] = kind
     await c.close()
     return templates.TemplateResponse(
-        "inbox.html", {"request": request, "tasks": tasks, "me": me.id})
+        request, "inbox.html",
+        { "tasks": tasks,
+         "me": request.query_params.get("as", "u1"),
+         "err": request.query_params.get("err")})
 
 
 @app.post("/tasks/{tid}/claim")
 async def claim(request: Request, tid: str):
     c = await conn()
     try:
-        await app.state.human.claim(c, tid, actor(request))
+        await app.state.human.claim(c, tid, actor_for(request))
         err = None
-    except PermissionError as e:
+    except (PermissionError, KeyError) as e:
         err = str(e)
     await c.close()
     return back(request, "/inbox" + (f"?err={err}" if err else ""))
 
 
-@app.post("/tasks/{tid}/complete")
-async def complete(request: Request, tid: str,
-                   decision: str = Form("approve"), note: str = Form("")):
+@app.post("/tasks/{tid}/decision/{decision}")
+async def decide(request: Request, tid: str, decision: str,
+                 note: str = Form("")):
+    """Complete a human task.
+
+    Three task kinds:
+    - SM-created (payload.sm_actions) → complete_and_transition
+    - posting fix-up (human.posting_fix) → mark done + resume the run
+    - workflow step (gl_check) → human.complete → unblocks the run
+    """
     c = await conn()
     try:
-        await app.state.human.complete(
-            c, tid, actor(request), {"decision": decision, "note": note})
+        async with c.cursor(row_factory=dict_row) as cur:
+            await cur.execute(
+                "SELECT type, payload FROM keelflow_jobs WHERE id=%s", (tid,))
+            row = await cur.fetchone()
+        if row is None:
+            raise KeyError(f"task {tid} not found")
+        payload = row["payload"]
+        if isinstance(payload, str):
+            payload = json.loads(payload)
+        sm_actions = (payload or {}).get("sm_actions") or {}
+
+        if sm_actions:
+            await app.state.human.complete_and_transition(
+                c, tid, actor_for(request), decision, ctx_for(request), note)
+        elif row["type"] == "human.posting_fix@v1":
+            # fix-up: mark task done + resume the run in ONE transaction
+            # (resume_run's inner transaction becomes a savepoint).
+            async with c.transaction(), c.cursor(row_factory=dict_row) as cur:
+                await cur.execute(
+                    "UPDATE keelflow_jobs SET status='done',"
+                    " result=%s, updated_at=now() WHERE id=%s",
+                    (json.dumps({"decision": decision, "note": note}), tid))
+                await cur.execute(
+                    "SELECT id FROM keelflow_workflow_runs"
+                    " WHERE triggered_by_entity_type='invoice'"
+                    " AND triggered_by_entity_id=%s AND terminal_outcome='failed'"
+                    " ORDER BY created_at DESC LIMIT 1",
+                    (payload["entity_id"],))
+                run = await cur.fetchone()
+                if run:
+                    await app.state.wf.resume_run(
+                        c, str(run["id"]), ctx_for(request))
+        else:
+            await app.state.human.complete(
+                c, tid, actor_for(request),
+                {"decision": decision, "note": note})
         err = None
-    except (PermissionError, KeyError) as e:
+    except (PermissionError, KeyError, ValueError) as e:
         err = str(e)
     await c.close()
     return back(request, "/inbox" + (f"?err={err}" if err else ""))
@@ -172,8 +332,12 @@ async def run_detail(request: Request, rid: str):
     c = await conn()
     run = await app.state.monitoring.runs_get(c, rid)
     await c.close()
+    if run is None:
+        return HTMLResponse(f"run {rid} not found", status_code=404)
     return templates.TemplateResponse(
-        "run.html", {"request": request, "run": run})
+        request, "run.html",
+        { "run": run,
+         "me": request.query_params.get("as", "u1")})
 
 
 @app.get("/jobs/{jid}", response_class=HTMLResponse)
@@ -181,16 +345,17 @@ async def job_detail(request: Request, jid: str):
     c = await conn()
     job = await app.state.monitoring.job_get(c, jid)
     await c.close()
+    if job is None:
+        return HTMLResponse(f"job {jid} not found", status_code=404)
     return templates.TemplateResponse(
-        "job.html", {"request": request, "job": job})
+        request, "job.html",
+        { "job": job,
+         "me": request.query_params.get("as", "u1")})
 
 
-@app.post("/invoices")
-async def create_invoice(request: Request,
-                         number: str = Form(...), amount: float = Form(...)):
+@app.post("/jobs/{jid}/retry")
+async def job_retry(request: Request, jid: str):
     c = await conn()
-    await c.execute(
-        "INSERT INTO demo_invoices (number, amount) VALUES (%s, %s)",
-        (number, amount))
+    await app.state.monitoring.retry_job(c, jid)
     await c.close()
-    return back(request, "/")
+    return back(request, f"/jobs/{jid}")

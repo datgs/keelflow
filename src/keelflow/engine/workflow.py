@@ -218,7 +218,8 @@ class WorkflowService:
 
         svc = getattr(self, "_sm", None)
         if svc is None:
-            svc = EngineStateMachineService(self._registry, self._jobs.kernel)
+            svc = EngineStateMachineService(
+            self._registry, self._jobs.kernel, audit=_postgres_audit())
             self._sm = svc
         return svc
 
@@ -339,6 +340,12 @@ async def on_job_finished(
             await advance_run(cursor, row["run_id"], registry, kernel, parent_ctx)
 
 
+def _postgres_audit():
+    from .audit import PostgresAuditService
+
+    return PostgresAuditService()
+
+
 # ── terminal outcome + trigger callback ───────────────────────────────────
 
 
@@ -409,7 +416,8 @@ async def _run_trigger_callback(cursor, run_id, registry, outcome: str) -> None:
             type=run["triggered_by_entity_type"],
             id=run["triggered_by_entity_id"],
         )
-        sm_svc = EngineStateMachineService(registry)
+        sm_svc = EngineStateMachineService(registry,
+                                           audit=_postgres_audit())
         await sm_svc._internal_transition(cursor, entity, action, ctx)
         # optional failure-side human task
         if outcome == "failed" and config.get("failure_job"):

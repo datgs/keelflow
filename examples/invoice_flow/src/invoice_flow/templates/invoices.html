@@ -1,0 +1,29 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="card">
+  <form method="post" action="/invoices?as={{ me }}" style="display:flex;gap:8px;align-items:center">
+    <strong>New invoice</strong>
+    <input name="number" placeholder="INV-1004" required>
+    <input name="vendor" placeholder="Vendor">
+    <input name="amount" type="number" step="0.01" placeholder="0.00" required>
+    <button class="btn-primary">Create</button>
+  </form>
+</div>
+<div class="card">
+  <table>
+    <tr><th>Number</th><th>Vendor</th><th>Amount</th><th>State</th><th></th></tr>
+    {% for i in invoices %}
+    <tr>
+      <td><a href="/invoices/{{ i.number }}?as={{ me }}">{{ i.number }}</a>
+          {% if i.fail_post %}<span class="mut">⚠ fail_post</span>{% endif %}</td>
+      <td>{{ i.vendor }}</td>
+      <td>{{ "%.2f"|format(i.amount) }} {{ i.currency }}</td>
+      <td><span class="state s-{{ i.state }}">{{ i.state }}</span></td>
+      <td class="mut"><a href="/invoices/{{ i.number }}?as={{ me }}">open →</a></td>
+    </tr>
+    {% endfor %}
+  </table>
+</div>
+<p class="mut">Roles: u1=clerk (submit) · fin1=finance (approve) ·
+gl1=GL check · mgr=all. Switch user in the header.</p>
+{% endblock %}
