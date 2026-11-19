@@ -47,6 +47,7 @@ pythonpath = [
     "src",
     "examples/invoice_flow/src",
     "examples/supplier_onboarding/src",
+    "examples/bulk_import/src",
 ]
 
 [tool.mypy]

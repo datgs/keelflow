@@ -42,6 +42,7 @@ from pydantic import BaseModel
 
 from ..sdk import JobContext, JobResult
 from ..sdk.handler import JobHandler
+from ..sdk.specs import JobStatus
 from . import worker as _worker
 from .worker import DSN_ENV, _get_registry
 
@@ -80,75 +81,79 @@ class BulkJobHandler(JobHandler):
         raise NotImplementedError
 
     async def run(self, ctx: JobContext, payload: BaseModel) -> JobResult:
+        """Partition pending rows into chunks + enqueue chunk jobs.
+
+        Runs on ctx.tx — the handler's own dispatch transaction — so rows
+        staged by a subclass's `run` (or pre-staged by the caller) are
+        visible, and partition + chunk enqueue commit atomically with the
+        job finish. A separate connection would see a stale snapshot.
+        """
         job_id = ctx.extra["job_id"]  # injected by dispatch
-        dsn = os.environ[DSN_ENV]
         assert isinstance(payload, BulkJobPayload)
         kernel = _worker._kernel_client
         if kernel is None:
             raise RuntimeError("no kernel client configured; run via worker")
-        conn = await psycopg.AsyncConnection.connect(dsn)
-        try:
-            async with conn.transaction(), conn.cursor(row_factory=dict_row) as cur:
-                # rows staged for this job that are not yet in a chunk
-                await cur.execute(
-                    "SELECT id FROM keelflow_row_status"
-                    " WHERE job_id=%s AND status='pending' AND chunk_id IS NULL"
-                    " ORDER BY id FOR UPDATE SKIP LOCKED",
-                    (job_id,),
-                )
-                row_ids = [r["id"] for r in await cur.fetchall()]
-                if not row_ids:
-                    return JobResult(status="done", outputs={"chunks": 0})
+        cur = (ctx.tx.connection.cursor(row_factory=dict_row)
+               if hasattr(ctx.tx, "connection") else ctx.tx)
 
-                size = max(1, payload.chunk_size)
-                n_chunks = (len(row_ids) + size - 1) // size
-                now = datetime.now(UTC)
+        # rows staged for this job that are not yet in a chunk
+        await cur.execute(
+            "SELECT id FROM keelflow_row_status"
+            " WHERE job_id=%s AND status='pending' AND chunk_id IS NULL"
+            " ORDER BY id FOR UPDATE SKIP LOCKED",
+            (job_id,),
+        )
+        row_ids = [r["id"] for r in await cur.fetchall()]
+        if not row_ids:
+            return JobResult(status="done", outputs={"chunks": 0})
 
-                for ci in range(n_chunks):
-                    chunk_id = uuid.uuid4()
-                    ids = row_ids[ci * size : (ci + 1) * size]
-                    await cur.execute(
-                        "INSERT INTO keelflow_chunks (id, job_id, idx, status)"
-                        " VALUES (%s, %s, %s, 'pending')",
-                        (chunk_id, job_id, ci),
-                    )
-                    await cur.execute(
-                        "UPDATE keelflow_row_status SET chunk_id=%s WHERE id = ANY(%s)",
-                        (chunk_id, ids),
-                    )
-                    child_id = uuid.uuid4()
-                    child_ctx = _child_ctx(ctx, child_id)
-                    child_payload = ChunkPayload(
-                        parent_job_id=job_id, chunk_id=str(chunk_id)
-                    ).model_dump(mode="json")
-                    await cur.execute(
-                        """
-                        INSERT INTO keelflow_jobs
-                            (id, type, status, payload, context, attempts,
-                             max_attempts, run_at, parent_job_id,
-                             created_at, updated_at)
-                        VALUES (%s,%s,'pending',%s,%s,0,3,%s,%s,%s,%s)
-                        """,
-                        (
-                            child_id, CHUNK_TYPE,
-                            json.dumps(child_payload),
-                            json.dumps(_ctx_d(child_ctx)),
-                            now, job_id, now, now,
-                        ),
-                    )
-                    await kernel.push_ex(
-                        cur,
-                        _kernel_job(child_id, str(chunk_id)),
-                    )
+        size = max(1, payload.chunk_size)
+        n_chunks = (len(row_ids) + size - 1) // size
+        now = datetime.now(UTC)
 
-                # parent stays running until fan-in (dispatch honors marker)
-                return JobResult(
-                    status="done",
-                    outputs={PARENT_HOLD: True, "chunks": n_chunks,
-                             "rows": len(row_ids)},
-                )
-        finally:
-            await conn.close()
+        for ci in range(n_chunks):
+            chunk_id = uuid.uuid4()
+            ids = row_ids[ci * size : (ci + 1) * size]
+            await cur.execute(
+                "INSERT INTO keelflow_chunks (id, job_id, idx, status)"
+                " VALUES (%s, %s, %s, 'pending')",
+                (chunk_id, job_id, ci),
+            )
+            await cur.execute(
+                "UPDATE keelflow_row_status SET chunk_id=%s WHERE id = ANY(%s)",
+                (chunk_id, ids),
+            )
+            child_id = uuid.uuid4()
+            child_ctx = _child_ctx(ctx, child_id)
+            child_payload = ChunkPayload(
+                parent_job_id=job_id, chunk_id=str(chunk_id)
+            ).model_dump(mode="json")
+            await cur.execute(
+                """
+                INSERT INTO keelflow_jobs
+                    (id, type, status, payload, context, attempts,
+                     max_attempts, run_at, parent_job_id,
+                     created_at, updated_at)
+                VALUES (%s,%s,'pending',%s,%s,0,3,%s,%s,%s,%s)
+                """,
+                (
+                    child_id, CHUNK_TYPE,
+                    json.dumps(child_payload),
+                    json.dumps(_ctx_d(child_ctx)),
+                    now, job_id, now, now,
+                ),
+            )
+            await kernel.push_ex(
+                cur,
+                _kernel_job(child_id, str(chunk_id)),
+            )
+
+        # parent stays running until fan-in (dispatch honors marker)
+        return JobResult(
+            status="done",
+            outputs={PARENT_HOLD: True, "chunks": n_chunks,
+                     "rows": len(row_ids)},
+        )
 
 
 class ChunkJobHandler(JobHandler):
@@ -300,8 +305,16 @@ class ChunkJobHandler(JobHandler):
         await conn.commit()
 
     async def _fan_in(self, conn, parent_job_id) -> None:
-        """Last chunk to settle flips the parent job to its final status."""
-        async with conn.cursor(row_factory=dict_row) as cur:
+        """Last chunk to settle flips the parent job to its final status.
+
+        If the parent belongs to a workflow step, also advance the run —
+        same transaction, so step completion and downstream enqueue are
+        atomic with the parent's final status.
+        """
+        from . import workflow as _wf
+        from .worker import _kernel_client
+
+        async with conn.transaction(), conn.cursor(row_factory=dict_row) as cur:
             await cur.execute(
                 "SELECT status, count(*) FROM keelflow_chunks"
                 " WHERE job_id=%s GROUP BY status",
@@ -311,12 +324,39 @@ class ChunkJobHandler(JobHandler):
             if counts.get("pending") or counts.get("claimed") or counts.get("running"):
                 return  # still in flight
             final = "failed" if counts.get("failed") else "done"
+
+            await cur.execute(
+                "SELECT status, count(*) FROM keelflow_row_status"
+                " WHERE job_id=%s GROUP BY status",
+                (parent_job_id,),
+            )
+            rows = {r["status"]: r["count"] for r in await cur.fetchall()}
+            summary = {
+                "chunks": counts,
+                "rows_total": sum(rows.values()),
+                "rows_done": rows.get("done", 0),
+                "rows_failed": rows.get("failed", 0),
+            }
             await cur.execute(
                 "UPDATE keelflow_jobs SET status=%s, updated_at=now(),"
                 " result = COALESCE(result,'{}'::jsonb) || %s::jsonb"
-                " WHERE id=%s",
-                (final, json.dumps({"chunks": counts}), parent_job_id),
+                " WHERE id=%s RETURNING result",
+                (final, json.dumps(summary), parent_job_id),
             )
+            result = (await cur.fetchone())["result"] or {}
+
+            # workflow step link — advance the run in the same TX
+            await cur.execute(
+                "SELECT id FROM keelflow_step_runs WHERE job_id=%s",
+                (parent_job_id,),
+            )
+            step = await cur.fetchone()
+            if step and _kernel_client is not None:
+                registry = _get_registry()
+                await _wf.on_job_finished(
+                    conn, _kernel_client, registry, parent_job_id,
+                    str(step["id"]), JobStatus(final), result,
+                )
         await conn.commit()
 
     async def _safe_mark_failed(self, conn, chunk_id, parent_job_id, error) -> None:

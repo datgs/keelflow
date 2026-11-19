@@ -1,0 +1,77 @@
+<!doctype html>
+<html>
+<head>
+<title>{% block title %}keelflow · bulk import{% endblock %}</title>
+<style>
+  :root { color-scheme: light; }
+  body { font: 14px/1.45 -apple-system, "SF Mono", Menlo, monospace;
+         margin: 0; background: #f4f6f8; color: #22292f; }
+  a { color: #0f6cc9; text-decoration: none; } a:hover { text-decoration: underline; }
+  header { background: #22292f; color: #f4f6f8; padding: 10px 20px;
+           display: flex; gap: 18px; align-items: baseline; }
+  header a { color: #f4f6f8; }
+  header .who { margin-left: auto; font-size: 12px; opacity: .8; }
+  header select { font: inherit; }
+  main { max-width: 1100px; margin: 0 auto; padding: 20px; }
+  .demo-warn { background: #fff3cd; border: 1px solid #e0c36b; padding: 6px 10px;
+               border-radius: 6px; font-size: 12px; margin-bottom: 14px; }
+  .card { background: #fff; border: 1px solid #d8dee4; border-radius: 8px;
+          padding: 14px; margin-bottom: 14px; }
+  table { border-collapse: collapse; width: 100%; }
+  th { text-align: left; color: #6b7780; font-weight: normal;
+       border-bottom: 1px solid #d8dee4; padding: 4px 8px; }
+  td { padding: 6px 8px; border-bottom: 1px solid #e9edf0; vertical-align: top; }
+  .status { display: inline-block; padding: 1px 8px; border-radius: 10px;
+            font-size: 12px; }
+  .st-done, .st-active, .st-succeeded, .st-imported { background: #d9ecd9; color: #205f2a; }
+  .st-running, .st-claimed, .st-importing { background: #d9e6f7; color: #1a4e8a; }
+  .st-pending, .st-uploaded { background: #eef0f2; color: #5a646c; }
+  .st-blocked { background: #fdf0d5; color: #8a6410; }
+  .st-failed, .st-rejected, .st-aborted { background: #f8d7d5; color: #8a2020; }
+  .st-skipped { background: transparent; color: #a3acb4; text-decoration: line-through; }
+  button, input[type=submit] { font: inherit; padding: 4px 12px;
+    background: #22292f; color: #f4f6f8; border: 0; border-radius: 6px; cursor: pointer; }
+  button.warn { background: #8a2020; }
+  input[type=text], select, input[type=file] { font: inherit; padding: 3px 6px; }
+  .dag { display: flex; flex-direction: column; gap: 10px; }
+  .dag-layer { display: flex; gap: 10px; flex-wrap: wrap; }
+  .dag-layer::before { content: attr(data-l); color: #b6bfc7; width: 14px; }
+  .node { border: 1px solid #d8dee4; border-radius: 8px; padding: 8px 12px;
+          min-width: 130px; background: #fff; }
+  .node .sid { font-weight: bold; }
+  .node small { color: #6b7780; display: block; }
+  .node.human { border-style: dashed; }
+  .node.skipped { opacity: .45; }
+  .node.failed { border-color: #c05c58; background: #fdf2f1; }
+  .node.active { border-color: #4f86c6; box-shadow: 0 0 0 1px #4f86c6; }
+  pre { background: #22292f; color: #d8f0d0; padding: 10px; border-radius: 6px;
+        overflow: auto; font-size: 12px; }
+  .muted { color: #6b7780; }
+  .bar { height: 10px; background: #eef0f2; border-radius: 5px; overflow: hidden;
+         display: flex; }
+  .bar > span { display: block; height: 100%; }
+  .b-done { background: #4f9e57; } .b-failed { background: #c05c58; }
+  .b-pending { background: #b6bfc7; } .b-processing { background: #4f86c6; }
+</style>
+</head>
+<body>
+<header>
+  <strong>keelflow</strong>
+  <a href="/?as={{ nav['as'] }}">imports</a>
+  <a href="/inbox?as={{ nav['as'] }}">inbox</a>
+  <span class="who">acting as
+    <select onchange="location.search='?as='+this.value">
+      {% for a in nav['actors'] %}
+      <option {{ 'selected' if a == nav['as'] }}>{{ a }}</option>
+      {% endfor %}
+    </select>
+    · perms: {{ nav['perms'] | join(', ') }}
+  </span>
+</header>
+<main>
+  <div class="demo-warn">DEMO ONLY — no auth, synthetic data, binds
+    localhost. Refresh manually.</div>
+  {% block content %}{% endblock %}
+</main>
+</body>
+</html>

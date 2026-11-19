@@ -1,0 +1,48 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="card">
+  <h2>New import</h2>
+  <form method="post" action="/upload?as={{ nav['as'] }}" enctype="multipart/form-data" style="display:inline">
+    <input type="file" name="file" accept=".csv,text/csv">
+    <button>upload CSV</button>
+  </form>
+  or
+  <form method="post" action="/upload?as={{ nav['as'] }}" style="display:inline">
+    <input type="hidden" name="generate" value="1">
+    <button>generate sample.csv (250 rows, ~8% bad)</button>
+  </form>
+  <p class="muted">{{ n_products }} products imported · {{ open_tasks }} open human tasks</p>
+</div>
+
+<div class="card">
+  <h2>Imports</h2>
+  <table>
+    <tr><th>#</th><th>file</th><th>rows</th><th>status</th>
+        <th>latest run</th><th></th></tr>
+    {% for i in imports %}
+    <tr>
+      <td>{{ i.id }}</td>
+      <td><a href="/imports/{{ i.id }}?as={{ nav['as'] }}">{{ i.filename }}</a></td>
+      <td>{{ i.rows_total }}</td>
+      <td><span class="status st-{{ i.status }}">{{ i.status }}</span></td>
+      <td>
+        {% set r = runs.get(i.id) %}
+        {% if r %}
+          <a href="/imports/{{ i.id }}?as={{ nav['as'] }}">
+            <span class="status st-{{ r.status }}">{{ r.status }}</span></a>
+          {% if r.terminal_outcome %}<span class="status st-{{ r.terminal_outcome }}">{{ r.terminal_outcome }}</span>{% endif %}
+        {% else %}—{% endif %}
+      </td>
+      <td>
+        {% if i.status == 'uploaded' %}
+        <form method="post" action="/imports/{{ i.id }}/start?as={{ nav['as'] }}" style="display:inline">
+          <button>start import</button>
+        </form>
+        {% endif %}
+      </td>
+    </tr>
+    {% endfor %}
+    {% if not imports %}<tr><td colspan="6" class="muted">no imports yet</td></tr>{% endif %}
+  </table>
+</div>
+{% endblock %}

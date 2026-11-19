@@ -1,0 +1,106 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="card">
+  <h2>#{{ imp.id }} {{ imp.filename }}
+    <span class="status st-{{ imp.status }}">{{ imp.status }}</span>
+  </h2>
+  <p class="muted">{{ imp.rows_total }} rows · {{ n_products }} products imported ·
+     {% if run %}run <a href="/runs/{{ run.id }}?as={{ nav['as'] }}">{{ (run.id|string)[:8] }}…</a>
+     <span class="status st-{{ run.status }}">{{ run.status }}</span>
+     {% if run.terminal_outcome %}<span class="status st-{{ run.terminal_outcome }}">{{ run.terminal_outcome }}</span>{% endif %}{% endif %}
+  </p>
+  {% if imp.status == 'uploaded' %}
+  <form method="post" action="/imports/{{ imp.id }}/start?as={{ nav['as'] }}">
+    <button>start import</button>
+  </form>
+  {% endif %}
+</div>
+
+{% if columns %}
+<div class="card">
+  <h3>Sample rows</h3>
+  <table>
+    <tr>{% for c in columns %}<th>{{ c }}</th>{% endfor %}</tr>
+    {% for r in sample %}
+    <tr>{% for c in columns %}<td>{{ r.data[c] }}</td>{% endfor %}</tr>
+    {% endfor %}
+  </table>
+</div>
+{% endif %}
+
+{% if run %}
+<div class="card">
+  <h3>Steps</h3>
+  <div class="dag">
+    {% for layer in layers %}
+    <div class="dag-layer" data-l="{{ loop.index0 }}">
+      {% for s in layer %}
+      <div class="node {{ 'human' if s.type.startswith('human.') }}
+                  {{ 'skipped' if s.status == 'skipped' }}
+                  {{ 'failed' if s.status == 'failed' }}
+                  {{ 'active' if s.status in ('running','claimed','pending','blocked') }}">
+        <span class="sid">{{ s.step_id }}</span>
+        <small>{{ s.type.split('@')[0] }}</small>
+        <span class="status st-{{ s.status }}">{{ s.status }}</span>
+        {% set st = stats.get(s.step_id) %}
+        {% if st %}
+          {% set total = (st.done or 0) + (st.failed or 0) + (st.pending or 0) + (st.processing or 0) %}
+          <div class="bar" title="{{ st }}">
+            <span class="b-done" style="width:{{ 100 * (st.done or 0) / max(total,1) }}%"></span>
+            <span class="b-failed" style="width:{{ 100 * (st.failed or 0) / max(total,1) }}%"></span>
+            <span class="b-processing" style="width:{{ 100 * (st.processing or 0) / max(total,1) }}%"></span>
+            <span class="b-pending" style="width:{{ 100 * (st.pending or 0) / max(total,1) }}%"></span>
+          </div>
+          <small>{{ st.done or 0 }} done · {{ st.failed or 0 }} failed · {{ st.pending or 0 }} pending</small>
+        {% endif %}
+        {% if s.job_id %}<small><a href="/jobs/{{ s.job_id }}?as={{ nav['as'] }}">job {{ (s.job_id|string)[:8] }}…</a></small>{% endif %}
+      </div>
+      {% endfor %}
+    </div>
+    {% endfor %}
+  </div>
+</div>
+
+{% set map_step = run.steps | selectattr('step_id','equalto','map') | list | first %}
+{% if map_step and map_step.status == 'blocked' %}
+<div class="card" style="border-color:#8a6410">
+  <h3>Action needed: map columns → product fields</h3>
+  <form method="post" action="/imports/{{ imp.id }}/map?as={{ nav['as'] }}">
+    <input type="hidden" name="job_id" value="{{ map_step.job_id }}">
+    <table>
+      {% for f in fields %}
+      <tr><td><b>{{ f }}</b></td>
+        <td><select name="map_{{ f }}">
+          {% for c in columns %}
+          <option {{ 'selected' if c == f or (f=='sku' and 'code' in c) }}>{{ c }}</option>
+          {% endfor %}
+        </select></td></tr>
+      {% endfor %}
+    </table>
+    <button>confirm mapping → validate</button>
+  </form>
+</div>
+{% endif %}
+
+{% set app_step = run.steps | selectattr('step_id','equalto','approve') | list | first %}
+{% if app_step and app_step.status == 'blocked' %}
+<div class="card" style="border-color:#8a6410">
+  <h3>Action needed: approve import</h3>
+  {% set st = stats.get('validate') or {} %}
+  <p>Validation: <b>{{ st.done or 0 }}</b> valid, <b>{{ st.failed or 0 }}</b> failed rows.
+    Failed rows go to the error queue; approve imports only valid ones.</p>
+  <form method="post" action="/imports/{{ imp.id }}/approve?as={{ nav['as'] }}" style="display:inline">
+    <input type="hidden" name="job_id" value="{{ app_step.job_id }}">
+    <button name="decision" value="approve">approve — import valid rows</button>
+    <button name="decision" value="reject" class="warn">reject — abort import</button>
+  </form>
+</div>
+{% endif %}
+
+{% if (stats.get('process') or {}).get('failed') %}
+<div class="card">
+  <h3>Error rows — <a href="/imports/{{ imp.id }}/errors.csv?as={{ nav['as'] }}">download CSV</a></h3>
+</div>
+{% endif %}
+{% endif %}
+{% endblock %}
