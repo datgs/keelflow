@@ -11,7 +11,7 @@ from .registry import build_registry
 
 
 def main() -> None:
-    run_worker(registry=build_registry())
+    run_worker(registry=build_registry(), prefix="keelflow_kernel_sup_")
 
 
 if __name__ == "__main__":

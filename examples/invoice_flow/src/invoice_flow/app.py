@@ -33,7 +33,7 @@ from .registry import DSN_ENV, PERMISSIONS, ROLES, build_registry
 
 DSN = os.environ.get(
     DSN_ENV, "postgresql://postgres:postgres@localhost:5544/keelflow")
-KERNEL_PREFIX = os.environ.get("KEELFLOW_KERNEL_PREFIX", "keelflow_kernel_")
+KERNEL_PREFIX = os.environ.get("KEELFLOW_KERNEL_PREFIX", "keelflow_kernel_inv_")
 
 templates = Jinja2Templates(
     directory=str(Path(__file__).parent / "templates"))

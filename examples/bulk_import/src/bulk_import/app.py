@@ -50,7 +50,7 @@ def _ctx(request: Request) -> JobContext:
 @asynccontextmanager
 async def _lifespan(app: FastAPI):
     registry = build_registry()
-    kernel = chancy.Chancy(DSN, prefix="keelflow_kernel_")
+    kernel = chancy.Chancy(DSN, prefix="keelflow_kernel_imp_")
     await kernel.migrate()
     await kernel.declare(
         chancy.Queue("default", concurrency=8,

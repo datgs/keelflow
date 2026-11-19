@@ -16,4 +16,6 @@ if __name__ == "__main__":
     if DSN_ENV not in os.environ:
         os.environ[DSN_ENV] = (
             "postgresql://postgres:postgres@localhost:5544/keelflow")
-    run_worker(registry=build_registry())
+    run_worker(registry=build_registry(),
+               prefix=os.environ.get("KEELFLOW_KERNEL_PREFIX",
+                                        "keelflow_kernel_inv_"))
