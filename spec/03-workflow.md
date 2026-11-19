@@ -1,4 +1,4 @@
-# hd-flow spec — workflow DAG
+# keelflow spec — workflow DAG
 
 ## Definition
 

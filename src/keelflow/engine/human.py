@@ -1,6 +1,6 @@
 """Human task layer (T11) — Inbox data API over the jobs table.
 
-Human jobs (`human.*`) live in `hd_flow_jobs` like machine jobs but are
+Human jobs (`human.*`) live in `keelflow_jobs` like machine jobs but are
 claimed/completed by people instead of workers. `assignee` is `user:<id>`
 or `role:<name>`; `claimed_by` records the first user to open the task
 (`FOR UPDATE` + null check — first claim wins).
@@ -34,7 +34,7 @@ class HumanTaskService:
                 """
                 SELECT id, type, status, payload, assignee, claimed_by,
                        created_at
-                FROM hd_flow_jobs
+                FROM keelflow_jobs
                 WHERE type LIKE 'human.%%'
                   AND status IN ('pending','claimed')
                   AND (
@@ -55,7 +55,7 @@ class HumanTaskService:
         """First claim wins. Raises if already claimed by someone else."""
         async with conn.transaction(), conn.cursor() as cur:
             await cur.execute(
-                "SELECT claimed_by FROM hd_flow_jobs WHERE id=%s FOR UPDATE",
+                "SELECT claimed_by FROM keelflow_jobs WHERE id=%s FOR UPDATE",
                 (job_id,),
             )
             row = await cur.fetchone()
@@ -65,7 +65,7 @@ class HumanTaskService:
             if row[0] and row[0] != who:
                 raise PermissionError(f"task already claimed by {row[0]}")
             await cur.execute(
-                "UPDATE hd_flow_jobs SET status='claimed', claimed_by=%s,"
+                "UPDATE keelflow_jobs SET status='claimed', claimed_by=%s,"
                 " updated_at=now() WHERE id=%s",
                 (who, job_id),
             )
@@ -76,7 +76,7 @@ class HumanTaskService:
         """Complete a human task; unblocks the owning workflow run."""
         async with conn.transaction(), conn.cursor(row_factory=dict_row) as cur:
             await cur.execute(
-                "SELECT status, claimed_by FROM hd_flow_jobs WHERE id=%s FOR UPDATE",
+                "SELECT status, claimed_by FROM keelflow_jobs WHERE id=%s FOR UPDATE",
                 (job_id,),
             )
             row = await cur.fetchone()
@@ -88,13 +88,13 @@ class HumanTaskService:
                     f"task claimed by {row['claimed_by']}, cannot complete as {who}"
                 )
             await cur.execute(
-                "UPDATE hd_flow_jobs SET status='done', result=%s,"
+                "UPDATE keelflow_jobs SET status='done', result=%s,"
                 " updated_at=now() WHERE id=%s",
                 (json.dumps(result or {}), job_id),
             )
             # link back to the workflow step, if any
             await cur.execute(
-                "SELECT id FROM hd_flow_step_runs WHERE job_id=%s", (job_id,)
+                "SELECT id FROM keelflow_step_runs WHERE job_id=%s", (job_id,)
             )
             step = await cur.fetchone()
         if step and self._kernel is not None:
@@ -108,7 +108,7 @@ class HumanTaskService:
         async with conn.cursor() as cur:
             await cur.execute(
                 """
-                UPDATE hd_flow_jobs SET assignee=%s, claimed_by=NULL,
+                UPDATE keelflow_jobs SET assignee=%s, claimed_by=NULL,
                        status='pending', updated_at=now()
                 WHERE type LIKE 'human.%%' AND status IN ('pending','claimed')
                   AND created_at < now() - interval '%s days'

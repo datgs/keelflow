@@ -1,4 +1,4 @@
-"""hd_flow core schema (jobs, workflow/step runs, chunks, row status, outbox, audit, dlq)
+"""keelflow core schema (jobs, workflow/step runs, chunks, row status, outbox, audit, dlq)
 
 Revision ID: 0001
 Revises:
@@ -22,9 +22,9 @@ def downgrade() -> None:
     op.execute(
         """
         DROP TABLE IF EXISTS
-            hd_flow_dlq, hd_flow_audit, hd_flow_outbox_deliveries,
-            hd_flow_outbox, hd_flow_row_status, hd_flow_chunks,
-            hd_flow_step_runs, hd_flow_workflow_runs, hd_flow_jobs
+            keelflow_dlq, keelflow_audit, keelflow_outbox_deliveries,
+            keelflow_outbox, keelflow_row_status, keelflow_chunks,
+            keelflow_step_runs, keelflow_workflow_runs, keelflow_jobs
         CASCADE
         """
     )

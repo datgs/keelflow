@@ -64,7 +64,7 @@ async def db():
     async with conn:
         await apply_async(conn)
         await conn.execute(
-            "TRUNCATE hd_flow_jobs, hd_flow_outbox CASCADE"
+            "TRUNCATE keelflow_jobs, keelflow_outbox CASCADE"
         )
         await conn.execute(
             f"TRUNCATE {CHANCY_PREFIX}jobs, {CHANCY_PREFIX}workers,"
@@ -125,7 +125,7 @@ async def test_same_key_never_parallel_different_keys_free(env, db):
     try:
         for _ in range(150):
             rows = await (await db.execute(
-                "SELECT status, count(*) FROM hd_flow_jobs GROUP BY status"
+                "SELECT status, count(*) FROM keelflow_jobs GROUP BY status"
             )).fetchall()
             if dict(rows).get("done", 0) == 6:
                 break
@@ -138,7 +138,7 @@ async def test_same_key_never_parallel_different_keys_free(env, db):
     # different keys ran in parallel (max active across different keys > 1
     # can't be asserted reliably; at least all done)
     rows = await (await db.execute(
-        "SELECT status, count(*) FROM hd_flow_jobs GROUP BY status"
+        "SELECT status, count(*) FROM keelflow_jobs GROUP BY status"
     )).fetchall()
     assert dict(rows)["done"] == 6
 
@@ -159,13 +159,13 @@ async def test_scheduler_tick_enqueues_once(env, db):
     n1 = await tick(db, env["reg"], env["kernel"])
     assert n1 == 1
     row = await (await db.execute(
-        "SELECT count(*) FROM hd_flow_jobs WHERE type='nightly@v1'"
+        "SELECT count(*) FROM keelflow_jobs WHERE type='nightly@v1'"
     )).fetchone()
     assert row[0] == 1
     # second tick same slot → dedup via unique_key
     n2 = await tick(db, env["reg"], env["kernel"])
     assert n2 == 0 or n2 == 1  # overlap=skip may skip; but never a 2nd row
     row2 = await (await db.execute(
-        "SELECT count(*) FROM hd_flow_jobs WHERE type='nightly@v1'"
+        "SELECT count(*) FROM keelflow_jobs WHERE type='nightly@v1'"
     )).fetchone()
     assert row2[0] == 1

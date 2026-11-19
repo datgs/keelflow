@@ -1,8 +1,8 @@
-# hd-flow spec — overview
+# keelflow spec — overview
 
 Status: draft v0.1 · Reference implementation: `keelflow` (Python)
 
-hd-flow is a durable workflow engine contract for business applications
+keelflow is a durable workflow engine contract for business applications
 (ERP-style): jobs, DAG workflows, bulk row processing, human tasks, entity
 state machines, outbox events, audit — all transactional on a single
 relational database.
@@ -38,6 +38,6 @@ the conformance checklist in `07-conformance.md`.
 
 ## Table prefix
 
-Reference implementation uses `hd_flow_` prefix. A conforming
+Reference implementation uses `keelflow_` prefix. A conforming
 implementation MAY use a different prefix but MUST keep table names,
 column semantics, and invariants from `01-schema.md`.

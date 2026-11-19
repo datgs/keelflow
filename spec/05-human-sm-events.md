@@ -1,8 +1,8 @@
-# hd-flow spec — human tasks, state machines, events
+# keelflow spec — human tasks, state machines, events
 
 ## Human tasks
 
-`human.*` job types reuse `hd_flow_jobs`. Semantics:
+`human.*` job types reuse `keelflow_jobs`. Semantics:
 
 - `assignee` = `user:<id>` or `role:<name>`; unassigned rows are
   visible to anyone (per `my_tasks` filter).
@@ -24,7 +24,7 @@
    definition's `initial`).
 2. Find transition `(from=current, action)` — missing → `ValueError`.
 3. If `guard.permission` — `ctx.require(perm)` → `PermissionError`.
-4. Upsert `hd_flow_entity_state` (state=to, version+1).
+4. Upsert `keelflow_entity_state` (state=to, version+1).
 5. `creates_job` → insert job row (+ kernel job unless `human.*`),
    `assignee` from `guard.assignee_role`.
 6. `triggers_workflow` → create run + step_runs + `advance_run`.
@@ -37,5 +37,5 @@ from current state (guard-filtered).
 - `EventBus.publish(tx, event_type, payload)` — INSERT outbox row in
   caller's TX. Rollback → no event (invariant #1).
 - `dispatch_events(conn)` polls unpublished rows; each subscriber's
-  delivery is recorded in `hd_flow_outbox_deliveries (event_id,
+  delivery is recorded in `keelflow_outbox_deliveries (event_id,
   subscriber)` — unique → dedup, at-least-once per subscriber.

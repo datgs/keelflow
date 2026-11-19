@@ -77,9 +77,9 @@ async def db():
             "CREATE TABLE test_domain (row_key text, job_id uuid)"
         )
         await conn.execute(
-            "TRUNCATE hd_flow_jobs, hd_flow_outbox, hd_flow_audit,"
-            " hd_flow_step_runs, hd_flow_workflow_runs, hd_flow_chunks,"
-            " hd_flow_row_status, hd_flow_dlq CASCADE"
+            "TRUNCATE keelflow_jobs, keelflow_outbox, keelflow_audit,"
+            " keelflow_step_runs, keelflow_workflow_runs, keelflow_chunks,"
+            " keelflow_row_status, keelflow_dlq CASCADE"
         )
         await conn.execute(
             f"TRUNCATE {CHANCY_PREFIX}jobs, {CHANCY_PREFIX}workers,"
@@ -113,7 +113,7 @@ async def env(db):
 async def _stage(db, job_id: str, keys: list[str]):
     for k in keys:
         await db.execute(
-            "INSERT INTO hd_flow_row_status (job_id, row_key, status, data)"
+            "INSERT INTO keelflow_row_status (job_id, row_key, status, data)"
             " VALUES (%s, %s, 'pending', %s)",
             (job_id, k, '{"v": 1}'),
         )
@@ -152,18 +152,18 @@ async def test_bulk_partitions_and_applies(env, db):
     await w.start()
     try:
         assert await _wait(
-            db, f"SELECT status FROM hd_flow_jobs WHERE id='{parent}'", "done"
+            db, f"SELECT status FROM keelflow_jobs WHERE id='{parent}'", "done"
         ) == "done"
     finally:
         await w.stop(timeout=5)
 
     chunks = await (
-        await db.execute("SELECT status, count(*) FROM hd_flow_chunks GROUP BY status")
+        await db.execute("SELECT status, count(*) FROM keelflow_chunks GROUP BY status")
     ).fetchall()
     assert dict(chunks) == {"done": 3}
 
     rows = await (
-        await db.execute("SELECT status, count(*) FROM hd_flow_row_status GROUP BY status")
+        await db.execute("SELECT status, count(*) FROM keelflow_row_status GROUP BY status")
     ).fetchall()
     assert dict(rows) == {"done": 25}
 
@@ -173,7 +173,7 @@ async def test_bulk_partitions_and_applies(env, db):
     assert applied[0] == 25
 
     parent_row = await (
-        await db.execute("SELECT status, result FROM hd_flow_jobs WHERE id=%s", (parent,))
+        await db.execute("SELECT status, result FROM keelflow_jobs WHERE id=%s", (parent,))
     ).fetchone()
     assert parent_row[0] == "done"
     assert parent_row[1]["chunks"] == {"done": 3}
@@ -191,14 +191,14 @@ async def test_error_queue_marks_bad_row(env, db):
     await w.start()
     try:
         assert await _wait(
-            db, f"SELECT status FROM hd_flow_jobs WHERE id='{parent}'", "done"
+            db, f"SELECT status FROM keelflow_jobs WHERE id='{parent}'", "done"
         ) == "done"
     finally:
         await w.stop(timeout=5)
 
     rows = await (
         await db.execute(
-            "SELECT row_key, status, error FROM hd_flow_row_status ORDER BY row_key"
+            "SELECT row_key, status, error FROM keelflow_row_status ORDER BY row_key"
         )
     ).fetchall()
     by_key = {r[0]: (r[1], r[2]) for r in rows}
@@ -224,22 +224,22 @@ async def test_resume_pending_only_after_crash(env, db):
 
     chunk_id = _uuid.uuid4()
     await db.execute(
-        "INSERT INTO hd_flow_chunks (id, job_id, idx, status) VALUES (%s,%s,0,'pending')",
+        "INSERT INTO keelflow_chunks (id, job_id, idx, status) VALUES (%s,%s,0,'pending')",
         (chunk_id, parent),
     )
     await db.execute(
-        "UPDATE hd_flow_row_status SET chunk_id=%s WHERE job_id=%s",
+        "UPDATE keelflow_row_status SET chunk_id=%s WHERE job_id=%s",
         (chunk_id, parent),
     )
     rows = await (
         await db.execute(
-            "SELECT id, row_key FROM hd_flow_row_status WHERE chunk_id=%s"
+            "SELECT id, row_key FROM keelflow_row_status WHERE chunk_id=%s"
             " ORDER BY row_key", (chunk_id,)
         )
     ).fetchall()
     for r in rows[:2]:
         await db.execute(
-            "UPDATE hd_flow_row_status SET status='done' WHERE id=%s", (r[0],)
+            "UPDATE keelflow_row_status SET status='done' WHERE id=%s", (r[0],)
         )
         await db.execute(
             "INSERT INTO test_domain (row_key, job_id) VALUES (%s, %s)",
@@ -257,7 +257,7 @@ async def test_resume_pending_only_after_crash(env, db):
 
     done_rows = await (
         await db.execute(
-            "SELECT count(*) FROM hd_flow_row_status WHERE chunk_id=%s"
+            "SELECT count(*) FROM keelflow_row_status WHERE chunk_id=%s"
             " AND status='done'", (chunk_id,)
         )
     ).fetchone()

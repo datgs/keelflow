@@ -28,8 +28,8 @@ async def db():
     async with conn:
         await apply_async(conn)
         await conn.execute(
-            "TRUNCATE hd_flow_jobs, hd_flow_step_runs, hd_flow_workflow_runs,"
-            " hd_flow_row_status CASCADE"
+            "TRUNCATE keelflow_jobs, keelflow_step_runs, keelflow_workflow_runs,"
+            " keelflow_row_status CASCADE"
         )
         yield conn
 
@@ -39,7 +39,7 @@ async def test_jobs_list_and_filter(db):
     svc = MonitoringService()
     for i, (t, s) in enumerate([("a@v1", "done"), ("b@v1", "failed"), ("a@v1", "pending")]):
         await db.execute(
-            "INSERT INTO hd_flow_jobs (id, type, status, payload, context)"
+            "INSERT INTO keelflow_jobs (id, type, status, payload, context)"
             " VALUES (gen_random_uuid(), %s, %s, '{}', '{}')",
             (t, s),
         )
@@ -53,7 +53,7 @@ async def test_jobs_list_and_filter(db):
 async def test_metrics_snapshot(db):
     svc = MonitoringService()
     await db.execute(
-        "INSERT INTO hd_flow_jobs (id, type, status, payload, context)"
+        "INSERT INTO keelflow_jobs (id, type, status, payload, context)"
         " VALUES (gen_random_uuid(), 'x@v1', 'pending', '{}', '{}'),"
         "        (gen_random_uuid(), 'x@v1', 'failed', '{}', '{}')"
     )
@@ -67,12 +67,12 @@ async def test_rows_list_failed(db):
     svc = MonitoringService()
     job_id = "00000000-0000-0000-0000-0000000000aa"
     await db.execute(
-        "INSERT INTO hd_flow_jobs (id, type, status, payload, context)"
+        "INSERT INTO keelflow_jobs (id, type, status, payload, context)"
         " VALUES (%s, 'imp@v1', 'running', '{}', '{}')",
         (job_id,),
     )
     await db.execute(
-        "INSERT INTO hd_flow_row_status (job_id, row_key, status, error)"
+        "INSERT INTO keelflow_row_status (job_id, row_key, status, error)"
         " VALUES (%s, 'r1', 'failed', 'bad row'), (%s, 'r2', 'done', NULL)",
         (job_id, job_id),
     )

@@ -37,8 +37,8 @@ async def main() -> None:
     conn = await psycopg.AsyncConnection.connect(DSN, autocommit=True)
     await apply_async(conn)
     await conn.execute(
-        "TRUNCATE hd_flow_jobs, hd_flow_chunks, hd_flow_row_status,"
-        " hd_flow_outbox CASCADE"
+        "TRUNCATE keelflow_jobs, keelflow_chunks, keelflow_row_status,"
+        " keelflow_outbox CASCADE"
     )
 
     async with Chancy(DSN, prefix=PREFIX) as kernel:
@@ -64,7 +64,7 @@ async def main() -> None:
         # stage rows (copy-style insert)
         async with conn.cursor() as cur:
             await cur.execute(
-                "INSERT INTO hd_flow_row_status (job_id, row_key, status, data)"
+                "INSERT INTO keelflow_row_status (job_id, row_key, status, data)"
                 " SELECT %s, 'r' || g, 'pending', '{}'"
                 " FROM generate_series(1, %s) g",
                 (ref.id, N),
@@ -77,7 +77,7 @@ async def main() -> None:
         try:
             while True:
                 row = await (await conn.execute(
-                    "SELECT status FROM hd_flow_jobs WHERE id=%s", (ref.id,)
+                    "SELECT status FROM keelflow_jobs WHERE id=%s", (ref.id,)
                 )).fetchone()
                 if row[0] in ("done", "failed"):
                     break
@@ -90,7 +90,7 @@ async def main() -> None:
             f"TRUNCATE {PREFIX}jobs, {PREFIX}workers, {PREFIX}queues CASCADE"
         )
         counts = await (await conn.execute(
-            "SELECT status, count(*) FROM hd_flow_row_status WHERE job_id=%s"
+            "SELECT status, count(*) FROM keelflow_row_status WHERE job_id=%s"
             " GROUP BY status",
             (ref.id,),
         )).fetchall()

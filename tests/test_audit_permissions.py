@@ -29,7 +29,7 @@ async def db():
         pytest.skip(f"postgres unavailable: {exc}")
     async with conn:
         await apply_async(conn)
-        await conn.execute("TRUNCATE hd_flow_audit")
+        await conn.execute("TRUNCATE keelflow_audit")
         yield conn
 
 

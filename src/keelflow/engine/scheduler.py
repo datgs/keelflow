@@ -83,7 +83,7 @@ async def tick(conn, registry: Registry, kernel, *, now: datetime | None = None)
         # overlap policy vs previous job for this type
         if cron.overlap != "queue":
             cur = await conn.execute(
-                "SELECT id, status FROM hd_flow_jobs"
+                "SELECT id, status FROM keelflow_jobs"
                 " WHERE type=%s AND status IN ('pending','claimed','running')"
                 " ORDER BY created_at DESC LIMIT 1",
                 (spec.type,),
@@ -93,7 +93,7 @@ async def tick(conn, registry: Registry, kernel, *, now: datetime | None = None)
                 continue
             if live and cron.overlap == "kill_previous":
                 await conn.execute(
-                    "UPDATE hd_flow_jobs SET status='cancelled',"
+                    "UPDATE keelflow_jobs SET status='cancelled',"
                     " cancel_requested=true, updated_at=now() WHERE id=%s",
                     (live[0],),
                 )
@@ -107,7 +107,7 @@ async def tick(conn, registry: Registry, kernel, *, now: datetime | None = None)
         async with conn.cursor(row_factory=dict_row) as cursor:
             await cursor.execute(
                 """
-                INSERT INTO hd_flow_jobs
+                INSERT INTO keelflow_jobs
                     (id, type, status, payload, context, max_attempts, run_at,
                      created_at, updated_at)
                 VALUES (%s,%s,'pending','{}',%s,%s,%s,%s,%s)
@@ -123,7 +123,7 @@ async def tick(conn, registry: Registry, kernel, *, now: datetime | None = None)
                 _kernel_job(job_id, spec.type, fire, unique_key),
             )
             await cursor.execute(
-                "INSERT INTO hd_flow_outbox (event_type, payload) VALUES"
+                "INSERT INTO keelflow_outbox (event_type, payload) VALUES"
                 " ('job.scheduled', %s)",
                 (json.dumps({"job_id": str(job_id), "type": spec.type}),),
             )

@@ -62,9 +62,9 @@ async def db():
     async with conn:
         await apply_async(conn)
         await conn.execute(
-            "TRUNCATE hd_flow_jobs, hd_flow_outbox, hd_flow_audit,"
-            " hd_flow_step_runs, hd_flow_workflow_runs, hd_flow_chunks,"
-            " hd_flow_row_status, hd_flow_dlq CASCADE"
+            "TRUNCATE keelflow_jobs, keelflow_outbox, keelflow_audit,"
+            " keelflow_step_runs, keelflow_workflow_runs, keelflow_chunks,"
+            " keelflow_row_status, keelflow_dlq CASCADE"
         )
         await conn.execute(
             f"TRUNCATE {CHANCY_PREFIX}jobs, {CHANCY_PREFIX}workers,"
@@ -117,7 +117,7 @@ async def _enqueue(service, type_name: str, payload: dict) -> str:
 async def _wait_status(db, job_id: str, want: str, timeout: float = 15.0) -> str:
     for _ in range(int(timeout / 0.1)):
         row = await (
-            await db.execute("SELECT status FROM hd_flow_jobs WHERE id=%s", (job_id,))
+            await db.execute("SELECT status FROM keelflow_jobs WHERE id=%s", (job_id,))
         ).fetchone()
         if row and row[0] == want:
             return row[0]
@@ -138,7 +138,7 @@ async def test_worker_claims_and_completes(service, db, kernel):
 
     row = await (
         await db.execute(
-            "SELECT status, result, attempts FROM hd_flow_jobs WHERE id=%s", (job_id,)
+            "SELECT status, result, attempts FROM keelflow_jobs WHERE id=%s", (job_id,)
         )
     ).fetchone()
     assert row[0] == JobStatus.DONE.value
@@ -158,7 +158,7 @@ async def test_handler_exception_marks_failed(service, db, kernel):
     # kernel retries up to max_attempts=3 → eventually 'failed'
     assert status == JobStatus.FAILED.value
     row = await (
-        await db.execute("SELECT error FROM hd_flow_jobs WHERE id=%s", (job_id,))
+        await db.execute("SELECT error FROM keelflow_jobs WHERE id=%s", (job_id,))
     ).fetchone()
     assert "boom" in row[0]
 
@@ -168,7 +168,7 @@ async def test_dispatch_unknown_type(service, db, kernel):
     # craft a job row whose type is unregistered, then kernel-dispatch it
     job_id = await _enqueue(service, "test.ok@v1", {"invoice_id": "i-3"})
     await db.execute(
-        "UPDATE hd_flow_jobs SET type='test.unknown@v1' WHERE id=%s", (job_id,)
+        "UPDATE keelflow_jobs SET type='test.unknown@v1' WHERE id=%s", (job_id,)
     )
     w = Worker(kernel, shutdown_timeout=5)
     await w.start()

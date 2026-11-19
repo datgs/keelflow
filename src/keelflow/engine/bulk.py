@@ -2,24 +2,24 @@
 
 Three levels of state (design §3.1):
 
-- `hd_flow_jobs`      — parent bulk job: overall status, chunk counts in result
-- `hd_flow_chunks`    — claimed/retry unit (one kernel job per chunk)
-- `hd_flow_row_status`— per-row status (reporting + error queue)
+- `keelflow_jobs`      — parent bulk job: overall status, chunk counts in result
+- `keelflow_chunks`    — claimed/retry unit (one kernel job per chunk)
+- `keelflow_row_status`— per-row status (reporting + error queue)
 
 Flow:
 
 1. App registers a job type whose handler subclasses `BulkJobHandler` and
-   implements `process_row`. Rows are staged into `hd_flow_row_status`
+   implements `process_row`. Rows are staged into `keelflow_row_status`
    (`job_id` = the parent job's id, `status='pending'`) before enqueueing.
-2. The parent job's `run` partitions pending rows into `hd_flow_chunks`
+2. The parent job's `run` partitions pending rows into `keelflow_chunks`
    (idempotent — rows already having a `chunk_id` are skipped), inserts one
-   `hd_flow_jobs` + kernel job per chunk, and marks the parent `running`
+   `keelflow_jobs` + kernel job per chunk, and marks the parent `running`
    until fan-in. All inside one transaction.
 3. `ChunkJobHandler` (registered under `bulk.chunk@v1`) processes its
    chunk's pending/processing rows via the parent handler's `process_row`.
    `atomic='chunk'` (default): the whole chunk is one transaction.
    `atomic='row'`: one transaction per row.
-4. Fan-in: when the last chunk settles, the parent `hd_flow_jobs` row
+4. Fan-in: when the last chunk settles, the parent `keelflow_jobs` row
    flips to `done` or `failed` with a result summary.
 
 Kill-resume: a dead worker's chunk job is re-queued by the kernel; on retry
@@ -91,7 +91,7 @@ class BulkJobHandler(JobHandler):
             async with conn.transaction(), conn.cursor(row_factory=dict_row) as cur:
                 # rows staged for this job that are not yet in a chunk
                 await cur.execute(
-                    "SELECT id FROM hd_flow_row_status"
+                    "SELECT id FROM keelflow_row_status"
                     " WHERE job_id=%s AND status='pending' AND chunk_id IS NULL"
                     " ORDER BY id FOR UPDATE SKIP LOCKED",
                     (job_id,),
@@ -108,12 +108,12 @@ class BulkJobHandler(JobHandler):
                     chunk_id = uuid.uuid4()
                     ids = row_ids[ci * size : (ci + 1) * size]
                     await cur.execute(
-                        "INSERT INTO hd_flow_chunks (id, job_id, idx, status)"
+                        "INSERT INTO keelflow_chunks (id, job_id, idx, status)"
                         " VALUES (%s, %s, %s, 'pending')",
                         (chunk_id, job_id, ci),
                     )
                     await cur.execute(
-                        "UPDATE hd_flow_row_status SET chunk_id=%s WHERE id = ANY(%s)",
+                        "UPDATE keelflow_row_status SET chunk_id=%s WHERE id = ANY(%s)",
                         (chunk_id, ids),
                     )
                     child_id = uuid.uuid4()
@@ -123,7 +123,7 @@ class BulkJobHandler(JobHandler):
                     ).model_dump(mode="json")
                     await cur.execute(
                         """
-                        INSERT INTO hd_flow_jobs
+                        INSERT INTO keelflow_jobs
                             (id, type, status, payload, context, attempts,
                              max_attempts, run_at, parent_job_id,
                              created_at, updated_at)
@@ -165,14 +165,14 @@ class ChunkJobHandler(JobHandler):
             # worker (row-atomic resume).
             async with conn.cursor(row_factory=dict_row) as cur:
                 await cur.execute(
-                    "UPDATE hd_flow_chunks SET status='running',"
+                    "UPDATE keelflow_chunks SET status='running',"
                     " claimed_by=%s, lease_until=now() + interval '15 minutes',"
                     " attempts=attempts+1, updated_at=now() WHERE id=%s",
                     (os.environ.get("KEELFLOW_WORKER_ID", "worker-0"),
                      payload.chunk_id),
                 )
                 await cur.execute(
-                    "UPDATE hd_flow_row_status SET status='pending'"
+                    "UPDATE keelflow_row_status SET status='pending'"
                     " WHERE chunk_id=%s AND status='processing'",
                     (payload.chunk_id,),
                 )
@@ -216,7 +216,7 @@ class ChunkJobHandler(JobHandler):
 
     async def _parent_type(self, conn, parent_job_id) -> tuple[str, str]:
         cur = await conn.execute(
-            "SELECT type, payload FROM hd_flow_jobs WHERE id=%s", (parent_job_id,)
+            "SELECT type, payload FROM keelflow_jobs WHERE id=%s", (parent_job_id,)
         )
         row = await cur.fetchone()
         if row is None:
@@ -227,7 +227,7 @@ class ChunkJobHandler(JobHandler):
     async def _fetch_rows(self, conn, chunk_id) -> list[dict[str, Any]]:
         async with conn.cursor(row_factory=dict_row) as cur:
             await cur.execute(
-                "SELECT id, row_key, data FROM hd_flow_row_status"
+                "SELECT id, row_key, data FROM keelflow_row_status"
                 " WHERE chunk_id=%s AND status='pending'"
                 " ORDER BY id",
                 (chunk_id,),
@@ -242,7 +242,7 @@ class ChunkJobHandler(JobHandler):
             async with conn.transaction(), conn.cursor(row_factory=dict_row) as cur:
                 for row in rows:
                     await cur.execute(
-                        "UPDATE hd_flow_row_status SET status='processing',"
+                        "UPDATE keelflow_row_status SET status='processing',"
                         " updated_at=now() WHERE id=%s",
                         (row["id"],),
                     )
@@ -252,7 +252,7 @@ class ChunkJobHandler(JobHandler):
                         failing = (row["id"], str(exc))
                         raise
                     await cur.execute(
-                        "UPDATE hd_flow_row_status SET status='done',"
+                        "UPDATE keelflow_row_status SET status='done',"
                         " updated_at=now() WHERE id=%s",
                         (row["id"],),
                     )
@@ -262,7 +262,7 @@ class ChunkJobHandler(JobHandler):
                 # error queue still shows which row failed (design §3.2).
                 async with conn.cursor() as cur:
                     await cur.execute(
-                        "UPDATE hd_flow_row_status SET status='failed',"
+                        "UPDATE keelflow_row_status SET status='failed',"
                         " error=%s, updated_at=now() WHERE id=%s",
                         (failing[1], failing[0]),
                     )
@@ -271,7 +271,7 @@ class ChunkJobHandler(JobHandler):
     async def _process_one_row(self, conn, ctx, handler, row) -> bool:
         async with conn.transaction(), conn.cursor(row_factory=dict_row) as cur:
             await cur.execute(
-                "UPDATE hd_flow_row_status SET status='processing',"
+                "UPDATE keelflow_row_status SET status='processing',"
                 " updated_at=now() WHERE id=%s",
                 (row["id"],),
             )
@@ -279,13 +279,13 @@ class ChunkJobHandler(JobHandler):
                 await handler.process_row(ctx, row, cur)
             except Exception as exc:  # noqa: BLE001 - row-level error queue entry
                 await cur.execute(
-                    "UPDATE hd_flow_row_status SET status='failed',"
+                    "UPDATE keelflow_row_status SET status='failed',"
                     " error=%s, updated_at=now() WHERE id=%s",
                     (str(exc), row["id"]),
                 )
                 return False
             await cur.execute(
-                "UPDATE hd_flow_row_status SET status='done',"
+                "UPDATE keelflow_row_status SET status='done',"
                 " updated_at=now() WHERE id=%s",
                 (row["id"],),
             )
@@ -293,7 +293,7 @@ class ChunkJobHandler(JobHandler):
 
     async def _mark_chunk(self, conn, chunk_id, status, result=None) -> None:
         await conn.execute(
-            "UPDATE hd_flow_chunks SET status=%s, result=%s, updated_at=now()"
+            "UPDATE keelflow_chunks SET status=%s, result=%s, updated_at=now()"
             " WHERE id=%s",
             (status, json.dumps(result) if result else None, chunk_id),
         )
@@ -303,7 +303,7 @@ class ChunkJobHandler(JobHandler):
         """Last chunk to settle flips the parent job to its final status."""
         async with conn.cursor(row_factory=dict_row) as cur:
             await cur.execute(
-                "SELECT status, count(*) FROM hd_flow_chunks"
+                "SELECT status, count(*) FROM keelflow_chunks"
                 " WHERE job_id=%s GROUP BY status",
                 (parent_job_id,),
             )
@@ -312,7 +312,7 @@ class ChunkJobHandler(JobHandler):
                 return  # still in flight
             final = "failed" if counts.get("failed") else "done"
             await cur.execute(
-                "UPDATE hd_flow_jobs SET status=%s, updated_at=now(),"
+                "UPDATE keelflow_jobs SET status=%s, updated_at=now(),"
                 " result = COALESCE(result,'{}'::jsonb) || %s::jsonb"
                 " WHERE id=%s",
                 (final, json.dumps({"chunks": counts}), parent_job_id),
@@ -323,7 +323,7 @@ class ChunkJobHandler(JobHandler):
         try:
             await conn.rollback()
             await conn.execute(
-                "UPDATE hd_flow_chunks SET status='failed',"
+                "UPDATE keelflow_chunks SET status='failed',"
                 " result=%s, updated_at=now() WHERE id=%s",
                 (json.dumps({"error": error}), chunk_id),
             )

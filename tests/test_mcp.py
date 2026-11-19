@@ -24,7 +24,7 @@ async def db():
     async with conn:
         await apply_async(conn)
         await conn.execute(
-            "TRUNCATE hd_flow_jobs, hd_flow_audit CASCADE"
+            "TRUNCATE keelflow_jobs, keelflow_audit CASCADE"
         )
         yield conn
 
@@ -42,7 +42,7 @@ async def test_tool_surface_registered(db):
 async def test_call_tool_returns_json(db, monkeypatch):
     monkeypatch.setenv("KEELFLOW_DSN", DSN)
     await db.execute(
-        "INSERT INTO hd_flow_jobs (id, type, status, payload, context)"
+        "INSERT INTO keelflow_jobs (id, type, status, payload, context)"
         " VALUES (gen_random_uuid(), 'x@v1', 'pending', '{}', '{}')"
     )
     app = make_server(DSN)

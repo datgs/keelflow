@@ -69,9 +69,9 @@ async def db():
     async with conn:
         await apply_async(conn)
         await conn.execute(
-            "TRUNCATE hd_flow_jobs, hd_flow_outbox, hd_flow_audit,"
-            " hd_flow_step_runs, hd_flow_workflow_runs, hd_flow_chunks,"
-            " hd_flow_row_status, hd_flow_dlq CASCADE"
+            "TRUNCATE keelflow_jobs, keelflow_outbox, keelflow_audit,"
+            " keelflow_step_runs, keelflow_workflow_runs, keelflow_chunks,"
+            " keelflow_row_status, keelflow_dlq CASCADE"
         )
         await conn.execute(
             f"TRUNCATE {CHANCY_PREFIX}jobs, {CHANCY_PREFIX}workers,"
@@ -112,14 +112,14 @@ async def _start(env, name, inputs, ctx=None):
 
 async def _run_status(db, run_id):
     row = await (await db.execute(
-        "SELECT status FROM hd_flow_workflow_runs WHERE id=%s", (run_id,)
+        "SELECT status FROM keelflow_workflow_runs WHERE id=%s", (run_id,)
     )).fetchone()
     return row[0] if row else None
 
 
 async def _step_statuses(db, run_id):
     rows = await (await db.execute(
-        "SELECT step_id, status, job_id, outputs FROM hd_flow_step_runs WHERE run_id=%s ORDER BY created_at",
+        "SELECT step_id, status, job_id, outputs FROM keelflow_step_runs WHERE run_id=%s ORDER BY created_at",
         (run_id,),
     )).fetchall()
     return {r[0]: {"status": r[1], "job_id": r[2], "outputs": r[3]} for r in rows}

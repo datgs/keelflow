@@ -56,9 +56,9 @@ async def db():
     async with conn:
         await apply_async(conn)
         await conn.execute(
-            "TRUNCATE hd_flow_jobs, hd_flow_outbox, hd_flow_audit,"
-            " hd_flow_step_runs, hd_flow_workflow_runs, hd_flow_chunks,"
-            " hd_flow_row_status, hd_flow_dlq, hd_flow_entity_state CASCADE"
+            "TRUNCATE keelflow_jobs, keelflow_outbox, keelflow_audit,"
+            " keelflow_step_runs, keelflow_workflow_runs, keelflow_chunks,"
+            " keelflow_row_status, keelflow_dlq, keelflow_entity_state CASCADE"
         )
         await conn.execute(
             f"TRUNCATE {CHANCY_PREFIX}jobs, {CHANCY_PREFIX}workers,"
@@ -173,7 +173,7 @@ async def test_creates_job_and_workflow(env, db):
     await env["human"].complete(db, job_id, Actor.user("u_fin"),
                                 {"decision": "ok"})
     job = await (await db.execute(
-        "SELECT status FROM hd_flow_jobs WHERE id=%s", (job_id,)
+        "SELECT status FROM keelflow_jobs WHERE id=%s", (job_id,)
     )).fetchone()
     assert job[0] == "done"
 
@@ -185,11 +185,11 @@ async def test_creates_job_and_workflow(env, db):
             await env["sm"].transition(entity, "approve", ctx, cur)
     # workflow run started + step job enqueued
     run = await (await db.execute(
-        "SELECT status FROM hd_flow_workflow_runs"
+        "SELECT status FROM keelflow_workflow_runs"
     )).fetchone()
     assert run[0] in ("running", "done")
     step_job = await (await db.execute(
-        "SELECT count(*) FROM hd_flow_jobs WHERE type='wf.step@v1'"
+        "SELECT count(*) FROM keelflow_jobs WHERE type='wf.step@v1'"
     )).fetchone()
     assert step_job[0] == 1
 
@@ -219,7 +219,7 @@ async def test_human_step_parks_then_unblocks_run(env, db):
         human_job_id = None
         for _ in range(150):
             row = await (await db.execute(
-                "SELECT id FROM hd_flow_jobs WHERE type='human.review@v1'"
+                "SELECT id FROM keelflow_jobs WHERE type='human.review@v1'"
             )).fetchone()
             if row:
                 human_job_id = str(row[0])
@@ -229,7 +229,7 @@ async def test_human_step_parks_then_unblocks_run(env, db):
         assert human_job_id
         # run is still active (human step pending)
         status = await (await db.execute(
-            "SELECT status FROM hd_flow_workflow_runs WHERE id=%s", (ref.id,)
+            "SELECT status FROM keelflow_workflow_runs WHERE id=%s", (ref.id,)
         )).fetchone()
         assert status[0] == "running"
 
@@ -237,7 +237,7 @@ async def test_human_step_parks_then_unblocks_run(env, db):
         await env["human"].complete(db, human_job_id, Actor.user("u1"))
         for _ in range(150):
             row = await (await db.execute(
-                "SELECT status FROM hd_flow_workflow_runs WHERE id=%s", (ref.id,)
+                "SELECT status FROM keelflow_workflow_runs WHERE id=%s", (ref.id,)
             )).fetchone()
             if row[0] == "done":
                 break

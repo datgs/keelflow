@@ -8,7 +8,7 @@
 
 > **Naming note (2026-11-19):** the engine originally called `hd-flow`
 > (and scaffolded as `pyerp`) is published as **`keelflow`** — the
-> language-agnostic contract lives in `spec/` (“hd-flow spec”).
+> language-agnostic contract lives in `spec/` (“keelflow spec”).
 > Mentions of `hd-flow`/`pyerp` elsewhere in this brief refer to the
 > same engine.
 

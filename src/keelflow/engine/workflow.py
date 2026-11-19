@@ -1,6 +1,6 @@
 """Workflow engine (T7): DAG of steps via `needs`, `if:` guards, outputs.
 
-State model (`hd_flow_workflow_runs` / `hd_flow_step_runs`):
+State model (`keelflow_workflow_runs` / `keelflow_step_runs`):
 
 - `start()` creates the run + a `pending` step_run per definition step, then
   `advance()` enqueues jobs for every step whose `needs` are all done and
@@ -61,13 +61,13 @@ class WorkflowService:
         cursor = _as_cursor(tx)
         run_id = uuid.uuid4()
         await cursor.execute(
-            "INSERT INTO hd_flow_workflow_runs (id, workflow, status, inputs)"
+            "INSERT INTO keelflow_workflow_runs (id, workflow, status, inputs)"
             " VALUES (%s, %s, %s, %s)",
             (run_id, name, JobStatus.RUNNING.value, json.dumps(inputs)),
         )
         for step in defn.steps:
             await cursor.execute(
-                "INSERT INTO hd_flow_step_runs (id, run_id, step_id, type, status)"
+                "INSERT INTO keelflow_step_runs (id, run_id, step_id, type, status)"
                 " VALUES (%s, %s, %s, %s, %s)",
                 (
                     uuid.uuid4(),
@@ -82,7 +82,7 @@ class WorkflowService:
 
     async def get_run(self, conn, run_id: str) -> dict[str, Any] | None:
         cur = await conn.execute(
-            "SELECT id, workflow, status, inputs FROM hd_flow_workflow_runs WHERE id=%s",
+            "SELECT id, workflow, status, inputs FROM keelflow_workflow_runs WHERE id=%s",
             (run_id,),
         )
         row = await cur.fetchone()
@@ -90,7 +90,7 @@ class WorkflowService:
             return None
         cur = await conn.execute(
             "SELECT step_id, type, status, job_id, outputs, attempts"
-            " FROM hd_flow_step_runs WHERE run_id=%s ORDER BY created_at",
+            " FROM keelflow_step_runs WHERE run_id=%s ORDER BY created_at",
             (run_id,),
         )
         steps = [
@@ -114,7 +114,7 @@ class WorkflowService:
     ) -> None:
         """Re-enqueue a failed step's job (same step_run, attempts + 1)."""
         cur = await conn.execute(
-            "SELECT id, type, status FROM hd_flow_step_runs"
+            "SELECT id, type, status FROM keelflow_step_runs"
             " WHERE run_id=%s AND step_id=%s",
             (run_id, step_id),
         )
@@ -130,12 +130,12 @@ class WorkflowService:
 
         async with conn.cursor(row_factory=dict_row) as cursor:
             await cursor.execute(
-                "UPDATE hd_flow_step_runs SET status=%s, attempts=attempts+1,"
+                "UPDATE keelflow_step_runs SET status=%s, attempts=attempts+1,"
                 " updated_at=now() WHERE id=%s",
                 (JobStatus.PENDING.value, step_run_id),
             )
             await cursor.execute(
-                "UPDATE hd_flow_workflow_runs SET status=%s, updated_at=now()"
+                "UPDATE keelflow_workflow_runs SET status=%s, updated_at=now()"
                 " WHERE id=%s",
                 (JobStatus.RUNNING.value, run_id),
             )
@@ -227,12 +227,12 @@ async def on_job_finished(
             JobStatus.CANCELLED.value
         )
         await cursor.execute(
-            "UPDATE hd_flow_step_runs SET status=%s, outputs=%s, updated_at=now()"
+            "UPDATE keelflow_step_runs SET status=%s, outputs=%s, updated_at=now()"
             " WHERE id=%s",
             (sr_status, json.dumps(outputs), step_run_id),
         )
         row = await (await cursor.execute(
-            "SELECT run_id FROM hd_flow_step_runs WHERE id=%s", (step_run_id,)
+            "SELECT run_id FROM keelflow_step_runs WHERE id=%s", (step_run_id,)
         )).fetchone()
         if row:
             parent_ctx = await _run_ctx(cursor, row["run_id"])
@@ -253,7 +253,7 @@ async def _enqueue_step(
 
     await cursor.execute(
         """
-        INSERT INTO hd_flow_jobs
+        INSERT INTO keelflow_jobs
             (id, type, status, payload, context, attempts, max_attempts,
              run_at, claimed_by, lease_until, concurrency_key, assignee,
              parent_job_id, result, created_at, updated_at)
@@ -270,7 +270,7 @@ async def _enqueue_step(
         _kernel_job(job_id, spec_step.type, spec, step_run_id=sr["id"]),
     )
     await cursor.execute(
-        "UPDATE hd_flow_step_runs SET job_id=%s, status=%s, updated_at=now()"
+        "UPDATE keelflow_step_runs SET job_id=%s, status=%s, updated_at=now()"
         " WHERE id=%s",
         (job_id, "claimed", sr["id"]),
     )
@@ -287,7 +287,7 @@ async def _enqueue_human_step(
 
     await cursor.execute(
         """
-        INSERT INTO hd_flow_jobs
+        INSERT INTO keelflow_jobs
             (id, type, status, payload, context, attempts, max_attempts,
              run_at, claimed_by, lease_until, concurrency_key, assignee,
              parent_job_id, result, created_at, updated_at)
@@ -301,7 +301,7 @@ async def _enqueue_human_step(
         ),
     )
     await cursor.execute(
-        "UPDATE hd_flow_step_runs SET job_id=%s, status=%s, updated_at=now()"
+        "UPDATE keelflow_step_runs SET job_id=%s, status=%s, updated_at=now()"
         " WHERE id=%s",
         (job_id, JobStatus.BLOCKED.value, sr["id"]),
     )
@@ -429,7 +429,7 @@ async def _fetch_run(cursor, run_id) -> dict[str, Any] | None:
 
     cur = cursor.connection.cursor(row_factory=dict_row) if hasattr(cursor, "connection") else cursor
     await cur.execute(
-        "SELECT id, workflow, status, inputs FROM hd_flow_workflow_runs WHERE id=%s",
+        "SELECT id, workflow, status, inputs FROM keelflow_workflow_runs WHERE id=%s",
         (run_id,),
     )
     return await cur.fetchone()
@@ -441,7 +441,7 @@ async def _fetch_steps(cursor, run_id) -> list[dict[str, Any]]:
     cur = cursor.connection.cursor(row_factory=dict_row) if hasattr(cursor, "connection") else cursor
     await cur.execute(
         "SELECT id, step_id, type, status, job_id, outputs, attempts"
-        " FROM hd_flow_step_runs WHERE run_id=%s",
+        " FROM keelflow_step_runs WHERE run_id=%s",
         (run_id,),
     )
     return await cur.fetchall()
@@ -449,14 +449,14 @@ async def _fetch_steps(cursor, run_id) -> list[dict[str, Any]]:
 
 async def _set_run_status(cursor, run_id, status: JobStatus) -> None:
     await cursor.execute(
-        "UPDATE hd_flow_workflow_runs SET status=%s, updated_at=now() WHERE id=%s",
+        "UPDATE keelflow_workflow_runs SET status=%s, updated_at=now() WHERE id=%s",
         (status.value, run_id),
     )
 
 
 async def _set_step_status(cursor, step_run_id, status: str) -> None:
     await cursor.execute(
-        "UPDATE hd_flow_step_runs SET status=%s, updated_at=now() WHERE id=%s",
+        "UPDATE keelflow_step_runs SET status=%s, updated_at=now() WHERE id=%s",
         (status, step_run_id),
     )
 
@@ -464,8 +464,8 @@ async def _set_step_status(cursor, step_run_id, status: str) -> None:
 async def _run_ctx(cursor, run_id) -> JobContext:
     """Rebuild the parent ctx for a run's next-step jobs from its first job."""
     cur = await cursor.execute(
-        "SELECT context FROM hd_flow_jobs j"
-        " JOIN hd_flow_step_runs sr ON sr.job_id = j.id"
+        "SELECT context FROM keelflow_jobs j"
+        " JOIN keelflow_step_runs sr ON sr.job_id = j.id"
         " WHERE sr.run_id=%s ORDER BY j.created_at LIMIT 1",
         (run_id,),
     )

@@ -56,7 +56,7 @@ async def _connect(autocommit: bool = False) -> psycopg.AsyncConnection:
 
 @pytest_asyncio.fixture
 async def db():
-    """Fresh hd_flow_* + chancy schema per test (autocommit admin conn)."""
+    """Fresh keelflow_* + chancy schema per test (autocommit admin conn)."""
     try:
         conn = await _connect(autocommit=True)
     except Exception as exc:  # noqa: BLE001 - env-dependent skip
@@ -64,9 +64,9 @@ async def db():
     async with conn:
         await apply_async(conn)
         await conn.execute(
-            "TRUNCATE hd_flow_jobs, hd_flow_outbox, hd_flow_audit,"
-            " hd_flow_step_runs, hd_flow_workflow_runs, hd_flow_chunks,"
-            " hd_flow_row_status, hd_flow_dlq CASCADE"
+            "TRUNCATE keelflow_jobs, keelflow_outbox, keelflow_audit,"
+            " keelflow_step_runs, keelflow_workflow_runs, keelflow_chunks,"
+            " keelflow_row_status, keelflow_dlq CASCADE"
         )
         yield conn
 
@@ -91,7 +91,7 @@ async def service(kernel):
 
 
 async def _count(conn, table: str, job_id: str | None = None) -> int:
-    if table == "hd_flow_jobs" and job_id:
+    if table == "keelflow_jobs" and job_id:
         cur = await conn.execute(
             f"SELECT count(*) FROM {table} WHERE id = %s", (job_id,)
         )
@@ -108,11 +108,11 @@ async def test_commit_makes_job_visible(service, db, kernel):
         ).enqueue(cur)
         # committed on exiting conn.transaction()
 
-    assert await _count(db, "hd_flow_jobs", ref.id) == 1
-    assert await _count(db, "hd_flow_outbox") == 1
+    assert await _count(db, "keelflow_jobs", ref.id) == 1
+    assert await _count(db, "keelflow_outbox") == 1
 
     row = await (await db.execute(
-        "SELECT type, status, context, max_attempts FROM hd_flow_jobs WHERE id=%s",
+        "SELECT type, status, context, max_attempts FROM keelflow_jobs WHERE id=%s",
         (ref.id,),
     )).fetchone()
     assert row[0] == "invoice.match@v1"
@@ -142,8 +142,8 @@ async def test_rollback_leaves_no_trace(service, db, kernel):
                 ref_id = ref.id
                 raise RuntimeError("abort")
 
-    assert await _count(db, "hd_flow_jobs", ref_id) == 0
-    assert await _count(db, "hd_flow_outbox") == 0
+    assert await _count(db, "keelflow_jobs", ref_id) == 0
+    assert await _count(db, "keelflow_outbox") == 0
     async with kernel.pool.connection() as kconn, kconn.cursor() as cur:
         r = await cur.execute(
             f"SELECT count(*) FROM {CHANCY_PREFIX}jobs WHERE meta->>'job_id' = %s",

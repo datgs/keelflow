@@ -43,7 +43,7 @@ async def db():
     async with conn:
         await apply_async(conn)
         await conn.execute(
-            "TRUNCATE hd_flow_outbox, hd_flow_outbox_deliveries CASCADE"
+            "TRUNCATE keelflow_outbox, keelflow_outbox_deliveries CASCADE"
         )
         RECEIVED.clear()
         yield conn
@@ -68,7 +68,7 @@ async def test_publish_inside_tx_and_dispatch(db):
     assert n == 1
     assert RECEIVED == [("ok", {"order_id": "o-1"})]
     row = await (await db.execute(
-        "SELECT status FROM hd_flow_outbox"
+        "SELECT status FROM keelflow_outbox"
     )).fetchone()
     assert row[0] == "published"
 
@@ -89,7 +89,7 @@ async def test_rollback_produces_no_event(db):
     assert await dispatch_once(db, bus) == 0
     assert RECEIVED == []
     assert (await (await db.execute(
-        "SELECT count(*) FROM hd_flow_outbox"
+        "SELECT count(*) FROM keelflow_outbox"
     )).fetchone())[0] == 0
 
 
@@ -108,11 +108,11 @@ async def test_at_least_once_dedup_per_subscriber(db):
             await bus.publish(DomainEvent(type="e.t@v1", payload={"a": 1}), cur)
 
     # deliver but simulate crash before the outbox row is marked published
-    row = await (await db.execute("SELECT id FROM hd_flow_outbox")).fetchone()
+    row = await (await db.execute("SELECT id FROM keelflow_outbox")).fetchone()
     key = f"{handler_ok.__module__}.{handler_ok.__qualname__}"
     await handler_ok(DomainEvent(type="e.t@v1", payload={"a": 1}), None)
     await db.execute(
-        "INSERT INTO hd_flow_outbox_deliveries (outbox_id, subscriber)"
+        "INSERT INTO keelflow_outbox_deliveries (outbox_id, subscriber)"
         " VALUES (%s, %s)",
         (row[0], key),
     )
@@ -137,7 +137,7 @@ async def test_failed_subscriber_marks_event_failed(db):
     n = await dispatch_once(db, bus)
     assert n == 0
     row = await (await db.execute(
-        "SELECT status, attempts FROM hd_flow_outbox"
+        "SELECT status, attempts FROM keelflow_outbox"
     )).fetchone()
     assert row[0] == "failed"
     assert row[1] == 1

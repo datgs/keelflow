@@ -1,4 +1,4 @@
-# hd-flow spec — JobContext & actor model
+# keelflow spec — JobContext & actor model
 
 ## JobContext (JSON, serialized into `jobs.context`)
 
@@ -36,5 +36,5 @@ Rules:
 
 ## Audit actor
 
-`hd_flow_audit.actor` stores `{type, id, via?}` — a `via` chain
+`keelflow_audit.actor` stores `{type, id, via?}` — a `via` chain
 `user u1 → job j7 → job j8` answers "which human authorized the chain".

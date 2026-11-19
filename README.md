@@ -1,7 +1,7 @@
 # keelflow
 
 The keel of your business flows — a reusable Postgres-native durable
-workflow engine. Reference Python implementation of the **hd-flow spec**
+workflow engine. Reference Python implementation of the **keelflow spec**
 (`spec/`).
 
 `pip install keelflow` (PyPI name: `keelflow`)
@@ -47,7 +47,7 @@ KEELFLOW_DSN=$KEELFLOW_DSN uv run python examples/order_flow.py
 - `src/keelflow/compiler/` — YAML → DAG/state-machine compiler
 - `src/keelflow/admin/` — minimal SuperAdmin (dev/ops, no auth)
 - `src/keelflow/mcp/` — read-only agent tools
-- `spec/` — language-agnostic hd-flow spec (port to .NET/Java/PHP)
+- `spec/` — language-agnostic keelflow spec (port to .NET/Java/PHP)
 - `docs/architecture-design-brief.md` — design source of truth
 - `docs/plans/active/` — execution plan + acceptance evidence
 

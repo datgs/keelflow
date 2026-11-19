@@ -10,7 +10,7 @@ artifact that demonstrates it. Run: `uv run pytest -q` (56 tests).
 | 3 | 500k-row throughput | `.spikes/bulk_bench.py` + `.spikes/bulk_bench.md` — 100k rows in ~10 s noop; extrapolated ~50 s for 500k |
 | 4 | Ordering safety — parallel disjoint keys, serialized shared key | `tests/test_concurrency_scheduler.py::test_same_key_never_parallel_different_keys_free` (MAX_SEEN==1 for shared key) |
 | 5 | Workflow DAG — `needs`, `if:` guards, outputs, resume-from-failed-step | `tests/test_workflow.py` (multi-step DAG, guard eval, output refs); `tests/test_human_sm.py::test_human_step_parks_then_unblocks_run` |
-| 6 | Module boundary — modules can't reach each other's tables | Host-app concern, not engine: engine exposes only service interfaces + `hd_flow_*` schema; host apps apply their own module isolation. **Deferred to host integration.** |
+| 6 | Module boundary — modules can't reach each other's tables | Host-app concern, not engine: engine exposes only service interfaces + `keelflow_*` schema; host apps apply their own module isolation. **Deferred to host integration.** |
 | 7 | RBAC — `scope: own` enforced; unknown permissions fail | `tests/test_audit_permissions.py` (`perm:own`/`perm:all` scope syntax, `_effective_actor` via-chain). "Fail at load" is partially covered: SM transition guards resolve at runtime; compile-time permission lint is a future enhancement. |
 | 8 | Key-serialized execution | `tests/test_concurrency_scheduler.py` — `concurrency_key` → `pg_advisory_lock(hashtext(key))`; same key never parallel |
 

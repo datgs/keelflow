@@ -61,7 +61,7 @@ async def main() -> None:
     conn = await psycopg.AsyncConnection.connect(DSN, autocommit=True)
     await apply_async(conn)
 
-    async with Chancy(DSN, prefix="keelflow_") as kernel:
+    async with Chancy(DSN, prefix="keelflow_kernel_") as kernel:
         await kernel.migrate()
         await kernel.declare(
             Queue("default", concurrency=8, executor=Chancy.Executor.Async,
@@ -110,7 +110,7 @@ async def main() -> None:
                 .payload({"chunk_size": 5, "atomic": "row"}).enqueue(cur)
             for i in range(20):
                 await cur.execute(
-                    "INSERT INTO hd_flow_row_status (job_id, row_key,"
+                    "INSERT INTO keelflow_row_status (job_id, row_key,"
                     " status, data) VALUES (%s, %s, 'pending', %s)",
                     (ref.id, f"SKU-{i}", f'{{"sku":"SKU-{i}"}}'),
                 )
@@ -121,7 +121,7 @@ async def main() -> None:
         try:
             while True:
                 row = await (await conn.execute(
-                    "SELECT status FROM hd_flow_jobs WHERE id=%s", (ref.id,)
+                    "SELECT status FROM keelflow_jobs WHERE id=%s", (ref.id,)
                 )).fetchone()
                 if row[0] in ("done", "failed"):
                     break
@@ -143,7 +143,7 @@ async def main() -> None:
             print("order state:", await sm.current(order, conn))
             await asyncio.sleep(1.0)
             run = await (await conn.execute(
-                "SELECT status FROM hd_flow_workflow_runs"
+                "SELECT status FROM keelflow_workflow_runs"
                 " ORDER BY created_at DESC LIMIT 1"
             )).fetchone()
             print("workflow:", run[0])

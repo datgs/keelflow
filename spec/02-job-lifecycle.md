@@ -1,4 +1,4 @@
-# hd-flow spec — job lifecycle
+# keelflow spec — job lifecycle
 
 ## Enqueue (in caller TX)
 
@@ -14,9 +14,9 @@ MUST, atomically in `tx`:
 
 1. Validate `payload` against the type's input schema — invalid → raise
    before any write.
-2. INSERT into `hd_flow_jobs` (status `pending`, serialized `ctx`).
+2. INSERT into `keelflow_jobs` (status `pending`, serialized `ctx`).
 3. INSERT kernel/claim record (same TX — e.g. `chancy.push_ex(cursor)`).
-4. INSERT one `hd_flow_outbox` row `job.enqueued` (event dispatcher
+4. INSERT one `keelflow_outbox` row `job.enqueued` (event dispatcher
    handles delivery).
 
 Rollback of `tx` MUST leave no trace in any of the three.
@@ -25,7 +25,7 @@ Rollback of `tx` MUST leave no trace in any of the three.
 
 ```text
 kernel claims job → dispatch(job_id)
-  SELECT * FROM hd_flow_jobs WHERE id=$1 FOR UPDATE
+  SELECT * FROM keelflow_jobs WHERE id=$1 FOR UPDATE
   if concurrency_key: acquire named lock on hashtext(key)  # serialized exec
   deserialize context + payload; inject job_id into ctx.extra
   run handler.run(ctx, payload)
@@ -41,5 +41,5 @@ kernel claims job → dispatch(job_id)
 
 ## Human jobs (`type LIKE 'human.%'`)
 
-No kernel claim. Row sits `pending`/`claimed` in `hd_flow_jobs` until
+No kernel claim. Row sits `pending`/`claimed` in `keelflow_jobs` until
 `HumanTaskService.claim|complete` (see `05-human-sm-events.md`).

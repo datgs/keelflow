@@ -2,7 +2,7 @@
 
 `transition(entity, action, ctx, tx)` enforces the declared transition
 table + permission guard inside the caller's transaction, records the new
-state in `hd_flow_entity_state` (created lazily — entity statuses live
+state in `keelflow_entity_state` (created lazily — entity statuses live
 there for the framework; domain entities keep their own column via
 `sync` later), and fires `creates_job` / `triggers_workflow` side effects
 in the same TX.
@@ -18,7 +18,7 @@ from .context import ctx_to_dict
 from .enqueue import DEFAULT_QUEUE, DISPATCH_FUNC, _as_cursor
 
 ENSURE_STATE_TABLE = """
-CREATE TABLE IF NOT EXISTS hd_flow_entity_state (
+CREATE TABLE IF NOT EXISTS keelflow_entity_state (
     entity_type TEXT NOT NULL,
     entity_id   TEXT NOT NULL,
     state       TEXT NOT NULL,
@@ -60,10 +60,10 @@ class EngineStateMachineService(StateMachineService):
 
         await cursor.execute(
             """
-            INSERT INTO hd_flow_entity_state (entity_type, entity_id, state, version)
+            INSERT INTO keelflow_entity_state (entity_type, entity_id, state, version)
             VALUES (%s, %s, %s, 1)
             ON CONFLICT (entity_type, entity_id) DO UPDATE
-            SET state = EXCLUDED.state, version = hd_flow_entity_state.version + 1,
+            SET state = EXCLUDED.state, version = keelflow_entity_state.version + 1,
                 updated_at = now()
             """,
             (entity.type, entity.id, t.to_state),
@@ -78,7 +78,7 @@ class EngineStateMachineService(StateMachineService):
         if conn is None:
             return None
         cur = await conn.execute(
-            "SELECT state FROM hd_flow_entity_state"
+            "SELECT state FROM keelflow_entity_state"
             " WHERE entity_type=%s AND entity_id=%s",
             (entity.type, entity.id),
         )
@@ -91,7 +91,7 @@ class EngineStateMachineService(StateMachineService):
         except KeyError:
             return []
         cur = await conn.execute(
-            "SELECT state FROM hd_flow_entity_state"
+            "SELECT state FROM keelflow_entity_state"
             " WHERE entity_type=%s AND entity_id=%s",
             (entity.type, entity.id),
         )
@@ -112,7 +112,7 @@ class EngineStateMachineService(StateMachineService):
 
     async def _current(self, cursor, entity: EntityRef, sm) -> str:
         await cursor.execute(
-            "SELECT state FROM hd_flow_entity_state"
+            "SELECT state FROM keelflow_entity_state"
             " WHERE entity_type=%s AND entity_id=%s FOR UPDATE",
             (entity.type, entity.id),
         )
@@ -138,7 +138,7 @@ class EngineStateMachineService(StateMachineService):
         )
         await cursor.execute(
             """
-            INSERT INTO hd_flow_jobs
+            INSERT INTO keelflow_jobs
                 (id, type, status, payload, context, max_attempts, run_at,
                  assignee, created_at, updated_at)
             VALUES (%s,%s,'pending',%s,%s,%s,%s,%s,%s,%s)
@@ -167,7 +167,7 @@ class EngineStateMachineService(StateMachineService):
     async def _trigger_workflow(self, cursor, name: str, entity, ctx) -> None:
         run_id = uuid.uuid4()
         await cursor.execute(
-            "INSERT INTO hd_flow_workflow_runs (id, workflow, status, inputs)"
+            "INSERT INTO keelflow_workflow_runs (id, workflow, status, inputs)"
             " VALUES (%s, %s, 'running', %s)",
             (
                 run_id, name,
@@ -177,7 +177,7 @@ class EngineStateMachineService(StateMachineService):
         defn = self._registry.workflow(name)
         for step in defn.steps:
             await cursor.execute(
-                "INSERT INTO hd_flow_step_runs (id, run_id, step_id, type, status)"
+                "INSERT INTO keelflow_step_runs (id, run_id, step_id, type, status)"
                 " VALUES (%s, %s, %s, %s, 'pending')",
                 (uuid.uuid4(), run_id, step.id, step.type),
             )

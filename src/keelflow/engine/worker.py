@@ -4,7 +4,7 @@ The chancy kernel claims `keelflow.engine.worker.dispatch` for every enqueued
 keelflow job (`DISPATCH_FUNC`). Dispatch resolves the handler from the
 configured registry, re-validates the payload at execution time (jobs may
 have been written by older code), rebuilds the JobContext, and writes the
-result back to `hd_flow_jobs`.
+result back to `keelflow_jobs`.
 
 Leases/recovery are the kernel's job: a dead worker's in-flight job is
 re-queued by chancy's Recovery plugin and `dispatch` runs again —
@@ -78,7 +78,7 @@ async def dispatch(job_id: str, step_run_id: str | None = None) -> None:
     try:
         row = await _load_job(conn, job_id)
         if row is None:
-            log.error("job %s not found in hd_flow_jobs", job_id)
+            log.error("job %s not found in keelflow_jobs", job_id)
             return
         _, type_name, status, payload_json, ctx_json, _ck = row
         # Re-claim of an already-terminal job (e.g. double execution):
@@ -90,7 +90,7 @@ async def dispatch(job_id: str, step_run_id: str | None = None) -> None:
                 from .workflow import on_job_finished
 
                 sr = await conn.execute(
-                    "SELECT outputs FROM hd_flow_step_runs WHERE id=%s",
+                    "SELECT outputs FROM keelflow_step_runs WHERE id=%s",
                     (step_run_id,),
                 )
                 sr_row = await sr.fetchone()
@@ -181,10 +181,15 @@ def run_worker(
     dsn: str | None = None,
     *,
     queues: list[chancy.Queue] | None = None,
-    prefix: str = "keelflow_",
+    prefix: str = "keelflow_kernel_",
     event_bus=None,
 ) -> None:
     """Run a kernel worker claiming keelflow jobs. Blocks until SIGINT/SIGTERM.
+
+    `prefix` namespaces the KERNEL tables (chancy's `*_jobs`, `*_queues`…).
+    It MUST differ from the engine's `keelflow_` schema prefix or kernel
+    tables collide with `keelflow_jobs`/`keelflow_queues` (chancy also
+    creates `<prefix>jobs`).
 
     Equivalent of `python -m keelflow.engine.worker`.
     """
@@ -228,7 +233,7 @@ class _JobFailedError(RuntimeError):
 async def _load_job(conn, job_id: str):
     cur = await conn.execute(
         "SELECT id, type, status, payload, context, concurrency_key"
-        " FROM hd_flow_jobs WHERE id=%s",
+        " FROM keelflow_jobs WHERE id=%s",
         (job_id,),
     )
     row = await cur.fetchone()
@@ -251,7 +256,7 @@ async def _set_status(
     conn, job_id: str, status: JobStatus, *, increment_attempts: bool = False
 ) -> None:
     await conn.execute(
-        "UPDATE hd_flow_jobs SET status=%s, attempts = attempts + %s,"
+        "UPDATE keelflow_jobs SET status=%s, attempts = attempts + %s,"
         " updated_at=now() WHERE id=%s",
         (status.value, 1 if increment_attempts else 0, job_id),
     )
@@ -270,7 +275,7 @@ async def _finish(
     import json
 
     await conn.execute(
-        "UPDATE hd_flow_jobs SET status=%s, result=%s, error=%s,"
+        "UPDATE keelflow_jobs SET status=%s, result=%s, error=%s,"
         " updated_at=now() WHERE id=%s",
         (status.value, json.dumps(result) if result else None,
          (error or "") + (("\n" + trace) if trace else "") or None, job_id),

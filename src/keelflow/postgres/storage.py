@@ -15,7 +15,7 @@ class PostgresStorage(Storage):
     async def defer(self, job: Job, tx: Transaction) -> None:
         await tx.execute(
             """
-            INSERT INTO hd_flow_jobs
+            INSERT INTO keelflow_jobs
                 (id, type, status, payload, context, attempts, max_attempts,
                  run_at, claimed_by, lease_until, concurrency_key, assignee,
                  parent_job_id, result, created_at, updated_at)

@@ -4,9 +4,9 @@
 mandatory, payload is validated at enqueue time (fail fast), and the write
 happens inside the caller's transaction:
 
-    INSERT hd_flow_jobs          — engine-visible job record
+    INSERT keelflow_jobs          — engine-visible job record
     chancy.push_ex(cursor, ...)  — kernel job claimed by workers
-    INSERT hd_flow_outbox        — 'job.enqueued' event intent
+    INSERT keelflow_outbox        — 'job.enqueued' event intent
 
 All three share the caller's transaction: commit → job becomes visible and
 a `pg_notify` wakes workers; rollback → nothing exists.
@@ -34,7 +34,7 @@ from ..sdk import (
 from .context import ctx_to_dict
 
 #: Kernel job func that dispatches into our handler registry. The worker (T5)
-#: registers this name; kwargs carry the hd_flow_jobs id.
+#: registers this name; kwargs carry the keelflow_jobs id.
 DISPATCH_FUNC = "keelflow.engine.worker.dispatch"
 
 DEFAULT_QUEUE = "default"
@@ -116,7 +116,7 @@ class JobBuilder:
         # 1. engine-visible record
         await cursor.execute(
             """
-            INSERT INTO hd_flow_jobs
+            INSERT INTO keelflow_jobs
                 (id, type, status, payload, context, attempts, max_attempts,
                  run_at, claimed_by, lease_until, concurrency_key, assignee,
                  parent_job_id, result, created_at, updated_at)
@@ -157,7 +157,7 @@ class JobBuilder:
         # 3. outbox intent — event dispatcher (T13) publishes on commit.
         await cursor.execute(
             """
-            INSERT INTO hd_flow_outbox (event_type, payload)
+            INSERT INTO keelflow_outbox (event_type, payload)
             VALUES ('job.enqueued', %s)
             """,
             (

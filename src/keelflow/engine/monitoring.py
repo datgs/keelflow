@@ -27,7 +27,7 @@ class MonitoringService:
         sql = (
             "SELECT id, type, status, attempts, run_at, claimed_by,"
             " concurrency_key, assignee, parent_job_id, created_at, updated_at"
-            f" FROM hd_flow_jobs WHERE {' AND '.join(where)}"
+            f" FROM keelflow_jobs WHERE {' AND '.join(where)}"
             " ORDER BY created_at DESC LIMIT %s"
         )
         params.append(limit)
@@ -39,21 +39,21 @@ class MonitoringService:
     async def job_get(self, conn, job_id: str) -> dict[str, Any] | None:
         async with conn.cursor(row_factory=dict_row) as cur:
             await cur.execute(
-                "SELECT * FROM hd_flow_jobs WHERE id=%s", (job_id,)
+                "SELECT * FROM keelflow_jobs WHERE id=%s", (job_id,)
             )
             return await cur.fetchone()
 
     async def runs_get(self, conn, run_id: str) -> dict[str, Any] | None:
         async with conn.cursor(row_factory=dict_row) as cur:
             await cur.execute(
-                "SELECT * FROM hd_flow_workflow_runs WHERE id=%s", (run_id,)
+                "SELECT * FROM keelflow_workflow_runs WHERE id=%s", (run_id,)
             )
             run = await cur.fetchone()
             if not run:
                 return None
             await cur.execute(
                 "SELECT step_id, type, status, job_id, outputs, attempts"
-                " FROM hd_flow_step_runs WHERE run_id=%s ORDER BY created_at",
+                " FROM keelflow_step_runs WHERE run_id=%s ORDER BY created_at",
                 (run_id,),
             )
             run["steps"] = await cur.fetchall()
@@ -63,7 +63,7 @@ class MonitoringService:
         async with conn.cursor(row_factory=dict_row) as cur:
             await cur.execute(
                 "SELECT id, workflow, status, created_at, updated_at"
-                " FROM hd_flow_workflow_runs ORDER BY created_at DESC LIMIT %s",
+                " FROM keelflow_workflow_runs ORDER BY created_at DESC LIMIT %s",
                 (limit,),
             )
             return await cur.fetchall()
@@ -72,7 +72,7 @@ class MonitoringService:
         async with conn.cursor(row_factory=dict_row) as cur:
             await cur.execute(
                 "SELECT id, row_key, chunk_id, error, data, updated_at"
-                " FROM hd_flow_row_status WHERE job_id=%s AND status='failed'"
+                " FROM keelflow_row_status WHERE job_id=%s AND status='failed'"
                 " ORDER BY id",
                 (job_id,),
             )
@@ -90,7 +90,7 @@ class MonitoringService:
                         AS failed_24h,
                     EXTRACT(EPOCH FROM (now() - min(created_at)
                         FILTER (WHERE status='pending'))) AS oldest_pending_s
-                FROM hd_flow_jobs
+                FROM keelflow_jobs
                 """
             )
             row = await cur.fetchone()
@@ -104,7 +104,7 @@ class MonitoringService:
     async def retry_job(self, conn, job_id: str) -> None:
         """Ops action: put a failed job back to pending (kernel re-claims)."""
         await conn.execute(
-            "UPDATE hd_flow_jobs SET status='pending', error=NULL,"
+            "UPDATE keelflow_jobs SET status='pending', error=NULL,"
             " attempts=0, updated_at=now()"
             " WHERE id=%s AND status='failed'",
             (job_id,),

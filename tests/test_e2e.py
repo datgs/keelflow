@@ -108,10 +108,10 @@ async def db():
     async with conn:
         await apply_async(conn)
         await conn.execute(
-            "TRUNCATE hd_flow_jobs, hd_flow_outbox, hd_flow_outbox_deliveries,"
-            " hd_flow_audit, hd_flow_step_runs, hd_flow_workflow_runs,"
-            " hd_flow_chunks, hd_flow_row_status, hd_flow_dlq,"
-            " hd_flow_entity_state CASCADE"
+            "TRUNCATE keelflow_jobs, keelflow_outbox, keelflow_outbox_deliveries,"
+            " keelflow_audit, keelflow_step_runs, keelflow_workflow_runs,"
+            " keelflow_chunks, keelflow_row_status, keelflow_dlq,"
+            " keelflow_entity_state CASCADE"
         )
         await conn.execute(
             f"TRUNCATE {CHANCY_PREFIX}jobs, {CHANCY_PREFIX}workers,"
@@ -206,7 +206,7 @@ async def test_e2e_scenario(env, db):
             .payload({"chunk_size": 10, "atomic": "row"}).enqueue(cur)
         for k in keys:
             await cur.execute(
-                "INSERT INTO hd_flow_row_status (job_id, row_key, status, data)"
+                "INSERT INTO keelflow_row_status (job_id, row_key, status, data)"
                 " VALUES (%s, %s, 'pending', %s)",
                 (ref.id, k, __import__("json").dumps({"sku": k})),
             )
@@ -216,7 +216,7 @@ async def test_e2e_scenario(env, db):
     try:
         for _ in range(200):
             row = await (await db.execute(
-                "SELECT status FROM hd_flow_jobs WHERE id=%s", (ref.id,)
+                "SELECT status FROM keelflow_jobs WHERE id=%s", (ref.id,)
             )).fetchone()
             if row and row[0] == "done":
                 break
@@ -224,14 +224,14 @@ async def test_e2e_scenario(env, db):
         assert row[0] == "done"
 
         counts = await (await db.execute(
-            "SELECT status, count(*) FROM hd_flow_row_status WHERE job_id=%s"
+            "SELECT status, count(*) FROM keelflow_row_status WHERE job_id=%s"
             " GROUP BY status",
             (ref.id,),
         )).fetchall()
         assert dict(counts)["done"] == 49
         assert dict(counts)["failed"] == 1
         chunks = await (await db.execute(
-            "SELECT count(*) FROM hd_flow_chunks WHERE job_id=%s",
+            "SELECT count(*) FROM keelflow_chunks WHERE job_id=%s",
             (ref.id,),
         )).fetchone()
         assert chunks[0] == 5
@@ -246,7 +246,7 @@ async def test_e2e_scenario(env, db):
                 .payload({}).enqueue(cur)
         for _ in range(200):
             row = await (await db.execute(
-                "SELECT status FROM hd_flow_jobs WHERE id=%s", (fref.id,)
+                "SELECT status FROM keelflow_jobs WHERE id=%s", (fref.id,)
             )).fetchone()
             if row[0] == "done":
                 break
@@ -283,7 +283,7 @@ async def test_e2e_scenario(env, db):
         # workflow runs through both steps
         for _ in range(200):
             row = await (await db.execute(
-                "SELECT status FROM hd_flow_workflow_runs ORDER BY created_at"
+                "SELECT status FROM keelflow_workflow_runs ORDER BY created_at"
                 " DESC LIMIT 1"
             )).fetchone()
             if row[0] == "done":
@@ -308,7 +308,7 @@ async def test_e2e_scenario(env, db):
         try:
             for _ in range(300):
                 row = await (await db.execute(
-                    "SELECT status, result FROM hd_flow_jobs WHERE id=%s",
+                    "SELECT status, result FROM keelflow_jobs WHERE id=%s",
                     (sref.id,),
                 )).fetchone()
                 if row[0] == "done":

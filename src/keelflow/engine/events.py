@@ -1,11 +1,11 @@
 """EventBus + outbox dispatcher (T13).
 
-`EventBus.publish` writes a `hd_flow_outbox` row inside the caller's
+`EventBus.publish` writes a `keelflow_outbox` row inside the caller's
 transaction — if the TX rolls back, no event exists (must-prove #2).
 
 A background `dispatch_events` loop (run alongside the worker) claims
 pending outbox rows with `FOR UPDATE SKIP LOCKED` and calls each
-subscriber. Delivery is at-least-once: `hd_flow_outbox_deliveries`
+subscriber. Delivery is at-least-once: `keelflow_outbox_deliveries`
 records (outbox_id, subscriber) so a crash between handler success and
 the mark-published write doesn't redeliver to the same subscriber.
 
@@ -35,7 +35,7 @@ class OutboxEventBus(EventBus):
         import json
 
         await cursor.execute(
-            "INSERT INTO hd_flow_outbox (event_type, payload) VALUES (%s, %s)",
+            "INSERT INTO keelflow_outbox (event_type, payload) VALUES (%s, %s)",
             (
                 event.type,
                 json.dumps(
@@ -74,7 +74,7 @@ async def dispatch_once(
     for _ in range(limit):
         async with conn.transaction(), conn.cursor(row_factory=dict_row) as cur:
             await cur.execute(
-                "SELECT id, event_type, payload, attempts FROM hd_flow_outbox"
+                "SELECT id, event_type, payload, attempts FROM keelflow_outbox"
                 " WHERE status='pending' ORDER BY id LIMIT 1"
                 " FOR UPDATE SKIP LOCKED",
             )
@@ -95,7 +95,7 @@ async def _deliver_row(conn, bus: OutboxEventBus, row) -> int:
     failed = False
     for key, handler in subs.items():
         seen = await conn.execute(
-            "SELECT 1 FROM hd_flow_outbox_deliveries"
+            "SELECT 1 FROM keelflow_outbox_deliveries"
             " WHERE outbox_id=%s AND subscriber=%s",
             (row["id"], key),
         )
@@ -108,19 +108,19 @@ async def _deliver_row(conn, bus: OutboxEventBus, row) -> int:
             failed = True
             break
         await conn.execute(
-            "INSERT INTO hd_flow_outbox_deliveries (outbox_id, subscriber)"
+            "INSERT INTO keelflow_outbox_deliveries (outbox_id, subscriber)"
             " VALUES (%s, %s) ON CONFLICT DO NOTHING",
             (row["id"], key),
         )
     if failed:
         await conn.execute(
-            "UPDATE hd_flow_outbox SET status='failed',"
+            "UPDATE keelflow_outbox SET status='failed',"
             " attempts=attempts+1 WHERE id=%s",
             (row["id"],),
         )
     else:
         await conn.execute(
-            "UPDATE hd_flow_outbox SET status='published',"
+            "UPDATE keelflow_outbox SET status='published',"
             " published_at=now() WHERE id=%s",
             (row["id"],),
         )

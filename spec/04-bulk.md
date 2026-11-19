@@ -1,14 +1,14 @@
-# hd-flow spec — bulk chunk/row processing
+# keelflow spec — bulk chunk/row processing
 
 Three levels: parent job → chunks → rows.
 
 ## Flow
 
 1. Caller enqueues bulk job + INSERTs staging rows into
-   `hd_flow_row_status (job_id, row_key, status='pending', data)` —
+   `keelflow_row_status (job_id, row_key, status='pending', data)` —
    same TX (durable intent).
 2. Parent handler (`BulkJobHandler.run`) partitions pending+unchunked
-   rows into `hd_flow_chunks` (idempotent) and enqueues one chunk job
+   rows into `keelflow_chunks` (idempotent) and enqueues one chunk job
    per chunk. Parent stays `running` until fan-in.
 3. Chunk handler claims chunk, resets stranded `processing` rows to
    `pending` (kill-resume), processes rows via `process_row(ctx, row, tx)`:
