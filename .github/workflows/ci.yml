@@ -1,0 +1,47 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: keelflow
+        ports:
+          - 5544:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+    env:
+      KEELFLOW_TEST_DSN: postgresql://postgres:postgres@localhost:5544/keelflow
+      KEELFLOW_DSN: postgresql://postgres:postgres@localhost:5544/keelflow
+      UV_CACHE_DIR: /tmp/uv-cache
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v5
+        with:
+          version: "latest"
+
+      - name: Install dev deps
+        run: uv sync --dev
+
+      - name: Ruff
+        run: uv run ruff check src tests
+
+      - name: Mypy
+        run: uv run mypy src/keelflow
+
+      - name: Pytest
+        run: uv run pytest -q
