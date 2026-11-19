@@ -50,6 +50,6 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - Handler exceptions leave the job `running` while kernel retries
   remain — only exhaustion marks it `failed` and fires `on_failed`.
 
-## [0.1.0a1] — pending
+## [0.1.0a1] — 2026-11-19
 
 First public alpha release on PyPI.

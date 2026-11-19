@@ -1,16 +1,17 @@
 [project]
 name = "keelflow"
-version = "0.1.0"
+version = "0.1.0a1"
 description = "Reusable Postgres-backed durable workflow engine"
 readme = "README.md"
-license = { text = "MIT" }
+license = "MIT"
+license-files = ["LICENSE"]
 authors = [
     { name = "Dat Giang", email = "datgs@users.noreply.github.com" }
 ]
 keywords = ["workflow", "durable", "postgres", "jobs", "state-machine"]
 classifiers = [
     "Development Status :: 3 - Alpha",
-    "License :: OSI Approved :: MIT License",
+    
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
