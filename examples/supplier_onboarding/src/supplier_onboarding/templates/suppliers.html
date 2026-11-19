@@ -1,0 +1,38 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="card">
+  <h2>Suppliers
+    <span class="muted" style="font-weight:normal">
+      · {{ open_tasks }} open human task{{ 's' if open_tasks != 1 }}</span>
+  </h2>
+  <table>
+    <tr><th>#</th><th>name</th><th>country</th><th>tax id</th>
+        <th>risk</th><th>status</th><th>latest run</th><th></th></tr>
+    {% for s in suppliers %}
+    <tr>
+      <td>{{ s.id }}</td>
+      <td><a href="/suppliers/{{ s.id }}?as={{ nav['as'] }}">{{ s.name }}</a></td>
+      <td>{{ s.country }}</td>
+      <td>{{ s.tax_id }}</td>
+      <td>{% if s.risk %}<span class="status st-{{ s.risk }}">{{ s.risk }}</span>{% else %}—{% endif %}</td>
+      <td><span class="status st-{{ s.status }}">{{ s.status }}</span></td>
+      <td>
+        {% set r = runs.get(s.id) %}
+        {% if r %}
+          <a href="/runs/{{ r.id }}?as={{ nav['as'] }}">
+            <span class="status st-{{ r.status }}">{{ r.status }}</span></a>
+          {% if r.terminal_outcome %}<span class="status st-{{ r.terminal_outcome }}">{{ r.terminal_outcome }}</span>{% endif %}
+        {% else %}—{% endif %}
+      </td>
+      <td>
+        {% if s.status in ('requested','onboarding') %}
+        <form method="post" action="/suppliers/{{ s.id }}/onboard?as={{ nav['as'] }}" style="display:inline">
+          <button>start onboarding</button>
+        </form>
+        {% endif %}
+      </td>
+    </tr>
+    {% endfor %}
+  </table>
+</div>
+{% endblock %}

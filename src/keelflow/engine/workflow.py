@@ -82,31 +82,42 @@ class WorkflowService:
         return RunRef(id=str(run_id))
 
     async def get_run(self, conn, run_id: str) -> dict[str, Any] | None:
-        cur = await conn.execute(
-            "SELECT id, workflow, status, inputs FROM keelflow_workflow_runs WHERE id=%s",
+        from psycopg.rows import dict_row
+
+        # Normalize to dict_row regardless of caller's connection factory.
+        cur = (conn.connection.cursor(row_factory=dict_row)
+               if hasattr(conn, "connection")
+               else conn.cursor(row_factory=dict_row))
+        row = await (await cur.execute(
+            "SELECT id, workflow, status, inputs, terminal_outcome"
+            " FROM keelflow_workflow_runs WHERE id=%s",
             (run_id,),
-        )
-        row = await cur.fetchone()
+        )).fetchone()
         if row is None:
             return None
-        cur = await conn.execute(
+        rows = await (await cur.execute(
             "SELECT step_id, type, status, job_id, outputs, attempts"
             " FROM keelflow_step_runs WHERE run_id=%s ORDER BY created_at",
             (run_id,),
-        )
+        )).fetchall()
+        defn = self._registry.workflow(row["workflow"])
+        needs_by_id = {s.id: list(s.needs) for s in defn.steps}
         steps = [
             {
-                "step_id": r[0], "type": r[1], "status": r[2],
-                "job_id": str(r[3]) if r[3] else None,
-                "outputs": r[4], "attempts": r[5],
+                "step_id": r["step_id"], "type": r["type"],
+                "status": r["status"],
+                "job_id": str(r["job_id"]) if r["job_id"] else None,
+                "outputs": r["outputs"], "attempts": r["attempts"],
+                "needs": needs_by_id.get(r["step_id"], []),
             }
-            for r in await cur.fetchall()
+            for r in rows
         ]
         return {
-            "id": str(row[0]),
-            "workflow": row[1],
-            "status": row[2],
-            "inputs": row[3],
+            "id": str(row["id"]),
+            "workflow": row["workflow"],
+            "status": row["status"],
+            "terminal_outcome": row["terminal_outcome"],
+            "inputs": row["inputs"],
             "steps": steps,
         }
 
@@ -256,7 +267,11 @@ async def advance_run(
     Must be called inside a transaction on `cursor`. Idempotent — a step_run
     with a job_id already attached is never re-enqueued.
     """
-    run_row = await _fetch_run(cursor, run_id)
+    # Lock the run row first: parallel step completions each call this in
+    # their own TX — without the lock the second advance reads a stale
+    # snapshot (sees the sibling still 'running'), enqueues nothing, and
+    # nobody ever re-advances the run. Serializes single-writer per run.
+    run_row = await _fetch_run(cursor, run_id, for_update=True)
     if run_row is None or run_row["status"] != JobStatus.RUNNING.value:
         return
     defn = registry.workflow(run_row["workflow"])
@@ -277,6 +292,7 @@ async def advance_run(
     # 'running' while any human step is pending.
     by_id = {s["step_id"]: s for s in step_runs}
     done_ids = {s["step_id"] for s in step_runs if s["status"] in ("done", "skipped")}
+    skipped_ids: set[str] = set()
 
     for spec_step in defn.steps:
         sr = by_id.get(spec_step.id)
@@ -290,6 +306,7 @@ async def advance_run(
         ):
             await _set_step_status(cursor, sr["id"], "skipped")
             done_ids.add(spec_step.id)
+            skipped_ids.add(sr["id"])
             continue
         spec = registry.job_type(spec_step.type)
         if spec_step.type.startswith("human."):
@@ -298,6 +315,17 @@ async def advance_run(
         else:
             await _enqueue_step(cursor, sr, spec_step, spec, run_row, step_runs,
                                 parent_ctx, kernel)
+
+    # Re-check: a pass that only marked guard-false steps 'skipped' may
+    # leave every step terminal while nothing was enqueued — without this,
+    # such a run would stay 'running' forever.
+    if not any(
+        s["status"] in ("pending", "claimed", "running", "blocked")
+        for s in step_runs
+        if s["id"] not in skipped_ids
+    ):
+        await _finish_run(cursor, run_id, registry,
+                          _terminal_outcome(step_runs), step_runs)
 
 
 async def on_job_finished(
@@ -639,12 +667,13 @@ def eval_guard(expr: str, run_inputs: dict, step_runs: list[dict], _registry=Non
 # ── db helpers ────────────────────────────────────────────────────────────
 
 
-async def _fetch_run(cursor, run_id) -> dict[str, Any] | None:
+async def _fetch_run(cursor, run_id, *, for_update: bool = False) -> dict[str, Any] | None:
     from psycopg.rows import dict_row
 
     cur = cursor.connection.cursor(row_factory=dict_row) if hasattr(cursor, "connection") else cursor
     await cur.execute(
-        "SELECT id, workflow, status, inputs FROM keelflow_workflow_runs WHERE id=%s",
+        "SELECT id, workflow, status, inputs FROM keelflow_workflow_runs"
+        f" WHERE id=%s{' FOR UPDATE' if for_update else ''}",
         (run_id,),
     )
     return await cur.fetchone()

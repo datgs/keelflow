@@ -62,7 +62,8 @@ class HumanTaskService:
 
     async def claim(self, conn, job_id: str, actor: Actor) -> None:
         """First claim wins. Raises if already claimed by someone else."""
-        async with conn.transaction(), conn.cursor() as cur:
+        async with conn.transaction(), conn.cursor(
+                row_factory=dict_row) as cur:
             await cur.execute(
                 "SELECT claimed_by FROM keelflow_jobs WHERE id=%s FOR UPDATE",
                 (job_id,),
@@ -71,8 +72,9 @@ class HumanTaskService:
             if row is None:
                 raise KeyError(f"job {job_id} not found")
             who = f"user:{actor.id}"
-            if row[0] and row[0] != who:
-                raise PermissionError(f"task already claimed by {row[0]}")
+            if row["claimed_by"] and row["claimed_by"] != who:
+                raise PermissionError(
+                    f"task already claimed by {row['claimed_by']}")
             await cur.execute(
                 "UPDATE keelflow_jobs SET status='claimed', claimed_by=%s,"
                 " updated_at=now() WHERE id=%s",

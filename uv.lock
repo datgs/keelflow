@@ -11,6 +11,7 @@ resolution-markers = [
 members = [
     "keelflow",
     "keelflow-demo-invoice",
+    "keelflow-demo-supplier",
     "kernel",
 ]
 
@@ -490,6 +491,27 @@ dev = [
 name = "keelflow-demo-invoice"
 version = "0.1.0"
 source = { editable = "examples/invoice_flow" }
+dependencies = [
+    { name = "fastapi" },
+    { name = "jinja2" },
+    { name = "keelflow" },
+    { name = "python-multipart" },
+    { name = "uvicorn" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "fastapi", specifier = ">=0.124" },
+    { name = "jinja2", specifier = ">=3.1" },
+    { name = "keelflow", editable = "." },
+    { name = "python-multipart", specifier = ">=0.0.9" },
+    { name = "uvicorn", specifier = ">=0.34" },
+]
+
+[[package]]
+name = "keelflow-demo-supplier"
+version = "0.1.0"
+source = { editable = "examples/supplier_onboarding" }
 dependencies = [
     { name = "fastapi" },
     { name = "jinja2" },

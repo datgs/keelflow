@@ -1,0 +1,65 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="card">
+  <h2>{{ s.name }}
+    <span class="status st-{{ s.status }}">{{ s.status }}</span>
+    {% if s.risk %}<span class="status st-{{ s.risk }}">risk {{ s.risk }}</span>{% endif %}
+  </h2>
+  <p class="muted">{{ s.country }} · {{ s.tax_id }} · {{ s.contact_email }}
+     · bank {{ s.bank_ref }} · #{{ s.id }}</p>
+  {% if s.fail_sanction %}<p style="color:#8a2020">
+    <b>fail_sanction = ON</b> — sanction adapter will raise (simulated outage).
+  </p>{% endif %}
+  <form method="post" action="/suppliers/{{ s.id }}/toggle-fail?as={{ nav['as'] }}" style="display:inline">
+    <button class="warn">toggle fail_sanction</button>
+  </form>
+  {% if s.status in ('requested','onboarding') %}
+  <form method="post" action="/suppliers/{{ s.id }}/onboard?as={{ nav['as'] }}" style="display:inline">
+    <button>start onboarding run</button>
+  </form>
+  {% endif %}
+</div>
+
+{% if vendor %}
+<div class="card">
+  <h3>Vendor account</h3>
+  <table>
+    <tr><td>vendor_no</td><td><b>{{ vendor.vendor_no }}</b></td></tr>
+    <tr><td>legal name</td><td>{{ vendor.legal_name }}</td></tr>
+    <tr><td>terms</td><td>{{ vendor.payment_terms }}</td></tr>
+    <tr><td>bank verified</td><td>{{ vendor.bank_verified }}</td></tr>
+    <tr><td>activated</td><td>{{ vendor.activated_at or '—' }}</td></tr>
+  </table>
+</div>
+{% endif %}
+
+{% if checks %}
+<div class="card">
+  <h3>Check results</h3>
+  {% for c in checks %}
+  <h4>{{ c.check_type }}</h4>
+  <pre>{{ c.result | tojson(indent=2) }}</pre>
+  {% endfor %}
+</div>
+{% endif %}
+
+<div class="card">
+  <h3>Runs</h3>
+  <table>
+    <tr><th>run</th><th>status</th><th>outcome</th><th>started</th><th></th></tr>
+    {% for r in runs %}
+    <tr>
+      <td><a href="/runs/{{ r.id }}?as={{ nav['as'] }}">{{ (r.id|string)[:8] }}…</a></td>
+      <td><span class="status st-{{ r.status }}">{{ r.status }}</span></td>
+      <td>{{ r.terminal_outcome or '—' }}</td>
+      <td>{{ r.created_at.strftime('%H:%M:%S') }}</td>
+      <td>{% if r.status == 'failed' %}
+        <form method="post" action="/suppliers/{{ s.id }}/resume/{{ r.id }}?as={{ nav['as'] }}" style="display:inline">
+          <button>resume run</button>
+        </form>
+      {% endif %}</td>
+    </tr>
+    {% endfor %}
+  </table>
+</div>
+{% endblock %}
