@@ -63,6 +63,9 @@ async def db():
 
         await apply_async(conn)
         await conn.execute(DEMO_SCHEMA)
+        # fresh DB (CI): kernel tables must exist before we truncate them.
+        async with Chancy(DSN, prefix=KERNEL_PREFIX) as _k:
+            await _k.migrate()
         await conn.execute(
             "TRUNCATE keelflow_jobs, keelflow_outbox, keelflow_audit,"
             " keelflow_step_runs, keelflow_workflow_runs, keelflow_chunks,"

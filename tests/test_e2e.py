@@ -107,6 +107,9 @@ async def db():
         pytest.skip(f"postgres unavailable: {exc}")
     async with conn:
         await apply_async(conn)
+        # fresh DB (CI): kernel tables must exist before we truncate them.
+        async with Chancy(DSN, prefix=CHANCY_PREFIX) as _k:
+            await _k.migrate()
         await conn.execute(
             "TRUNCATE keelflow_jobs, keelflow_outbox, keelflow_outbox_deliveries,"
             " keelflow_audit, keelflow_step_runs, keelflow_workflow_runs,"
