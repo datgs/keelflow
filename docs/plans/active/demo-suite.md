@@ -1,5 +1,5 @@
 ---
-status: in_progress
+status: done
 last_reviewed: 2026-11-19
 related_code: [examples/invoice_flow, examples/supplier_onboarding]
 ---
@@ -16,7 +16,11 @@ related_code: [examples/invoice_flow, examples/supplier_onboarding]
       advance_run lost-wakeup (run row now FOR UPDATE), guard-skip
       livelock (post-loop terminal re-check), get_run needs dict_row +
       returns `needs`/`terminal_outcome`, human.claim dict_row.
-- [ ] D3 bulk_import — next.
+- [x] D3 bulk_import — `5bb3daa`. Engine fixes uncovered: bulk parent
+      partitioned on a separate conn (invisible staged rows, non-atomic)
+      → partitions on ctx.tx; _fan_in never advanced a workflow step
+      (bulk couldn't be a DAG step) → on_job_finished in fan-in TX +
+      row counts in parent result.
 - [ ] Public readiness: security pass done (`90258f1`); remaining =
       tag `0.1.0a1` + PyPI release.
 
