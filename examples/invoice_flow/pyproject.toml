@@ -1,0 +1,19 @@
+[project]
+name = "keelflow-demo-invoice"
+version = "0.1.0"
+description = "keelflow demo: invoice submit → human review → approve → DAG posting"
+requires-python = ">=3.11"
+dependencies = [
+    "keelflow",
+    "fastapi>=0.124",
+    "uvicorn>=0.34",
+    "jinja2>=3.1",
+    "python-multipart>=0.0.9",
+]
+
+[build-system]
+requires = ["uv_build>=0.11.19,<0.12.0"]
+build-backend = "uv_build"
+
+[tool.uv.sources]
+keelflow = { workspace = true }

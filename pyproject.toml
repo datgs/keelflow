@@ -43,4 +43,5 @@ ignore_missing_imports = true
 [tool.uv.workspace]
 members = [
     ".spikes/kernel",
+    "examples/*",
 ]
