@@ -3,8 +3,20 @@ name = "keelflow"
 version = "0.1.0"
 description = "Reusable Postgres-backed durable workflow engine"
 readme = "README.md"
+license = { text = "MIT" }
 authors = [
     { name = "Dat Giang", email = "datgs@users.noreply.github.com" }
+]
+keywords = ["workflow", "durable", "postgres", "jobs", "state-machine"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Database",
+    "Topic :: Software Development :: Libraries :: Application Frameworks",
 ]
 requires-python = ">=3.11"
 dependencies = [

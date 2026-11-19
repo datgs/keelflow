@@ -31,12 +31,13 @@ docker run -d --name kf-pg -e POSTGRES_PASSWORD=postgres \
   -p 5544:5432 postgres:16-alpine
 docker exec kf-pg createdb -U postgres keelflow
 
-uv sync --dev
 export KEELFLOW_DSN=postgresql://postgres:postgres@localhost:5544/keelflow
-uv run python -c "import asyncio; from keelflow.postgres.schema import apply_async; import psycopg; asyncio.run((lambda: apply_async(psycopg.AsyncConnection.connect(__import__('os').environ['KEELFLOW_DSN'])))())" || true
-# or simply run the demo (applies schema itself):
-KEELFLOW_DSN=$KEELFLOW_DSN uv run python examples/order_flow.py
+uv run python examples/order_flow.py   # applies schema + runs a demo flow
 ```
+
+Full walkthrough of every feature: **[docs/guide.md](docs/guide.md)**.
+Complete demo app (SM + human tasks + DAG + failure paths):
+**[examples/invoice_flow](examples/invoice_flow/)**.
 
 ## Layout
 

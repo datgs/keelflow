@@ -28,14 +28,20 @@ kernel claims job → dispatch(job_id)
   SELECT * FROM keelflow_jobs WHERE id=$1 FOR UPDATE
   if concurrency_key: acquire named lock on hashtext(key)  # serialized exec
   deserialize context + payload; inject job_id into ctx.extra
-  run handler.run(ctx, payload)
-  status := done | failed | cancelled; result := outputs
+  if status in (done | cancelled | failed):                       # re-delivery
+      advance owning step idempotently (if any); never re-run handler
+  else:
+      run handler.run(ctx, payload) with ctx.tx = dispatch cursor
+      handler + job finish + advance_run in ONE TX (see 03 §dispatch TX)
+      declared status := done | failed | cancelled; result := outputs
   kernel completion update (same worker TX)
 ```
 
 - Retry policy is per job type (`max_attempts`, backoff+jitter); kernel
-  owns attempt counter. Exhausted retries → status `failed`; DLQ row
-  written by a reaper or ops action.
+  owns attempt counter. On handler exception: retries remaining → job
+  stays `running` (redelivery re-runs the handler); exhausted → status
+  `failed` and the owning step terminalizes (`on_failed` path in
+  `03-workflow.md`). DLQ row written by a reaper or ops action.
 - `cancel_requested` is cooperative: worker checks/sets flag; handler
   `on_cancel` may clean up; kernel must not force-kill mid-transaction.
 
