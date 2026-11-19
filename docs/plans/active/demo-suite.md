@@ -1,8 +1,24 @@
 ---
-status: proposed
+status: in_progress
 last_reviewed: 2026-11-19
 related_code: [examples/invoice_flow, examples/supplier_onboarding]
 ---
+
+## Progress
+
+- [x] S0 Chancy issue review — `.spikes/chancy-issues-2026-11-19.md`;
+      pinned `chancy==0.26.x`, supervisor-restart requirement documented.
+- [x] S0a CI — `.github/workflows/ci.yml` (ruff + mypy + pytest on PG16).
+- [x] Engine prerequisite contract — `50055a0` (triggers, resume_run,
+      single-TX dispatch, ctx.tx, complete_and_transition).
+- [x] D1 invoice_flow — `8e9fb8d`.
+- [x] D2 supplier_onboarding — `59cd673`. Engine fixes uncovered:
+      advance_run lost-wakeup (run row now FOR UPDATE), guard-skip
+      livelock (post-loop terminal re-check), get_run needs dict_row +
+      returns `needs`/`terminal_outcome`, human.claim dict_row.
+- [ ] D3 bulk_import — next.
+- [ ] Public readiness: security pass done (`90258f1`); remaining =
+      tag `0.1.0a1` + PyPI release.
 
 # Demo suite plan: invoice_flow + supplier_onboarding + bulk_import
 
