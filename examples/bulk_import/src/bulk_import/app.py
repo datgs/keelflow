@@ -38,6 +38,11 @@ MAX_BYTES = 64 * 1024 * 1024
 MAX_ROWS = 500_000
 
 _ACTORS = ("u-ops1", "u-rev1", "u-mgr")
+_ACTOR_NAMES = {
+    "u-ops1": "Oscar — Operations",
+    "u-rev1": "Rita — Reviewer",
+    "u-mgr":  "Maya — Manager (all)",
+}
 
 
 def _ctx(request: Request) -> JobContext:
@@ -79,6 +84,7 @@ async def _conn():
 def _nav(request: Request) -> dict:
     uid = request.query_params.get("as") or "u-ops1"
     return {"as": uid, "actors": sorted(_ACTORS),
+            "names": _ACTOR_NAMES,
             "perms": sorted(PERMISSIONS.get(uid, set()))}
 
 

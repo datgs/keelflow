@@ -32,6 +32,13 @@ TEMPLATES = os.path.join(os.path.dirname(__file__), "templates")
 
 # actor ids seen in this demo
 _ACTORS = ("u-proc1", "u-comp1", "u-fin1", "u-procadm", "u-mgr")
+_ACTOR_NAMES = {
+    "u-proc1":   "Alice — Procurement",
+    "u-comp1":   "Carol — Compliance",
+    "u-fin1":    "Frank — Finance",
+    "u-procadm": "Pat — Procurement Admin",
+    "u-mgr":     "Maya — Manager (all)",
+}
 
 
 def _ctx(request: Request) -> JobContext:
@@ -72,6 +79,7 @@ async def _conn():
 def _nav(request: Request) -> dict:
     uid = request.query_params.get("as") or "u-proc1"
     return {"as": uid, "actors": sorted(_ACTORS),
+            "names": _ACTOR_NAMES,
             "perms": sorted(PERMISSIONS.get(uid, set()))}
 
 

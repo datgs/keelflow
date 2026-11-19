@@ -74,7 +74,7 @@ mermaid.initialize({startOnLoad:true, theme:"dark",
   <span class="who">View as
     <select onchange="const q=new URLSearchParams(location.search);q.set('as',this.value);location.search='?'+q.toString()">
       {% for a in nav['actors'] %}
-      <option {{ 'selected' if a == nav['as'] }}>{{ a }}</option>
+      <option value="{{ a }}" {{ 'selected' if a == nav['as'] }}>{{ nav['names'].get(a, a) }}</option>
       {% endfor %}
     </select>
     · perms: {{ nav['perms'] | join(', ') }}

@@ -72,7 +72,9 @@ mermaid.initialize({startOnLoad:true, theme:"dark",
   <span class="who">View as&nbsp;
     <select onchange="const q=new URLSearchParams(location.search);q.set('as',this.value);location.search='?'+q.toString()">
       {% for u in ["u1","fin1","gl1","mgr"] %}
-      <option {{ 'selected' if u == me }}>{{ u }}</option>
+      <option value="{{ u }}" {{ 'selected' if u == me }}>{{ {
+        "u1":"Ulysses — Submitter","fin1":"Fiona — Finance",
+        "gl1":"Gary — GL Review","mgr":"Maya — Manager (all)"}[u] }}</option>
       {% endfor %}
     </select>
     &nbsp;— demo only, no auth</span>
