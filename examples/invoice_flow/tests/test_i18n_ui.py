@@ -48,11 +48,15 @@ def client():
             " created_at TIMESTAMPTZ NOT NULL DEFAULT now())")
         conn.execute(
             "CREATE TABLE IF NOT EXISTS demo_ledger_postings ("
-            " invoice_number TEXT PRIMARY KEY,"
-            " amount NUMERIC(12,2), posted_by TEXT)")
+            " id BIGSERIAL PRIMARY KEY,"
+            " invoice_no TEXT NOT NULL UNIQUE,"
+            " amount NUMERIC(12,2) NOT NULL, posted_by TEXT NOT NULL,"
+            " posted_at TIMESTAMPTZ NOT NULL DEFAULT now())")
         conn.execute(
             "CREATE TABLE IF NOT EXISTS demo_gl_records ("
-            " invoice_number TEXT PRIMARY KEY, journal_ref TEXT)")
+            " invoice_no TEXT PRIMARY KEY, journal_ref TEXT NOT NULL,"
+            " recorded_by TEXT NOT NULL,"
+            " recorded_at TIMESTAMPTZ NOT NULL DEFAULT now())")
         conn.execute(
             "INSERT INTO demo_invoices (number, vendor, amount)"
             " VALUES ('INV-9001','Test Vendor', 100.00)"
