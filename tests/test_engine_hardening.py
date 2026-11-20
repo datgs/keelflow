@@ -72,6 +72,14 @@ class BoomH(JobHandler):
         raise RuntimeError("always boom")
 
 
+class BigOutH(JobHandler):
+    """Returns a large outputs dict for size-visibility tests."""
+
+    async def run(self, ctx, payload: In):
+        return JobResult(status="done",
+                         outputs={"blob": "x" * 40000})
+
+
 class BoomThenOkH(JobHandler):
     """Fails while `armed`, succeeds once disarmed — simulates an ops fix
     between DLQ write and replay."""
@@ -121,6 +129,8 @@ async def env(db):
         reg = InMemoryRegistry()
         reg.register_job_type(JobTypeSpec(type="t.ok@v1", input_schema=In,
                                           handler=OkH))
+        reg.register_job_type(JobTypeSpec(
+            type="t.warn@v1", input_schema=In, handler=BigOutH))
         reg.register_job_type(JobTypeSpec(
             type="t.slow@v1", input_schema=In, handler=SlowOnceH,
             retry=RetryPolicy(max_attempts=2, base_seconds=0.05,
@@ -404,6 +414,61 @@ async def test_dlq_replay_resumes_owning_run(env, db):
     finally:
         await w.stop(timeout=5)
         BoomThenOkH.armed = True
+
+
+# ── result size visibility: warning + opt-in hard cap ────────────────────
+
+
+@pytest.mark.asyncio
+async def test_result_warning_still_succeeds_and_records_size(env, db):
+    """t.warn@v1 returns ~40KB outputs: over the 32KB soft threshold →
+    warning logged, size recorded, but job still done (no hard cap)."""
+    async with (
+        await _conn(autocommit=False) as conn,
+        conn.transaction(),
+        conn.cursor() as cur,
+    ):
+        ref = await env["jobs"].builder("t.warn@v1") \
+            .context(JobContext(actor=Actor.user("u1"))) \
+            .payload({"x": 1}) \
+            .enqueue(cur)
+    await worker_mod.dispatch(ref.id)
+    row = await (await db.execute(
+        "SELECT status, result_bytes FROM keelflow_jobs WHERE id=%s",
+        (ref.id,))).fetchone()
+    assert row[0] == "done"
+    assert row[1] and row[1] > 32768           # warning threshold passed
+
+    oversized = await MonitoringService().results_oversized(
+        db, threshold=32768)
+    entry = next(r for r in oversized if r["type"] == "t.warn@v1")
+    assert entry["oversized"] == 1 and entry["worst"] > 32768
+
+
+@pytest.mark.asyncio
+async def test_result_max_bytes_fails_loudly(env, db):
+    """Opt-in hard cap: a result over result_max_bytes fails the job
+    with a diagnostic naming the cap and type."""
+    env["reg"].register_job_type(JobTypeSpec(
+        type="t.capped@v1", input_schema=In, handler=BigOutH,
+        result_max_bytes=1000))
+    async with (
+        await _conn(autocommit=False) as conn,
+        conn.transaction(),
+        conn.cursor() as cur,
+    ):
+        ref = await env["jobs"].builder("t.capped@v1") \
+            .context(JobContext(actor=Actor.user("u1"))) \
+            .payload({"x": 1}) \
+            .enqueue(cur)
+    # failed result propagates _JobFailedError so the kernel marks its job
+    with pytest.raises(worker_mod._JobFailedError):  # noqa: SLF001
+        await worker_mod.dispatch(ref.id)
+    row = await (await db.execute(
+        "SELECT status, error FROM keelflow_jobs WHERE id=%s",
+        (ref.id,))).fetchone()
+    assert row[0] == "failed"
+    assert "result_max_bytes" in row[1] and "t.capped@v1" in row[1]
 
 
 # ── human tasks: release + due_at ─────────────────────────────────────────

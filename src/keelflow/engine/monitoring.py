@@ -33,7 +33,8 @@ class MonitoringService:
             params.append(cursor)
         sql = (
             "SELECT id, type, status, attempts, run_at, claimed_by,"
-            " concurrency_key, assignee, parent_job_id, created_at, updated_at"
+            " concurrency_key, assignee, parent_job_id, result_bytes,"
+            " created_at, updated_at"
             f" FROM keelflow_jobs WHERE {' AND '.join(where)}"
             " ORDER BY created_at DESC LIMIT %s"
         )
@@ -106,6 +107,23 @@ class MonitoringService:
                 " WHERE job_id=%s AND (%s::bigint IS NULL OR id > %s::bigint)"
                 " ORDER BY id LIMIT %s",
                 (job_id, after_id, after_id, limit),
+            )
+            return await cur.fetchall()
+
+    async def results_oversized(
+        self, conn, *, threshold: int = 32768, limit: int = 50
+    ) -> list[dict[str, Any]]:
+        """Job types ranked by worst result size — the `result_bytes`
+        signal in action so ops can find hot job types to optimize."""
+        async with conn.cursor(row_factory=dict_row) as cur:
+            await cur.execute(
+                "SELECT type,"
+                " count(*) FILTER (WHERE result_bytes > %s) AS oversized,"
+                " max(result_bytes) AS worst,"
+                " count(*) FILTER (WHERE result_bytes IS NOT NULL) AS n"
+                " FROM keelflow_jobs GROUP BY type"
+                " ORDER BY worst DESC NULLS LAST LIMIT %s",
+                (threshold, limit),
             )
             return await cur.fetchall()
 

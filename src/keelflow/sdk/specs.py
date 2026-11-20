@@ -75,6 +75,13 @@ class JobTypeSpec:
     ui: TaskUiSpec | None = None
     is_human: bool = False                       # human.* vs machine
     payload_max_bytes: int = 8192
+    # Size visibility on handler outputs (two-tier):
+    #   result_max_bytes — hard cap; None = unlimited (default, opt-in).
+    #   result_warning_bytes — soft threshold; exceeded → jlog warning +
+    #   the size is stored in result_bytes/outputs_bytes for ops queries.
+    #   Never fails the job. None disables the warning.
+    result_max_bytes: int | None = None
+    result_warning_bytes: int | None = 32768
     # kill the handler coroutine after N seconds; counts as a failed
     # attempt (retryable until max_attempts).
     timeout_seconds: float | None = None

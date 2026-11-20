@@ -18,6 +18,7 @@ CREATE TABLE IF NOT EXISTS keelflow_jobs (
     due_at          TIMESTAMPTZ,          -- human task SLA (nullable)
     parent_job_id   UUID REFERENCES keelflow_jobs(id),
     result          JSONB,
+    result_bytes    INT,              -- serialized size for size-visibility
     error           TEXT,
     cancel_requested BOOLEAN NOT NULL DEFAULT FALSE,
     created_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
@@ -63,6 +64,7 @@ CREATE TABLE IF NOT EXISTS keelflow_step_runs (
                  CHECK (status IN ('pending','claimed','running','done','failed','cancelled','blocked','skipped')),
     job_id       UUID REFERENCES keelflow_jobs(id),
     outputs      JSONB NOT NULL DEFAULT '{}',
+    outputs_bytes INT,                -- serialized size for size-visibility
     attempts     INT NOT NULL DEFAULT 0,
     created_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at   TIMESTAMPTZ NOT NULL DEFAULT now(),

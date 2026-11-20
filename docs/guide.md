@@ -148,7 +148,17 @@ fails permanently and is copied to `keelflow_dlq`.
 retry=RetryPolicy(max_attempts=5, backoff="exponential",
                   base_seconds=30, jitter=True),
 timeout_seconds=60,    # kill the handler coroutine after 60s
+result_warning_bytes=32768,   # soft: warn + record size, never fails
+result_max_bytes=None,        # hard cap, opt-in; exceeded -> job fails
 ```
+
+Handlers should return **references, not blobs** — outputs land in
+`keelflow_jobs.result` and `keelflow_step_runs.outputs`, and every
+`advance_run` loads step outputs into the interpolation scope. Both
+tiers are measured at finish: the soft threshold logs a warning and
+records `result_bytes`/`outputs_bytes`; find hot job types with
+`monitoring.results_oversized(conn, threshold=32768)` (type, oversized
+count, worst bytes).
 
 Ops replay: `MonitoringService(jobs, registry=reg)` exposes
 `dlq_list`/`dlq_replay`. A dead DAG-step job replays **into its run**

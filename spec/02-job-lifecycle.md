@@ -52,6 +52,14 @@ kernel claims job → dispatch(job_id)
   finishes `cancelled` before the handler runs and its owning step
   becomes `cancelled`. An already-running job is not force-killed
   mid-transaction.
+- Size visibility (two-tier): `result_warning_bytes` (soft, default
+  32768, never fails — `jlog.warning` + size recorded) and
+  `result_max_bytes` (hard, default `None` = opt-in; exceeded → job
+  fails with a diagnostic naming the cap and type). Serialized sizes
+  are stored in `keelflow_jobs.result_bytes` and
+  `keelflow_step_runs.outputs_bytes`; `MonitoringService`
+  `results_oversized` ranks the worst job types. Handlers should
+  return references, not blobs.
 - DLQ: `keelflow_dlq` holds a copy of every terminally-failed job,
   plus `run_id`/`step_run_id` when it was a DAG step.
   `MonitoringService.dlq_list` reads it; `dlq_replay` **resumes the

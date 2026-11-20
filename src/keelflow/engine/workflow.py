@@ -390,9 +390,10 @@ async def on_job_finished(
             JobStatus.CANCELLED.value
         )
         await cursor.execute(
-            "UPDATE keelflow_step_runs SET status=%s, outputs=%s, updated_at=now()"
-            " WHERE id=%s",
-            (sr_status, json.dumps(outputs), step_run_id),
+            "UPDATE keelflow_step_runs SET status=%s, outputs=%s,"
+            " outputs_bytes=%s, updated_at=now() WHERE id=%s",
+            (sr_status, json.dumps(outputs),
+             len(json.dumps(outputs).encode()), step_run_id),
         )
         row = await (await cursor.execute(
             "SELECT run_id FROM keelflow_step_runs WHERE id=%s", (step_run_id,)

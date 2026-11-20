@@ -28,7 +28,7 @@ import chancy
 import psycopg
 from pydantic import ValidationError
 
-from ..sdk import JobStatus, Registry
+from ..sdk import JobResult, JobStatus, Registry
 from .context import ctx_from_dict
 
 log = logging.getLogger("keelflow.worker")
@@ -180,9 +180,31 @@ async def dispatch(job_id: str, step_run_id: str | None = None) -> None:
                     # here would terminalize the step as 'cancelled'.
                     status = JobStatus.RUNNING
                     result.outputs.pop("_bulk_parent", None)
+
+                # Size visibility (two-tier): measure once, always record
+                # result_bytes; warn past the soft threshold; fail only
+                # when a job type opts into result_max_bytes.
+                _res_json = json.dumps(result.outputs)
+                _res_bytes = len(_res_json.encode())
+                if (spec.result_warning_bytes is not None
+                        and _res_bytes > spec.result_warning_bytes):
+                    jlog.warning(
+                        "result %d bytes exceeds warning threshold %d for"
+                        " %s — return references, not blobs",
+                        _res_bytes, spec.result_warning_bytes, type_name)
+                if (spec.result_max_bytes is not None
+                        and _res_bytes > spec.result_max_bytes):
+                    status = JobStatus.FAILED
+                    result = JobResult(
+                        status="failed",
+                        error=(f"result {_res_bytes} bytes exceeds"
+                               f" result_max_bytes"
+                               f" {spec.result_max_bytes} for {type_name}"),
+                    )
                 await _write_finish(
                     tx_cur, job_id, status,
                     result=result.outputs, error=result.error,
+                    result_bytes=_res_bytes,
                 )
                 if step_run_id and not bulk_hold:
                     kernel = _kernel_client
@@ -424,14 +446,16 @@ async def _write_finish(
     result: dict[str, Any] | None = None,
     error: str | None = None,
     trace: str | None = None,
+    result_bytes: int | None = None,
 ) -> None:
     """Finish write inside the caller's transaction — no commit."""
     import json
 
     await cursor.execute(
-        "UPDATE keelflow_jobs SET status=%s, result=%s, error=%s,"
-        " updated_at=now() WHERE id=%s",
+        "UPDATE keelflow_jobs SET status=%s, result=%s, result_bytes=%s,"
+        " error=%s, updated_at=now() WHERE id=%s",
         (status.value, json.dumps(result) if result else None,
+         result_bytes,
          (error or "") + (("\n" + trace) if trace else "") or None, job_id),
     )
 
