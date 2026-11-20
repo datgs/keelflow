@@ -14,6 +14,7 @@ CREATE TABLE IF NOT EXISTS keelflow_jobs (
     claimed_by      TEXT,
     lease_until     TIMESTAMPTZ,
     concurrency_key TEXT,
+    unique_key      TEXT,              -- idempotent-enqueue dedup (nullable)
     assignee        TEXT,
     due_at          TIMESTAMPTZ,          -- human task SLA (nullable)
     parent_job_id   UUID REFERENCES keelflow_jobs(id),
@@ -29,6 +30,11 @@ CREATE INDEX IF NOT EXISTS ix_jobs_claim
     WHERE status = 'pending';
 CREATE INDEX IF NOT EXISTS ix_jobs_key
     ON keelflow_jobs (concurrency_key) WHERE status = 'running';
+-- Idempotent enqueue: at most one non-terminal job per (type, unique_key).
+CREATE UNIQUE INDEX IF NOT EXISTS ux_jobs_unique_key
+    ON keelflow_jobs (type, unique_key)
+    WHERE unique_key IS NOT NULL
+      AND status IN ('pending','claimed','running','blocked');
 CREATE INDEX IF NOT EXISTS ix_jobs_assignee ON keelflow_jobs (assignee)
     WHERE status IN ('pending','claimed');
 

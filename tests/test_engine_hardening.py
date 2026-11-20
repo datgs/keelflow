@@ -462,7 +462,7 @@ async def test_result_max_bytes_fails_loudly(env, db):
             .payload({"x": 1}) \
             .enqueue(cur)
     # failed result propagates _JobFailedError so the kernel marks its job
-    with pytest.raises(worker_mod._JobFailedError):  # noqa: SLF001
+    with pytest.raises(worker_mod._JobFailedError):
         await worker_mod.dispatch(ref.id)
     row = await (await db.execute(
         "SELECT status, error FROM keelflow_jobs WHERE id=%s",

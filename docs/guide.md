@@ -213,6 +213,12 @@ dispatch). `.run_at(ts)` delays. `.concurrency_key` serializes execution
 per key via a Postgres advisory lock — same-key jobs never run in
 parallel.
 
+`.unique_key(k)` — **idempotent enqueue**: one non-terminal job per
+`(type, unique_key)`. A duplicate (UI double-click, retry, replay)
+returns the *existing* job's `JobRef` — no second kernel job or outbox
+row, so intent stays exactly-once. The key frees once the job is
+terminal; unrelated to `concurrency_key`.
+
 ## 6. DAG workflows
 
 ```python

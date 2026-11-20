@@ -50,8 +50,8 @@ async def _job(db, status="done", days_old=40, parent=None):
 
 
 async def _count(db, table, where=""):
-    cur = await db.execute(
-        f"SELECT count(*) FROM {table} {where}")  # noqa: S608 - test tables
+    cur = await db.execute(                      # test tables only
+        f"SELECT count(*) FROM {table} {where}")
     return (await cur.fetchone())[0]
 
 
@@ -92,7 +92,7 @@ async def test_sweep_children_before_parent(db):
 
     out = await svc.sweep(db, jobs_days=30, batch=1)
     assert out["jobs"] == 1                                   # one per batch
-    out2 = await svc.sweep(db, jobs_days=30)
+    await svc.sweep(db, jobs_days=30)
     assert await _count(db, "keelflow_jobs") == 0
     assert not await (
         await db.execute("SELECT 1 FROM keelflow_jobs WHERE id=%s",

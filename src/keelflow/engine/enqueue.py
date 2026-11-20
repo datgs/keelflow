@@ -54,6 +54,7 @@ class JobBuilder:
         self._ctx: JobContext | None = None
         self._run_at: datetime | None = None
         self._concurrency_key: str | None = None
+        self._unique_key: str | None = None
         self._assignee: str | None = None
 
     # ── fluent setters ───────────────────────────────────────────────
@@ -77,6 +78,13 @@ class JobBuilder:
 
     def concurrency_key(self, key: str) -> JobBuilder:
         self._concurrency_key = key
+        return self
+
+    def unique_key(self, key: str) -> JobBuilder:
+        """Idempotent enqueue: at most one non-terminal job per
+        (type, unique_key). A duplicate returns the existing job's
+        JobRef — no second kernel push, no second outbox row."""
+        self._unique_key = key
         return self
 
     def assignee(self, actor: Actor | str) -> JobBuilder:
@@ -113,14 +121,20 @@ class JobBuilder:
         now = datetime.now(UTC)
         cursor = _as_cursor(tx)
 
-        # 1. engine-visible record
+        # 1. engine-visible record — ON CONFLICT on the partial unique
+        # index makes enqueue idempotent per (type, unique_key).
         await cursor.execute(
             """
             INSERT INTO keelflow_jobs
                 (id, type, status, payload, context, attempts, max_attempts,
                  run_at, claimed_by, lease_until, concurrency_key, assignee,
-                 parent_job_id, result, created_at, updated_at)
-            VALUES (%s,%s,%s,%s,%s,0,%s,%s,NULL,NULL,%s,%s,NULL,NULL,%s,%s)
+                 parent_job_id, result, created_at, updated_at, unique_key)
+            VALUES (%s,%s,%s,%s,%s,0,%s,%s,NULL,NULL,%s,%s,NULL,NULL,%s,%s,%s)
+            ON CONFLICT (type, unique_key)
+                WHERE unique_key IS NOT NULL
+                  AND status IN ('pending','claimed','running','blocked')
+            DO NOTHING
+            RETURNING id
             """,
             (
                 job_id,
@@ -134,8 +148,20 @@ class JobBuilder:
                 self._assignee,
                 now,
                 now,
+                self._unique_key,
             ),
         )
+        inserted = await cursor.fetchone()
+        if inserted is None:
+            # Duplicate non-terminal (type, unique_key): return the live
+            # job's ref without pushing a second kernel job or outbox row.
+            existing = await (await cursor.execute(
+                "SELECT id FROM keelflow_jobs WHERE type=%s AND unique_key=%s"
+                " AND status IN ('pending','claimed','running','blocked')"
+                " ORDER BY created_at LIMIT 1",
+                (self._type, self._unique_key),
+            )).fetchone()
+            return JobRef(id=str(existing["id"]))
 
         # 2. kernel job (claimed by workers). Same transaction → notify
         #    fires only on commit.

@@ -6,7 +6,7 @@
 builder(type)                      # registered type "name@vN", else reject
   .context(ctx)                    # REQUIRED — missing → EnqueueError
   .payload(p)                      # schema-validated at enqueue
-  [.run_at(t)] [.concurrency_key(k)] [.queue(q)]
+  [.run_at(t)] [.concurrency_key(k)] [.unique_key(k)] [.queue(q)]
   .enqueue(tx)                     # inside caller transaction
 ```
 
@@ -20,6 +20,13 @@ MUST, atomically in `tx`:
    handles delivery).
 
 Rollback of `tx` MUST leave no trace in any of the three.
+
+`.unique_key(k)` — idempotent enqueue. A partial unique index on
+`(type, unique_key)` over non-terminal statuses
+(`pending|claimed|running|blocked`) means a duplicate enqueue
+**returns the existing job's `JobRef`** — the kernel job and outbox
+inserts are skipped (exactly-once intent). Terminal jobs release the
+key; NULL keys never conflict.
 
 ## Dispatch (worker, new TX)
 

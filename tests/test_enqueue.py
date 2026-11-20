@@ -185,3 +185,49 @@ async def test_oversize_payload_rejected(service, db, kernel):
             await service.builder("invoice.match@v1").context(_ctx()).payload(
                 big
             ).enqueue(cur)
+
+
+@pytest.mark.asyncio
+async def test_unique_key_idempotent_enqueue(service, db, kernel):
+    """Same (type, unique_key) while non-terminal -> same JobRef, one
+    kernel row, one outbox row; different key -> new job."""
+    async with await _connect() as conn, conn.transaction(), conn.cursor() as cur:
+        first = await service.builder("invoice.match@v1") \
+            .context(_ctx()).payload(Payload(invoice_id="inv-1")) \
+            .unique_key("k-1").enqueue(cur)
+        second = await service.builder("invoice.match@v1") \
+            .context(_ctx()).payload(Payload(invoice_id="inv-1")) \
+            .unique_key("k-1").enqueue(cur)
+        third = await service.builder("invoice.match@v1") \
+            .context(_ctx()).payload(Payload(invoice_id="inv-2")) \
+            .unique_key("k-2").enqueue(cur)
+    assert second.id == first.id                 # dedup — same job
+    assert third.id != first.id                  # different key -> new job
+    assert await _count(db, "keelflow_jobs") == 2
+
+    async with kernel.pool.connection() as kconn, kconn.cursor() as cur:
+        kc = await (await cur.execute(
+            f"SELECT count(*) FROM {CHANCY_PREFIX}jobs"
+            " WHERE meta->>'job_id' = %s", (first.id,))).fetchone()
+        assert kc[0] == 1                        # one kernel row only
+    out = await (await db.execute(
+        "SELECT count(*) FROM keelflow_outbox"
+        " WHERE payload->>'job_id' = %s", (first.id,))).fetchone()
+    assert out[0] == 1                           # one outbox row only
+
+
+@pytest.mark.asyncio
+async def test_unique_key_released_when_terminal(service, db):
+    """Once the job is terminal, the key frees — a new enqueue succeeds."""
+    async with await _connect() as conn, conn.transaction(), conn.cursor() as cur:
+        first = await service.builder("invoice.match@v1") \
+            .context(_ctx()).payload(Payload(invoice_id="inv-1")) \
+            .unique_key("k-reuse").enqueue(cur)
+    await db.execute(
+        "UPDATE keelflow_jobs SET status='done' WHERE id=%s", (first.id,))
+    async with await _connect() as conn, conn.transaction(), conn.cursor() as cur:
+        second = await service.builder("invoice.match@v1") \
+            .context(_ctx()).payload(Payload(invoice_id="inv-1")) \
+            .unique_key("k-reuse").enqueue(cur)
+    assert second.id != first.id
+    assert await _count(db, "keelflow_jobs") == 2
