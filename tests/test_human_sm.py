@@ -58,7 +58,7 @@ async def db():
         await conn.execute(
             "TRUNCATE keelflow_jobs, keelflow_outbox, keelflow_audit,"
             " keelflow_step_runs, keelflow_workflow_runs, keelflow_chunks,"
-            " keelflow_row_status, keelflow_dlq, keelflow_entity_state CASCADE"
+            " keelflow_row_status, keelflow_row_archive, keelflow_dlq, keelflow_entity_state CASCADE"
         )
         await conn.execute(
             f"TRUNCATE {CHANCY_PREFIX}jobs, {CHANCY_PREFIX}workers,"
@@ -167,11 +167,13 @@ async def test_creates_job_and_workflow(env, db):
 
     # claim as a finance user then complete → approve transition + workflow
     job_id = str(tasks[0]["id"])
-    await env["human"].claim(db, job_id, Actor.user("u_fin"))
+    await env["human"].claim(db, job_id, Actor.user("u_fin"),
+                             roles=["finance"])
     with pytest.raises(PermissionError):
-        await env["human"].claim(db, job_id, Actor.user("other"))
+        await env["human"].claim(db, job_id, Actor.user("other"),
+                                 roles=["finance"])
     await env["human"].complete(db, job_id, Actor.user("u_fin"),
-                                {"decision": "ok"})
+                                {"decision": "ok"}, roles=["finance"])
     job = await (await db.execute(
         "SELECT status FROM keelflow_jobs WHERE id=%s", (job_id,)
     )).fetchone()
@@ -265,7 +267,8 @@ async def test_human_step_parks_then_unblocks_run(env, db):
         assert status[0] == "running"
 
         # human completes the task → workflow unblocks → 'b' runs → done
-        await env["human"].complete(db, human_job_id, Actor.user("u1"))
+        await env["human"].complete(db, human_job_id, Actor.user("u1"),
+                                    roles=["finance"])
         for _ in range(150):
             row = await (await db.execute(
                 "SELECT status FROM keelflow_workflow_runs WHERE id=%s", (ref.id,)

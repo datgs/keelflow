@@ -23,7 +23,7 @@ import json
 import logging
 import re
 import uuid
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from ..sdk import (
@@ -277,12 +277,26 @@ async def advance_run(
     defn = registry.workflow(run_row["workflow"])
     step_runs = await _fetch_steps(cursor, run_id)
 
-    # terminal state check
+    # Definition drift: the workflow def was edited without a version
+    # bump while this run was in flight (Temporal's classic versioning
+    # trap). Fail loudly instead of leaving the run stuck 'running'
+    # forever (removed step) or silently short-circuiting (added step).
+    defn_ids = {s.id for s in defn.steps}
+    if {s["step_id"] for s in step_runs} != defn_ids:
+        await _finish_run(cursor, run_id, registry, "failed", step_runs)
+        return
+
+    # terminal state check — 'cancelled' steps can't satisfy their
+    # dependents' needs either, so they terminalize the run like a
+    # failure (outcome 'cancelled', not 'succeeded').
     active = [s for s in step_runs
               if s["status"] in ("pending", "claimed", "running", "blocked")]
     failed = [s for s in step_runs if s["status"] == "failed"]
     if failed:
         await _finish_run(cursor, run_id, registry, "failed", step_runs)
+        return
+    if any(s["status"] == "cancelled" for s in step_runs):
+        await _finish_run(cursor, run_id, registry, "cancelled", step_runs)
         return
     if not active:
         outcome = _terminal_outcome(step_runs)
@@ -300,26 +314,46 @@ async def advance_run(
             continue
         if not set(spec_step.needs).issubset(done_ids):
             continue
-        # if: guard — false means skip the step entirely.
-        if spec_step.if_expr is not None and not eval_guard(
-            spec_step.if_expr, run_row["inputs"], step_runs, registry
-        ):
-            await _set_step_status(cursor, sr["id"], "skipped")
-            done_ids.add(spec_step.id)
-            skipped_ids.add(sr["id"])
-            continue
-        spec = registry.job_type(spec_step.type)
-        if spec_step.type.startswith("human."):
-            await _enqueue_human_step(cursor, sr, spec_step, spec, run_row,
-                                      step_runs, parent_ctx, kernel)
-        else:
-            await _enqueue_step(cursor, sr, spec_step, spec, run_row, step_runs,
-                                parent_ctx, kernel)
+        # A poisoned step (guard eval or enqueue raising inside a finish
+        # TX) would otherwise roll back the whole advance and re-deliver
+        # forever — classic stuck 'running' run. Give each step its own
+        # savepoint: a deterministic failure marks the step failed, which
+        # fails the run but stays resumable via resume_step.
+        try:
+            async with cursor.connection.transaction():
+                # if: guard — false means skip the step entirely.
+                if spec_step.if_expr is not None and not eval_guard(
+                    spec_step.if_expr, run_row["inputs"], step_runs, registry
+                ):
+                    await _set_step_status(cursor, sr["id"], "skipped")
+                    done_ids.add(spec_step.id)
+                    skipped_ids.add(sr["id"])
+                    continue
+                spec = registry.job_type(spec_step.type)
+                if spec_step.type.startswith("human."):
+                    await _enqueue_human_step(
+                        cursor, sr, spec_step, spec, run_row, step_runs,
+                        parent_ctx, kernel)
+                else:
+                    await _enqueue_step(
+                        cursor, sr, spec_step, spec, run_row, step_runs,
+                        parent_ctx, kernel)
+        except Exception as exc:
+            log.exception(
+                "advance %s: step %s failed to start", run_id, spec_step.id)
+            await cursor.execute(
+                "UPDATE keelflow_step_runs SET status='failed',"
+                " outputs=%s, updated_at=now() WHERE id=%s",
+                (json.dumps({"error": str(exc)}), sr["id"]),
+            )
+            sr["status"] = "failed"
 
     # Re-check: a pass that only marked guard-false steps 'skipped' may
     # leave every step terminal while nothing was enqueued — without this,
     # such a run would stay 'running' forever.
-    if not any(
+    if any(s["status"] == "failed" for s in step_runs):
+        await _finish_run(cursor, run_id, registry, "failed", step_runs)
+    elif not any(
         s["status"] in ("pending", "claimed", "running", "blocked")
         for s in step_runs
         if s["id"] not in skipped_ids
@@ -378,9 +412,13 @@ def _postgres_audit():
 
 
 def _terminal_outcome(step_runs: list[dict]) -> str:
-    """Run finished: succeeded, or business-rejected if a human step
-    completed with decision='reject'.
+    """Run finished: cancelled when a step was cancelled (e.g. scheduler
+    kill_previous), business-rejected when a human step completed with
+    decision='reject', otherwise succeeded.
     """
+    for s in step_runs:
+        if s["status"] == "cancelled":
+            return "cancelled"
     for s in step_runs:
         if (s["status"] == "done"
                 and isinstance(s.get("outputs"), dict)
@@ -400,8 +438,11 @@ async def _finish_run(
     or caller retry replays it (idempotent because callback_state stays
     'pending').
     """
-    status = (JobStatus.DONE.value if outcome in ("succeeded", "rejected")
-              else JobStatus.FAILED.value)
+    status = {
+        "succeeded": JobStatus.DONE.value,
+        "rejected": JobStatus.DONE.value,
+        "cancelled": JobStatus.CANCELLED.value,
+    }.get(outcome, JobStatus.FAILED.value)
     await cursor.execute(
         "UPDATE keelflow_workflow_runs SET status=%s, terminal_outcome=%s,"
         " updated_at=now() WHERE id=%s",
@@ -430,6 +471,9 @@ async def _run_trigger_callback(cursor, run_id, registry, outcome: str) -> None:
         "succeeded": config.get("on_done"),
         "rejected": config.get("on_rejected"),
         "failed": config.get("on_failed"),
+        # a cancelled run is a terminal failure from the entity's
+        # perspective — no separate trigger action.
+        "cancelled": config.get("on_failed"),
     }.get(outcome)
 
     if action and run["triggered_by_entity_type"]:
@@ -468,17 +512,18 @@ async def _spawn_failure_task(cursor, registry, type_name, entity, ctx) -> None:
         permissions=ctx.permissions,
         extra={"job_id": str(job_id)},
     )
+    now = datetime.now(UTC)
     await cursor.execute(
         "INSERT INTO keelflow_jobs (id, type, status, payload, context,"
-        " max_attempts, run_at, assignee, created_at, updated_at)"
-        " VALUES (%s,%s,'pending',%s,%s,%s,%s,%s,%s,%s)",
+        " max_attempts, run_at, assignee, due_at, created_at, updated_at)"
+        " VALUES (%s,%s,'pending',%s,%s,%s,%s,%s,%s,%s,%s)",
         (
             job_id, type_name,
             json.dumps({"entity_type": entity.type, "entity_id": entity.id}),
             json.dumps(ctx_to_dict(child_ctx)),
             spec.retry.max_attempts if spec.retry else 3,
-            datetime.now(UTC), spec.ui and f"role:{spec.ui.assignee_role}",
-            datetime.now(UTC), datetime.now(UTC),
+            now, spec.ui and f"role:{spec.ui.assignee_role}",
+            _spec_due_at(spec, now), now, now,
         ),
     )
 
@@ -533,14 +578,14 @@ async def _enqueue_human_step(
         INSERT INTO keelflow_jobs
             (id, type, status, payload, context, attempts, max_attempts,
              run_at, claimed_by, lease_until, concurrency_key, assignee,
-             parent_job_id, result, created_at, updated_at)
-        VALUES (%s,%s,%s,%s,%s,0,%s,%s,NULL,NULL,NULL,%s,NULL,NULL,%s,%s)
+             due_at, parent_job_id, result, created_at, updated_at)
+        VALUES (%s,%s,%s,%s,%s,0,%s,%s,NULL,NULL,NULL,%s,%s,NULL,NULL,%s,%s)
         """,
         (
             job_id, spec_step.type, JobStatus.PENDING.value,
             json.dumps(inputs), json.dumps(ctx_to_dict(child_ctx)),
             spec.retry.max_attempts if spec.retry else 3,
-            now, _spec_assignee(spec), now, now,
+            now, _spec_assignee(spec), _spec_due_at(spec, now), now, now,
         ),
     )
     await cursor.execute(
@@ -567,6 +612,14 @@ def _spec_assignee(spec) -> str | None:
     ui = getattr(spec, "ui", None)
     if ui and getattr(ui, "assignee_role", None):
         return f"role:{ui.assignee_role}"
+    return None
+
+
+def _spec_due_at(spec, now: datetime) -> datetime | None:
+    """Human task SLA deadline from ui.due_in_seconds (None = no SLA)."""
+    ui = getattr(spec, "ui", None)
+    if ui and getattr(ui, "due_in_seconds", None):
+        return now + timedelta(seconds=ui.due_in_seconds)
     return None
 
 

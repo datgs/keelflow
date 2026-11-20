@@ -1,16 +1,16 @@
 {% extends "base.html" %}
 {% block content %}
 <div class="card">
-  <h2>job {{ (job.id|string)[:8] }}…
+  <h2>{{ t('job.title', id=(job.id|string)[:8] + '…') }}
     <span class="status st-{{ job.status }}">{{ job.status }}</span>
   </h2>
   <table>
-    <tr><td>type</td><td>{{ job.type }}</td></tr>
-    <tr><td>attempts</td><td>{{ job.attempts }}</td></tr>
-    <tr><td>parent</td><td>{{ job.parent_job_id or '—' }}</td></tr>
+    <tr><td>{{ t('job.type') }}</td><td>{{ job.type }}</td></tr>
+    <tr><td>{{ t('job.attempts') }}</td><td>{{ job.attempts }}</td></tr>
+    <tr><td>{{ t('job.parent') }}</td><td>{{ job.parent_job_id or '—' }}</td></tr>
   </table>
   {% if stats %}
-  <h4>rows</h4>
+  <h4>{{ t('job.rows') }}</h4>
   {% set total = (stats.done or 0) + (stats.failed or 0) + (stats.pending or 0) + (stats.processing or 0) %}
   <div class="bar">
     <span class="b-done" style="width:{{ 100 * (stats.done or 0) / max(total,1) }}%"></span>
@@ -21,8 +21,8 @@
   <p class="muted">{{ stats }}</p>
   {% endif %}
   {% if chunks %}
-  <h4>chunks</h4>
-  <table><tr><th>idx</th><th>status</th><th>result</th></tr>
+  <h4>{{ t('job.chunks') }}</h4>
+  <table><tr><th>{{ t('job.col.idx') }}</th><th>{{ t('job.col.status') }}</th><th>{{ t('job.col.result') }}</th></tr>
     {% for c in chunks %}
     <tr><td>{{ c.idx }}</td>
         <td><span class="status st-{{ c.status }}">{{ c.status }}</span></td>
@@ -30,7 +30,7 @@
     {% endfor %}
   </table>
   {% endif %}
-  <h4>result</h4>
+  <h4>{{ t('job.result') }}</h4>
   <pre>{{ (job.result or {}) | tojson(indent=2) }}</pre>
 </div>
 {% endblock %}

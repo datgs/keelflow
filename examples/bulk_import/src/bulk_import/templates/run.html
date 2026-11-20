@@ -1,11 +1,11 @@
 {% extends "base.html" %}
 {% block content %}
 <div class="card">
-  <h2>run {{ (run.id|string)[:8] }}…
+  <h2>{{ t('run.title', id=(run.id|string)[:8] + '…') }}
     <span class="status st-{{ run.status }}">{{ run.status }}</span>
     {% if run.terminal_outcome %}<span class="status st-{{ run.terminal_outcome }}">{{ run.terminal_outcome }}</span>{% endif %}
   </h2>
-  <p class="muted">{{ run.workflow }} · inputs: {{ run.inputs | tojson }}</p>
+  <p class="muted">{{ run.workflow }} · {{ t('run.inputs') }} {{ run.inputs | tojson }}</p>
   <div class="dag">
     {% for layer in layers %}
     <div class="dag-layer" data-l="{{ loop.index0 }}">
@@ -17,7 +17,7 @@
         <span class="sid">{{ s.step_id }}</span>
         <small>{{ s.type.split('@')[0] }}</small>
         <span class="status st-{{ s.status }}">{{ s.status }}</span>
-        {% if s.job_id %}<small><a href="/jobs/{{ s.job_id }}?as={{ nav['as'] }}">job</a></small>{% endif %}
+        {% if s.job_id %}<small><a href="/jobs/{{ s.job_id }}?as={{ nav['as'] }}">{{ t('run.job') }}</a></small>{% endif %}
       </div>
       {% endfor %}
     </div>
@@ -25,7 +25,7 @@
   </div>
 </div>
 <div class="card">
-  <h3>Step outputs</h3>
+  <h3>{{ t('run.outputs') }}</h3>
   {% for s in steps %}
   <h4>{{ s.step_id }} <span class="status st-{{ s.status }}">{{ s.status }}</span></h4>
   <pre>{{ (s.outputs or {}) | tojson(indent=2) }}</pre>

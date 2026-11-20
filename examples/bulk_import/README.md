@@ -12,10 +12,29 @@ validation report → HITL **approve** → bulk **process** pass → finalize
 | Bulk jobs as workflow steps | `imp.validate@v1`, `imp.process@v1` are `BulkJobHandler` types inside `imp.import@v1` — fan-in advances the run atomically |
 | Handler-staged rows | `_ImportBulk.run` stages `demo_import_raw` → `keelflow_row_status` in `ctx.tx` before partitioning (parent + chunk enqueue atomic) |
 | Row-level atomicity + error queue | `atomic='row'` — bad rows → `failed` with `error`, don't block siblings; `/imports/N/errors.csv` exports them |
+| Row retention | `row_disposition='archive'` (default) — done staging rows move to `keelflow_row_archive` at fan-in, so the live table only keeps the error queue; parent `result` keeps `rows_done`/`archived_rows` totals |
 | Chunk fan-out/fan-in | `chunk_size=50` → multiple `bulk.chunk@v1` jobs + `keelflow_chunks` bookkeeping |
 | HITL in the middle of a run | `human.map` (column mapping feeds later steps via `${{ outputs.mapping }}`), `human.approve` (approve/reject gate) |
 | Conditional continuation | `process` only runs `if:` approve decision is `approve`; reject → skipped → `finalize` → `aborted` |
 | Idempotent domain writes | `demo_products` upsert on `sku` natural key |
+
+## The workflow — `imp.import@v1`
+
+```mermaid
+flowchart TD
+    preview --> map[[map · human]]
+    map --> validate[[validate · bulk]]
+    validate --> approve[[approve · human]]
+    approve -->|approve| process[[process · bulk]]
+    process --> finalize
+    approve -.->|reject · process skipped| finalize
+```
+
+`validate` and `process` are bulk parents — each fans out into
+`bulk.chunk@v1` jobs and fans back in. Two human gates (`map`, `approve`)
+block the run until someone acts; the column mapping chosen in `map`
+feeds both bulk passes via step outputs. Rejecting at `approve` skips
+`process` and finalizes the import as `aborted`.
 
 ## Layout
 
@@ -46,11 +65,19 @@ Open http://127.0.0.1:8002/?as=u-ops1 → **generate sample.csv**
 
 ## Actors (`?as=`)
 
-| id | role | can |
-|---|---|---|
-| `u-ops1` | operations | upload, start, map, approve |
-| `u-rev1` | reviewer | approve |
-| `u-mgr` | manager | all |
+| id | role | can | workflow step |
+|---|---|---|---|
+| `u-ops1` | operations | upload, start, map | `map` |
+| `u-rev1` | reviewer | approve only | `approve` |
+| `u-mgr` | manager | all | any human step |
+
+Separation of duties is the point: `map` is assigned to `role:operations`
+while `approve` is assigned to `role:reviewer` — `u-ops1` cannot approve
+its own import.
+
+UI language: `?lang=` picks `en`/`vi`/`es`/`zh-Hans`/`hi` and persists
+via the `kf_lang` cookie (selector in the header; `?as=` is kept).
+Identifiers, actor ids, and fixture values stay untranslated.
 
 ## The story to tell
 

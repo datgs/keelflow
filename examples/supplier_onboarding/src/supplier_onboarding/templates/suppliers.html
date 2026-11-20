@@ -1,13 +1,15 @@
 {% extends "base.html" %}
 {% block content %}
 <div class="card">
-  <h2>Suppliers
+  <h2>{{ t('list.title') }}
     <span class="muted" style="font-weight:normal">
-      · {{ open_tasks }} open human task{{ 's' if open_tasks != 1 }}</span>
+      · {{ t('list.open_tasks', n=open_tasks) }}</span>
   </h2>
   <table>
-    <tr><th>#</th><th>name</th><th>country</th><th>tax id</th>
-        <th>risk</th><th>status</th><th>latest run</th><th></th></tr>
+    <tr><th>{{ t('list.col.id') }}</th><th>{{ t('list.col.name') }}</th>
+        <th>{{ t('list.col.country') }}</th><th>{{ t('list.col.tax') }}</th>
+        <th>{{ t('list.col.risk') }}</th><th>{{ t('list.col.status') }}</th>
+        <th>{{ t('list.col.latest_run') }}</th><th></th></tr>
     {% for s in suppliers %}
     <tr>
       <td>{{ s.id }}</td>
@@ -27,7 +29,7 @@
       <td>
         {% if s.status in ('requested','onboarding') %}
         <form method="post" action="/suppliers/{{ s.id }}/onboard?as={{ nav['as'] }}" style="display:inline">
-          <button>start onboarding</button>
+          <button>{{ t('list.start') }}</button>
         </form>
         {% endif %}
       </td>

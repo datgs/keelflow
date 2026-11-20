@@ -10,6 +10,10 @@ from psycopg.rows import dict_row
 
 
 class MonitoringService:
+    def __init__(self, jobs=None) -> None:
+        # Optional JobService — required only for dlq_replay().
+        self._jobs = jobs
+
     async def jobs_list(
         self, conn, *, types=None, statuses=None, limit: int = 50, cursor: str | None = None
     ) -> dict[str, Any]:
@@ -78,6 +82,30 @@ class MonitoringService:
             )
             return await cur.fetchall()
 
+    async def rows_list_archived(
+        self,
+        conn,
+        job_id: str,
+        *,
+        limit: int = 50,
+        after_id: int | None = None,
+    ) -> list[dict[str, Any]]:
+        """Completed rows moved to `keelflow_row_archive` at fan-in.
+
+        Keyset pagination over the archive's (job_id, id) index — pass the
+        last returned `id` as `after_id` for the next page. Archive rows
+        have no FK to live jobs, so this stays readable after job retention.
+        """
+        async with conn.cursor(row_factory=dict_row) as cur:
+            await cur.execute(
+                "SELECT id, row_id, row_key, chunk_id, data, archived_at"
+                " FROM keelflow_row_archive"
+                " WHERE job_id=%s AND (%s::bigint IS NULL OR id > %s::bigint)"
+                " ORDER BY id LIMIT %s",
+                (job_id, after_id, after_id, limit),
+            )
+            return await cur.fetchall()
+
     async def metrics_snapshot(self, conn) -> dict[str, Any]:
         async with conn.cursor(row_factory=dict_row) as cur:
             await cur.execute(
@@ -110,3 +138,32 @@ class MonitoringService:
             (job_id,),
         )
         await conn.commit()
+
+    async def dlq_list(self, conn, *, limit: int = 50) -> list[dict[str, Any]]:
+        """Terminal-failure copies in keelflow_dlq, newest first."""
+        async with conn.cursor(row_factory=dict_row) as cur:
+            await cur.execute(
+                "SELECT id, type, payload, error, attempts, dead_at"
+                " FROM keelflow_dlq ORDER BY dead_at DESC LIMIT %s",
+                (limit,),
+            )
+            return await cur.fetchall()
+
+    async def dlq_replay(self, conn, dlq_id: str, ctx) -> str:
+        """Re-enqueue a DLQ entry as a fresh job. Returns the new job id."""
+        if self._jobs is None:
+            raise RuntimeError(
+                "dlq_replay requires MonitoringService(jobs=JobService(...))"
+            )
+        async with conn.cursor(row_factory=dict_row) as cur:
+            await cur.execute(
+                "SELECT type, payload FROM keelflow_dlq WHERE id=%s", (dlq_id,))
+            row = await cur.fetchone()
+        if row is None:
+            raise KeyError(f"no dlq entry {dlq_id}")
+        ref = await self._jobs.builder(row["type"]) \
+            .payload(row["payload"] or {}) \
+            .context(ctx) \
+            .enqueue(conn)
+        await conn.commit()
+        return str(ref.id)

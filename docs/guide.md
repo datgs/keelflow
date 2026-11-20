@@ -138,9 +138,20 @@ registry.register_job_type(JobTypeSpec(
 ```
 
 `JobResult(status="failed")` is a **declared failure** — the job ends
-immediately, no retry burn. Raising an exception is a **technical
-failure** — the kernel retries up to `max_attempts`, then the job (and
-any workflow step it belongs to) fails permanently.
+immediately, no retry burn. Raising an exception (or hitting
+`timeout_seconds`) is a **technical failure** — the engine schedules a
+redelivery after `RetryPolicy.backoff`/`base_seconds` (+`jitter`) until
+`max_attempts`, then the job (and any workflow step it belongs to)
+fails permanently and is copied to `keelflow_dlq`.
+
+```python
+retry=RetryPolicy(max_attempts=5, backoff="exponential",
+                  base_seconds=30, jitter=True),
+timeout_seconds=60,    # kill the handler coroutine after 60s
+```
+
+Ops replay: `MonitoringService(jobs)` exposes `dlq_list`/`dlq_replay` —
+re-enqueues a DLQ row as a fresh job.
 
 `ctx` (`JobContext`): `actor`, `tenant_id`, `correlation_id`,
 `permissions`, `request_id`, `extra` (read-only in handlers — downstream
@@ -296,12 +307,14 @@ simultaneous `submit`s can't both pass.
 ## 8. Human tasks
 
 ```python
-tasks = await human.my_tasks(conn, actor, roles=["finance"])
-await human.claim(conn, task_id, actor)            # first-claim-wins
+# Resolve this list from your authenticated actor-to-role mapping.
+roles = ["finance"]
+tasks = await human.my_tasks(conn, actor, roles=roles)
+await human.claim(conn, task_id, actor, roles=roles)  # assignment + first-claim-wins
 await human.complete(conn, task_id, actor,
-                     {"decision": "approve", "note": "ok"})
+                     {"decision": "approve", "note": "ok"}, roles=roles)
 await human.complete_and_transition(
-    conn, task_id, actor, "approve", ctx, note="ok")  # SM tasks
+    conn, task_id, actor, "approve", ctx, note="ok", roles=roles)  # SM tasks
 ```
 
 Two task kinds:
@@ -381,6 +394,33 @@ async with conn.transaction(), conn.cursor(row_factory=dict_row) as cur:
   children → fan-in marks the parent done when all chunks settle.
 - Kill-resume re-executes only still-`pending` rows.
 - Failed rows: `monitoring.rows_list_failed(conn, job_id)`.
+
+### Row retention — `row_disposition`
+
+Staging rows are per-row copies of the input. After fan-in the parent
+result already holds the totals, so `done` rows are disposed per job:
+
+```python
+await jobs.builder("imp.rows@v1").payload({
+    "chunk_size": 1000,
+    "atomic": "row",
+    # "archive" (default) | "keep" | "delete"
+    "row_disposition": "archive",
+}).enqueue(cur)
+```
+
+- `archive` (default) — done rows move to `keelflow_row_archive` in the
+  same TX as the fan-in. The archive has no FK to live jobs, so rows
+  stay inspectable after job cleanup. Failed rows always stay live.
+- `keep` — done rows stay in `keelflow_row_status` (debug / strict
+  per-row audit).
+- `delete` — done rows are dropped; choose only when your app already
+  has a durable source copy.
+
+Read archived rows with `monitoring.rows_list_archived(conn, job_id,
+limit=50, after_id=last_id)` (keyset pagination). `bulk.progress()`
+keeps reporting correct totals after cleanup — once a job is terminal
+it reads the fan-in summary, not the live table.
 
 Measured: ~100k rows partition+complete in ~10s locally
 (`.spikes/bulk_bench.py`).

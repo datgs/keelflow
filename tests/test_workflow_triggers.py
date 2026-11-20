@@ -78,7 +78,7 @@ async def db():
         await conn.execute(
             "TRUNCATE keelflow_jobs, keelflow_outbox, keelflow_audit,"
             " keelflow_step_runs, keelflow_workflow_runs, keelflow_chunks,"
-            " keelflow_row_status, keelflow_dlq, keelflow_entity_state CASCADE"
+            " keelflow_row_status, keelflow_row_archive, keelflow_dlq, keelflow_entity_state CASCADE"
         )
         await conn.execute(
             f"TRUNCATE {CHANCY_PREFIX}jobs, {CHANCY_PREFIX}workers,"
@@ -244,7 +244,7 @@ async def test_business_reject_outcome(env, db):
         assert human_row
         await env["human"].complete(
             db, str(human_row[0]), Actor.user("gl1"),
-            {"decision": "reject", "note": "bad GL code"})
+            {"decision": "reject", "note": "bad GL code"}, roles=["gl"])
 
         row = await _wait(
             db, "SELECT status, terminal_outcome FROM keelflow_workflow_runs"
@@ -284,7 +284,8 @@ async def test_business_reject_outcome(env, db):
             " AND status='pending'"
         )).fetchone()
         await env["human"].complete(
-            db, str(task[0]), Actor.user("gl1"), {"decision": "approve"})
+            db, str(task[0]), Actor.user("gl1"), {"decision": "approve"},
+            roles=["gl"])
         row = await _wait(
             db, "SELECT status FROM keelflow_workflow_runs WHERE id=%s",
             (str(run_id[0]),), "done")
@@ -394,14 +395,16 @@ async def test_complete_and_transition(env, db):
         "SELECT id FROM keelflow_jobs WHERE type='human.review@v1'"
     )).fetchone()
     job_id = str(task[0])
-    await env["human"].claim(db, job_id, Actor.user("fin2"))
+    await env["human"].claim(db, job_id, Actor.user("fin2"),
+                             roles=["fin"])
     # bad decision rejected before any state change
     with pytest.raises(ValueError, match="not allowed"):
         await env["human"].complete_and_transition(
-            db, job_id, Actor.user("fin2"), "maybe", ctx)
+            db, job_id, Actor.user("fin2"), "maybe", ctx, roles=["fin"])
     # reject → task done + entity rejected atomically
     await env["human"].complete_and_transition(
-        db, job_id, Actor.user("fin2"), "reject", ctx, note="no budget")
+        db, job_id, Actor.user("fin2"), "reject", ctx, note="no budget",
+        roles=["fin"])
     status = await (await db.execute(
         "SELECT status FROM keelflow_jobs WHERE id=%s", (job_id,)
     )).fetchone()

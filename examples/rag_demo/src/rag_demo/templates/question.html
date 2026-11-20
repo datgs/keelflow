@@ -1,0 +1,81 @@
+{% extends "base.html" %}
+{% block content %}
+{% if request.query_params.get('err') %}
+<div class="card" style="border-left:4px solid #8a2020;background:#fbf0f0">
+  <span style="color:#8a2020">{{ request.query_params['err'] }}</span>
+</div>
+{% endif %}
+{% if blocked %}
+<div class="card" style="border-left:4px solid #c98f1a;background:#fdf6e3">
+  <strong style="color:#8a6410">● Waiting on human</strong>
+  {% for b in blocked %}
+    <div style="margin-top:4px">
+      <code>{{ b.step_id }}</code> — {{ b.type }}
+      {% if b.assignee %}<span style="color:#8a6410">(assignee: {{ b.assignee }})</span>{% endif %}
+      → <a href="/inbox?as={{ nav['as'] }}">open Inbox</a>
+    </div>
+  {% endfor %}
+</div>
+{% endif %}
+
+<div class="card">
+  <h2>#{{ q.id }} {{ q.q }}
+    <span class="status st-{{ q.status }}">{{ q.status }}</span>
+  </h2>
+  {% if q.answer %}
+  <div class="answer">{{ q.answer }}</div>
+  <p class="conf">confidence {{ q.confidence }}
+    {% if q.confidence is not none and q.confidence < threshold %}
+      — below {{ threshold }} → routed to human review
+    {% endif %}
+    {% if q.reviewed_by %}· reviewed by {{ q.reviewed_by }}{% endif %}</p>
+  {% endif %}
+</div>
+
+{% if chunks %}
+<div class="card">
+  <h3>Retrieved chunks</h3>
+  <table>
+    <tr><th>chunk</th><th>doc</th><th>score</th><th>text</th></tr>
+    {% for c in chunks %}
+    <tr>
+      <td>#{{ c.chunk_id }}</td>
+      <td>{{ doc_titles.get(c.doc_id, c.doc_id) }}</td>
+      <td>{{ c.score }}</td>
+      <td class="muted">{{ c.text[:160] }}{{ '…' if c.text|length > 160 }}</td>
+    </tr>
+    {% endfor %}
+  </table>
+</div>
+{% endif %}
+
+{% if run %}
+<div class="card">
+  <h3>Steps</h3>
+  <table>
+    <tr><th>step</th><th>type</th><th>status</th><th>outputs</th></tr>
+    {% for s in run.steps %}
+    <tr>
+      <td>{{ s.step_id }}</td>
+      <td><code>{{ s.type }}</code></td>
+      <td><span class="status st-{{ s.status }}">{{ s.status }}</span></td>
+      <td class="muted">
+        {% if s.step_id == 'retrieve' %}{{ (s.outputs.chunks|length if s.outputs else 0) }} chunks
+        {% elif s.step_id == 'score' %}needs_review={{ s.outputs.needs_review if s.outputs }}
+        {% elif s.job_id %}<a href="/jobs/{{ s.job_id }}?as={{ nav['as'] }}">job</a>
+        {% else %}{{ (s.outputs or {}) }}{% endif %}
+      </td>
+    </tr>
+    {% endfor %}
+  </table>
+</div>
+{% endif %}
+
+{% if wf_diagram %}
+<div class="card">
+  <h3>Answer DAG — live status
+    <span class="muted">(dashed pill = human gate → assignee)</span></h3>
+  <div style="overflow-x:auto">{{ wf_diagram | safe }}</div>
+</div>
+{% endif %}
+{% endblock %}

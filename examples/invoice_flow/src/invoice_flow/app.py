@@ -22,7 +22,7 @@ from fastapi.templating import Jinja2Templates
 from psycopg.rows import dict_row
 
 from keelflow.engine.audit import PostgresAuditService
-from keelflow.engine.diagram import state_machine_mermaid, workflow_mermaid
+from keelflow.engine.diagram import state_machine_svg, workflow_svg
 from keelflow.engine.enqueue import JobService
 from keelflow.engine.human import HumanTaskService
 from keelflow.engine.monitoring import MonitoringService
@@ -30,6 +30,7 @@ from keelflow.engine.statemachine import EngineStateMachineService
 from keelflow.engine.workflow import WorkflowService
 from keelflow.sdk import Actor, EntityRef, JobContext
 
+from .i18n import render
 from .registry import DSN_ENV, PERMISSIONS, ROLES, build_registry
 
 DSN = os.environ.get(
@@ -40,6 +41,8 @@ templates = Jinja2Templates(
     directory=str(Path(__file__).parent / "templates"))
 templates.env.filters["json_pretty"] = lambda v: json.dumps(
     v, indent=2, default=str)
+templates.env.globals["perms_of"] = lambda uid: sorted(
+    PERMISSIONS.get(uid, set()))
 
 
 @asynccontextmanager
@@ -112,8 +115,8 @@ async def invoice_list(request: Request):
         )
         invoices = await cur.fetchall()
     await c.close()
-    return templates.TemplateResponse(
-        request, "invoices.html",
+    return render(
+        templates, request, "invoices.html",
         { "invoices": invoices,
          "me": request.query_params.get("as", "u1"),
          "roles": roles_for(request),
@@ -158,7 +161,7 @@ async def invoice_detail(request: Request, number: str):
     # diagrams: SM state view + latest workflow run live overlay
     reg = app.state.registry
     sm_def = reg.state_machine("invoice@v1")
-    sm_diagram = state_machine_mermaid(
+    sm_diagram = state_machine_svg(
         sm_def, current=(ent["state"] if ent else "draft"),
         allowed_actions=set(actions))
     wf_diagram = None
@@ -175,14 +178,14 @@ async def invoice_detail(request: Request, number: str):
                 meta[st["type"]] = {
                     "assignee": getattr(spec.ui, "assignee_role", None)
                     if spec.ui else None}
-        wf_diagram = workflow_mermaid(
+        wf_diagram = workflow_svg(
             reg.workflow(runs[-1]["workflow"]),
             step_status={st["step_id"]: st["status"]
                          for st in detail["steps"]},
             job_type_meta=meta)
     await c.close()
-    return templates.TemplateResponse(
-        request, "invoice.html",
+    return render(
+        templates, request, "invoice.html",
         { "inv": inv,
          "state": (ent["state"] if ent else "draft"),
          "actions": actions, "runs": runs, "gl": gl,
@@ -269,18 +272,15 @@ async def inbox(request: Request):
     c = await conn()
     tasks = await app.state.human.my_tasks(
         c, actor_for(request), roles=roles_for(request))
-    for t in tasks:
-        t["decisions"] = sorted(
-            ((t["payload"] or {}).get("sm_actions") or {}).keys())
-        kind = {
-            "human.review@v1": "Finance review",
-            "human.gl_check@v1": "GL check (posting)",
-            "human.posting_fix@v1": "Posting fix-up",
-        }.get(t["type"], t["type"])
-        t["kind"] = kind
+    from .i18n import resolve_locale, translator
+    t = translator(resolve_locale(request))
+    for t_ in tasks:
+        t_["decisions"] = sorted(
+            ((t_["payload"] or {}).get("sm_actions") or {}).keys())
+        t_["kind"] = t(f"task.{t_['type']}")
     await c.close()
-    return templates.TemplateResponse(
-        request, "inbox.html",
+    return render(
+        templates, request, "inbox.html",
         { "tasks": tasks,
          "me": request.query_params.get("as", "u1"),
          "err": request.query_params.get("err")})
@@ -290,7 +290,9 @@ async def inbox(request: Request):
 async def claim(request: Request, tid: str):
     c = await conn()
     try:
-        await app.state.human.claim(c, tid, actor_for(request))
+        await app.state.human.claim(
+            c, tid, actor_for(request),
+            roles=roles_for(request))
         err = None
     except (PermissionError, KeyError) as e:
         err = str(e)
@@ -319,11 +321,15 @@ async def decide(request: Request, tid: str, decision: str,
         payload = row["payload"]
         if isinstance(payload, str):
             payload = json.loads(payload)
+        roles = roles_for(request)
+        await app.state.human.claim(
+            c, tid, actor_for(request), roles=roles)
         sm_actions = (payload or {}).get("sm_actions") or {}
 
         if sm_actions:
             await app.state.human.complete_and_transition(
-                c, tid, actor_for(request), decision, ctx_for(request), note)
+                c, tid, actor_for(request), decision, ctx_for(request), note,
+                roles=roles)
         elif row["type"] == "human.posting_fix@v1":
             # fix-up: mark task done + resume the run in ONE transaction
             # (resume_run's inner transaction becomes a savepoint).
@@ -342,10 +348,12 @@ async def decide(request: Request, tid: str, decision: str,
                 if run:
                     await app.state.wf.resume_run(
                         c, str(run["id"]), ctx_for(request))
-        else:
+        elif row["type"].startswith("human."):
             await app.state.human.complete(
                 c, tid, actor_for(request),
-                {"decision": decision, "note": note})
+                {"decision": decision, "note": note}, roles=roles)
+        else:
+            raise ValueError(f"task type {row['type']} cannot be completed here")
         err = None
     except (PermissionError, KeyError, ValueError) as e:
         err = str(e)
@@ -362,8 +370,8 @@ async def run_detail(request: Request, rid: str):
     await c.close()
     if run is None:
         return HTMLResponse(f"run {rid} not found", status_code=404)
-    return templates.TemplateResponse(
-        request, "run.html",
+    return render(
+        templates, request, "run.html",
         { "run": run,
          "me": request.query_params.get("as", "u1")})
 
@@ -375,8 +383,8 @@ async def job_detail(request: Request, jid: str):
     await c.close()
     if job is None:
         return HTMLResponse(f"job {jid} not found", status_code=404)
-    return templates.TemplateResponse(
-        request, "job.html",
+    return render(
+        templates, request, "job.html",
         { "job": job,
          "me": request.query_params.get("as", "u1")})
 

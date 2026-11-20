@@ -1,0 +1,21 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="card">
+  <h2>job {{ (job.id|string)[:8] }}…
+    <span class="status st-{{ job.status }}">{{ job.status }}</span>
+  </h2>
+  <table>
+    <tr><td>type</td><td><code>{{ job.type }}</code></td></tr>
+    <tr><td>attempts</td><td>{{ job.attempts }} / {{ job.max_attempts }}</td></tr>
+    <tr><td>assignee</td><td>{{ job.assignee or '—' }}</td></tr>
+    <tr><td>claimed_by</td><td>{{ job.claimed_by or '—' }}</td></tr>
+    <tr><td>due_at</td><td>{{ job.due_at or '—' }}</td></tr>
+    <tr><td>run_at</td><td>{{ job.run_at }}</td></tr>
+  </table>
+  {% if job.error %}<h4 style="color:#8a2020">error</h4><pre>{{ job.error }}</pre>{% endif %}
+  <h4>payload</h4>
+  <pre>{{ job.payload | tojson(indent=2) }}</pre>
+  <h4>result</h4>
+  <pre>{{ (job.result or {}) | tojson(indent=2) }}</pre>
+</div>
+{% endblock %}

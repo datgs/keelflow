@@ -1,0 +1,31 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="card">
+  <h2>Dead letter queue</h2>
+  <p class="muted">Terminally-failed jobs (retry exhaustion or declared
+    failure). Replay re-enqueues the payload as a fresh job — fix the
+    root cause first (e.g. turn off slow_llm).</p>
+  {% if request.query_params.get('err') %}
+    <p style="color:#8a2020">{{ request.query_params['err'] }}</p>
+  {% endif %}
+  <table>
+    <tr><th>job</th><th>type</th><th>attempts</th><th>error</th>
+        <th>dead_at</th><th></th></tr>
+    {% for e in entries %}
+    <tr>
+      <td><a href="/jobs/{{ e.id }}?as={{ nav['as'] }}">{{ (e.id|string)[:8] }}…</a></td>
+      <td><code>{{ e.type }}</code></td>
+      <td>{{ e.attempts }}</td>
+      <td class="muted">{{ (e.error or '')[:140] }}</td>
+      <td class="muted">{{ e.dead_at }}</td>
+      <td>
+        <form method="post" action="/dlq/{{ e.id }}/replay?as={{ nav['as'] }}" class="inline">
+          <button class="ghost">replay</button>
+        </form>
+      </td>
+    </tr>
+    {% endfor %}
+    {% if not entries %}<tr><td colspan="6" class="muted">dlq is empty — make the LLM flaky to fill it</td></tr>{% endif %}
+  </table>
+</div>
+{% endblock %}

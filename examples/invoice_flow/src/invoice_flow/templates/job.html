@@ -4,23 +4,23 @@
 <div class="card">
   <h2 style="margin:0 0 8px">{{ job.type }}
     <span class="state s-{{ 'posted' if job.status=='done' else 'posting_failed' }}">{{ job.status }}</span></h2>
-  <div class="mut">id {{ job.id }} · attempts {{ job.attempts }}/{{ job.max_attempts }}
-    {% if job.concurrency_key %}· key {{ job.concurrency_key }}{% endif %}
-    {% if job.assignee %}· assignee {{ job.assignee }}{% endif %}</div>
+  <div class="mut">id {{ job.id }} · {{ t('job.attempts') }} {{ job.attempts }}/{{ job.max_attempts }}
+    {% if job.concurrency_key %}· {{ t('job.key') }} {{ job.concurrency_key }}{% endif %}
+    {% if job.assignee %}· {{ t('job.assignee') }} {{ job.assignee }}{% endif %}</div>
   {% if job.error %}<pre>{{ job.error }}</pre>{% endif %}
   {% if job.status == 'failed' %}
   <form method="post" action="/jobs/{{ job.id }}/retry?as={{ me }}">
-    <button class="btn-primary">retry</button>
+    <button class="btn-primary">{{ t('job.retry') }}</button>
   </form>
   {% endif %}
 </div>
 
 <div class="card">
-  <h3 style="margin-top:0">Payload</h3>
+  <h3 style="margin-top:0">{{ t('job.payload') }}</h3>
   <pre>{{ job.payload | json_pretty }}</pre>
-  <h3>Result</h3>
+  <h3>{{ t('job.result') }}</h3>
   <pre>{{ (job.result or {}) | json_pretty }}</pre>
-  <h3>Context (actor + via chain)</h3>
+  <h3>{{ t('job.context') }}</h3>
   <pre>{{ job.context | json_pretty }}</pre>
 </div>
 {% endblock %}

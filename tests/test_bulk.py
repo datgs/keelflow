@@ -82,7 +82,7 @@ async def db():
         await conn.execute(
             "TRUNCATE keelflow_jobs, keelflow_outbox, keelflow_audit,"
             " keelflow_step_runs, keelflow_workflow_runs, keelflow_chunks,"
-            " keelflow_row_status, keelflow_dlq CASCADE"
+            " keelflow_row_status, keelflow_row_archive, keelflow_dlq CASCADE"
         )
         await conn.execute(
             f"TRUNCATE {CHANCY_PREFIX}jobs, {CHANCY_PREFIX}workers,"
@@ -165,10 +165,19 @@ async def test_bulk_partitions_and_applies(env, db):
     ).fetchall()
     assert dict(chunks) == {"done": 3}
 
+    # default row_disposition='archive': done rows moved out of the live
+    # table into keelflow_row_archive at fan-in
     rows = await (
         await db.execute("SELECT status, count(*) FROM keelflow_row_status GROUP BY status")
     ).fetchall()
-    assert dict(rows) == {"done": 25}
+    assert dict(rows) == {}
+
+    archived = await (
+        await db.execute(
+            "SELECT count(*) FROM keelflow_row_archive WHERE job_id=%s",
+            (parent,))
+    ).fetchone()
+    assert archived[0] == 25
 
     applied = await (
         await db.execute("SELECT count(*) FROM test_domain")
@@ -180,13 +189,16 @@ async def test_bulk_partitions_and_applies(env, db):
     ).fetchone()
     assert parent_row[0] == "done"
     assert parent_row[1]["chunks"] == {"done": 3}
+    assert parent_row[1]["row_disposition"] == "archive"
+    assert parent_row[1]["archived_rows"] == 25
 
 
 @pytest.mark.asyncio
 async def test_error_queue_marks_bad_row(env, db):
     keys = ["ok-1", "bad", "ok-2"]
     parent = await _enqueue(
-        env, "imp.flaky@v1", {"chunk_size": 10, "atomic": "row"}
+        env, "imp.flaky@v1",
+        {"chunk_size": 10, "atomic": "row", "row_disposition": "keep"}
     )
     await _stage(db, parent, keys)
 
@@ -217,7 +229,8 @@ async def test_resume_pending_only_after_crash(env, db):
     processes only pending rows (must-prove #1, simulated kill)."""
     keys = [f"k-{i}" for i in range(5)]
     parent = await _enqueue(
-        env, "imp.rows@v1", {"chunk_size": 5, "atomic": "row"}
+        env, "imp.rows@v1",
+        {"chunk_size": 5, "atomic": "row", "row_disposition": "keep"}
     )
     await _stage(db, parent, keys)
 

@@ -1,13 +1,18 @@
 {% extends "base.html" %}
 {% block content %}
+{% if request.query_params.get('err') %}
+<div class="card" style="border-left:4px solid #8a2020;background:#fbf0f0">
+  <span style="color:#8a2020">{{ request.query_params['err'] }}</span>
+</div>
+{% endif %}
 {% if blocked %}
-<div class="card" style="border-left:4px solid #f0dcae;background:#2a2620">
-  <strong>⏳ Waiting on human</strong>
+<div class="card" style="border-left:4px solid #c98f1a;background:#fdf6e3">
+  <strong style="color:#8a6410">● {{ t('banner.waiting_human') }}</strong>
   {% for b in blocked %}
     <div style="margin-top:4px">
       <code>{{ b.step_id }}</code> — {{ b.type }}
-      {% if b.assignee %}<span class="mut">(assignee: {{ b.assignee }})</span>{% endif %}
-      → <a href="/inbox?as={{ nav['as'] }}">open Inbox</a>
+      {% if b.assignee %}<span style="color:#8a6410">({{ t('banner.assignee') }} {{ b.assignee }})</span>{% endif %}
+      → <a href="/inbox?as={{ nav['as'] }}">{{ t('banner.open_inbox') }}</a>
     </div>
   {% endfor %}
 </div>
@@ -17,21 +22,21 @@
   <h2>#{{ imp.id }} {{ imp.filename }}
     <span class="status st-{{ imp.status }}">{{ imp.status }}</span>
   </h2>
-  <p class="muted">{{ imp.rows_total }} rows · {{ n_products }} products imported ·
-     {% if run %}run <a href="/runs/{{ run.id }}?as={{ nav['as'] }}">{{ (run.id|string)[:8] }}…</a>
+  <p class="muted">{{ t('detail.row_count', n=imp.rows_total) }} · {{ t('detail.products', n=n_products) }} ·
+     {% if run %}{{ t('detail.run') }} <a href="/runs/{{ run.id }}?as={{ nav['as'] }}">{{ (run.id|string)[:8] }}…</a>
      <span class="status st-{{ run.status }}">{{ run.status }}</span>
      {% if run.terminal_outcome %}<span class="status st-{{ run.terminal_outcome }}">{{ run.terminal_outcome }}</span>{% endif %}{% endif %}
   </p>
   {% if imp.status == 'uploaded' %}
   <form method="post" action="/imports/{{ imp.id }}/start?as={{ nav['as'] }}">
-    <button>start import</button>
+    <button>{{ t('detail.start') }}</button>
   </form>
   {% endif %}
 </div>
 
 {% if columns %}
 <div class="card">
-  <h3>Sample rows</h3>
+  <h3>{{ t('sample.title') }}</h3>
   <table>
     <tr>{% for c in columns %}<th>{{ c }}</th>{% endfor %}</tr>
     {% for r in sample %}
@@ -43,7 +48,7 @@
 
 {% if run %}
 <div class="card">
-  <h3>Steps</h3>
+  <h3>{{ t('steps.title') }}</h3>
   <div class="dag">
     {% for layer in layers %}
     <div class="dag-layer" data-l="{{ loop.index0 }}">
@@ -63,13 +68,13 @@
             <span class="b-processing" style="width:{{ 100 * st.processing / max(st.rows_total,1) }}%"></span>
             <span class="b-pending" style="width:{{ 100 * st.pending / max(st.rows_total,1) }}%"></span>
           </div>
-          <small>{{ st.done }} done · {{ st.failed }} failed ·
-            {{ st.pending }} pending ({{ "%.1f"|format(st.pct) }}%)<br>
-            ⏱ {{ st.elapsed_s }}s elapsed · {{ st.rate_rows_per_s }}/s
-            {% if st.eta_s %}· ETA ~{{ st.eta_s }}s{% endif %}
-            {% if st.finished %}· <b>finished</b>{% endif %}</small>
+          <small>{{ t('stats.done', n=st.done) }} · {{ t('stats.failed', n=st.failed) }} ·
+            {{ t('stats.pending', n=st.pending, pct=("%.1f"|format(st.pct))) }}<br>
+            {{ t('stats.elapsed', n=st.elapsed_s) }} · {{ t('stats.rate', rate=st.rate_rows_per_s) }}
+            {% if st.eta_s %}· {{ t('stats.eta', n=st.eta_s) }}{% endif %}
+            {% if st.finished %}· <b>{{ t('stats.finished') }}</b>{% endif %}</small>
         {% endif %}
-        {% if s.job_id %}<small><a href="/jobs/{{ s.job_id }}?as={{ nav['as'] }}">job {{ (s.job_id|string)[:8] }}…</a></small>{% endif %}
+        {% if s.job_id %}<small><a href="/jobs/{{ s.job_id }}?as={{ nav['as'] }}">{{ t('run.job') }} {{ (s.job_id|string)[:8] }}…</a></small>{% endif %}
       </div>
       {% endfor %}
     </div>
@@ -80,7 +85,7 @@
 {% set map_step = run.steps | selectattr('step_id','equalto','map') | list | first %}
 {% if map_step and map_step.status == 'blocked' %}
 <div class="card" style="border-color:#8a6410">
-  <h3>Action needed: map columns → product fields</h3>
+  <h3>{{ t('map.title') }}</h3>
   <form method="post" action="/imports/{{ imp.id }}/map?as={{ nav['as'] }}">
     <input type="hidden" name="job_id" value="{{ map_step.job_id }}">
     <table>
@@ -93,7 +98,7 @@
         </select></td></tr>
       {% endfor %}
     </table>
-    <button>confirm mapping → validate</button>
+    <button>{{ t('map.confirm') }}</button>
   </form>
 </div>
 {% endif %}
@@ -101,30 +106,29 @@
 {% set app_step = run.steps | selectattr('step_id','equalto','approve') | list | first %}
 {% if app_step and app_step.status == 'blocked' %}
 <div class="card" style="border-color:#8a6410">
-  <h3>Action needed: approve import</h3>
+  <h3>{{ t('approve.title') }}</h3>
   {% set st = stats.get('validate') or {} %}
-  <p>Validation: <b>{{ st.done or 0 }}</b> valid, <b>{{ st.failed or 0 }}</b> failed rows.
-    Failed rows go to the error queue; approve imports only valid ones.</p>
+  <p>{{ t('approve.summary', done=(st.done or 0), failed=(st.failed or 0)) }}</p>
   <form method="post" action="/imports/{{ imp.id }}/approve?as={{ nav['as'] }}" style="display:inline">
     <input type="hidden" name="job_id" value="{{ app_step.job_id }}">
-    <button name="decision" value="approve">approve — import valid rows</button>
-    <button name="decision" value="reject" class="warn">reject — abort import</button>
+    <button name="decision" value="approve">{{ t('approve.approve') }}</button>
+    <button name="decision" value="reject" class="warn">{{ t('approve.reject') }}</button>
   </form>
 </div>
 {% endif %}
 
 {% if (stats.get('process') or {}).get('failed') %}
 <div class="card">
-  <h3>Error rows — <a href="/imports/{{ imp.id }}/errors.csv?as={{ nav['as'] }}">download CSV</a></h3>
+  <h3>{{ t('errors.title') }} <a href="/imports/{{ imp.id }}/errors.csv?as={{ nav['as'] }}">{{ t('errors.download') }}</a></h3>
 </div>
 {% endif %}
 {% endif %}
 
 {% if wf_diagram %}
 <div class="card">
-  <h3>Import DAG — live status
-    <span class="muted">(👤 = human gate → assignee)</span></h3>
-  <pre class="mermaid">{{ wf_diagram | safe }}</pre>
+  <h3>{{ t('dag.title') }}
+    <span class="muted">({{ t('dag.human_gate_legend') }})</span></h3>
+  <div style="overflow-x:auto">{{ wf_diagram | safe }}</div>
 </div>
 {% endif %}
 {% endblock %}

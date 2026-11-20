@@ -57,6 +57,13 @@ class BulkJobPayload(BaseModel):
 
     chunk_size: int = 1000
     atomic: Literal["chunk", "row"] = "chunk"
+    # Disposition of 'done' staging rows once the parent reaches terminal
+    # fan-in. Failed rows are never moved/deleted — they stay in the live
+    # error queue until a separate retention policy clears them.
+    #   archive: copy done rows to keelflow_row_archive (durable inspection)
+    #   keep:    leave done rows live (debug / strict per-row audit)
+    #   delete:  drop done rows (only when the app has a durable source copy)
+    row_disposition: Literal["archive", "keep", "delete"] = "archive"
 
 
 class ChunkPayload(BaseModel):
@@ -325,6 +332,17 @@ class ChunkJobHandler(JobHandler):
                 return  # still in flight
             final = "failed" if counts.get("failed") else "done"
 
+            # Two chunks can settle near-simultaneously; serialize on the
+            # parent row so only the first fan-in computes the summary and
+            # moves rows — later ones see the terminal status and return.
+            await cur.execute(
+                "SELECT status FROM keelflow_jobs WHERE id=%s FOR UPDATE",
+                (parent_job_id,),
+            )
+            pj = await cur.fetchone()
+            if pj is None or pj["status"] in ("done", "failed", "cancelled"):
+                return
+
             await cur.execute(
                 "SELECT status, count(*) FROM keelflow_row_status"
                 " WHERE job_id=%s GROUP BY status",
@@ -337,6 +355,49 @@ class ChunkJobHandler(JobHandler):
                 "rows_done": rows.get("done", 0),
                 "rows_failed": rows.get("failed", 0),
             }
+
+            # Retention for 'done' staging rows — same TX as the parent's
+            # terminal write, so a rollback loses neither the rows nor the
+            # step-finish hook. Old jobs lacking the payload field default
+            # to 'archive'.
+            await cur.execute(
+                "SELECT COALESCE(payload->>'row_disposition','archive') AS d"
+                " FROM keelflow_jobs WHERE id=%s",
+                (parent_job_id,),
+            )
+            mode = (await cur.fetchone())["d"] or "archive"
+            done_rows = rows.get("done", 0)
+            moved = {"archive": 0, "delete": 0}
+            if done_rows and mode == "archive":
+                await cur.execute(
+                    "WITH done AS (SELECT id, row_key, chunk_id, data"
+                    " FROM keelflow_row_status"
+                    " WHERE job_id=%s AND status='done'),"
+                    " archived AS ("
+                    " INSERT INTO keelflow_row_archive"
+                    "     (job_id, row_id, row_key, chunk_id, data)"
+                    " SELECT %s, id, row_key, chunk_id, data FROM done"
+                    " ON CONFLICT (job_id, row_id) DO NOTHING"
+                    " RETURNING row_id"
+                    " )"
+                    " DELETE FROM keelflow_row_status r USING done"
+                    " WHERE r.id = done.id"
+                    " RETURNING r.id",
+                    (parent_job_id, parent_job_id),
+                )
+                moved["archive"] = cur.rowcount
+            elif done_rows and mode == "delete":
+                await cur.execute(
+                    "DELETE FROM keelflow_row_status"
+                    " WHERE job_id=%s AND status='done'",
+                    (parent_job_id,),
+                )
+                moved["delete"] = cur.rowcount
+            summary["row_disposition"] = mode
+            summary["archived_rows"] = moved["archive"]
+            summary["deleted_rows"] = moved["delete"]
+            summary["kept_rows"] = done_rows if mode == "keep" else 0
+
             await cur.execute(
                 "UPDATE keelflow_jobs SET status=%s, updated_at=now(),"
                 " result = COALESCE(result,'{}'::jsonb) || %s::jsonb"
@@ -376,13 +437,23 @@ class ChunkJobHandler(JobHandler):
 async def progress(conn, job_id) -> dict[str, Any]:
     """Live progress snapshot for a bulk parent job.
 
-    Engine-owned counters (row_status, chunks, job timestamps) surfaced
-    as one dict so apps can render % / rate / ETA without touching
-    engine tables: rows_total/done/failed/pending/processing, chunks
-    per status, elapsed_s, rate_rows_per_s, eta_s (None while no row
-    has finished).
+    Engine-owned counters surfaced as one dict so apps can render
+    % / rate / ETA without touching engine tables: rows_total/done/
+    failed/pending/processing, chunks per status, elapsed_s,
+    rate_rows_per_s, eta_s (None while no row has finished).
+
+    While the job is active, row counters come from live
+    `keelflow_row_status`. Once the job is terminal, 'done' rows may
+    have been archived or deleted (see `row_disposition`) — counters
+    are then read from the parent's fan-in summary in `jobs.result`.
     """
     async with conn.cursor(row_factory=dict_row) as cur:
+        await cur.execute(
+            "SELECT status, created_at, updated_at, result"
+            " FROM keelflow_jobs WHERE id=%s", (job_id,))
+        job = await cur.fetchone()
+        if job is None:
+            raise KeyError(f"bulk job {job_id} not found")
         await cur.execute(
             "SELECT status, count(*) AS n FROM keelflow_row_status"
             " WHERE job_id=%s GROUP BY status", (job_id,))
@@ -391,16 +462,21 @@ async def progress(conn, job_id) -> dict[str, Any]:
             "SELECT status, count(*) AS n FROM keelflow_chunks"
             " WHERE job_id=%s GROUP BY status", (job_id,))
         chunks = {r["status"]: int(r["n"]) for r in await cur.fetchall()}
-        await cur.execute(
-            "SELECT status, created_at, updated_at, result"
-            " FROM keelflow_jobs WHERE id=%s", (job_id,))
-        job = await cur.fetchone()
-    if job is None:
-        raise KeyError(f"bulk job {job_id} not found")
 
-    total = sum(rows.values())
-    done = rows.get("done", 0)
-    failed = rows.get("failed", 0)
+    finished = job["status"] in ("done", "failed", "cancelled")
+    result = job["result"] or {}
+    if finished and "rows_total" in result:
+        # Post-cleanup: live row_status no longer holds 'done' rows.
+        done = int(result.get("rows_done", 0))
+        failed = int(result.get("rows_failed", 0))
+        total = int(result.get("rows_total", done + failed))
+        pending = processing = 0
+    else:
+        total = sum(rows.values())
+        done = rows.get("done", 0)
+        failed = rows.get("failed", 0)
+        pending = rows.get("pending", 0)
+        processing = rows.get("processing", 0)
     settled = done + failed
     elapsed = (job["updated_at"] - job["created_at"]).total_seconds()
     rate = settled / elapsed if elapsed > 0 and settled else 0.0
@@ -410,8 +486,8 @@ async def progress(conn, job_id) -> dict[str, Any]:
         "rows_total": total,
         "done": done,
         "failed": failed,
-        "pending": rows.get("pending", 0),
-        "processing": rows.get("processing", 0),
+        "pending": pending,
+        "processing": processing,
         "settled": settled,
         "pct": (100.0 * settled / total) if total else 0.0,
         "chunks": chunks,
@@ -419,7 +495,11 @@ async def progress(conn, job_id) -> dict[str, Any]:
         "elapsed_s": round(elapsed, 1),
         "rate_rows_per_s": round(rate, 1),
         "eta_s": (round(remaining / rate, 1) if rate else None),
-        "finished": job["status"] in ("done", "failed", "cancelled"),
+        "finished": finished,
+        "row_disposition": result.get("row_disposition"),
+        "archived_rows": result.get("archived_rows", 0),
+        "deleted_rows": result.get("deleted_rows", 0),
+        "kept_rows": result.get("kept_rows", 0),
     }
 
 

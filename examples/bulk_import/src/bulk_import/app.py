@@ -28,7 +28,8 @@ from keelflow.engine.human import HumanTaskService
 from keelflow.engine.workflow import WorkflowService
 from keelflow.sdk import Actor, JobContext
 
-from .registry import FIELDS, PERMISSIONS, ROLES, build_registry, sample_csv
+from . import i18n
+from .registry import FIELDS, PERMISSIONS, build_registry, sample_csv
 
 DSN = os.environ.get("KEELFLOW_DSN",
                      "postgresql://postgres:postgres@localhost:5544/keelflow")
@@ -42,6 +43,11 @@ _ACTOR_NAMES = {
     "u-ops1": "Oscar — Operations",
     "u-rev1": "Rita — Reviewer",
     "u-mgr":  "Maya — Manager (all)",
+}
+_ACTOR_ROLES = {
+    "u-ops1": ["operations"],
+    "u-rev1": ["reviewer"],
+    "u-mgr": ["operations", "reviewer", "manager"],
 }
 
 
@@ -85,7 +91,9 @@ def _nav(request: Request) -> dict:
     uid = request.query_params.get("as") or "u-ops1"
     return {"as": uid, "actors": sorted(_ACTORS),
             "names": _ACTOR_NAMES,
-            "perms": sorted(PERMISSIONS.get(uid, set()))}
+            "perms": sorted(PERMISSIONS.get(uid, set())),
+            "perms_of": {a: sorted(PERMISSIONS.get(a, set()))
+                         for a in _ACTORS}}
 
 
 def _layers(steps: list[dict]) -> list[list[dict]]:
@@ -146,7 +154,7 @@ async def imports(request: Request):
             "SELECT count(*) AS n FROM keelflow_jobs"
             " WHERE type LIKE 'human.%'"
             " AND status IN ('pending','claimed')")).fetchone()
-    return templates.TemplateResponse(request, "imports.html", {
+    return i18n.render(templates, request, "imports.html", {
         "nav": _nav(request), "imports": rows,
         "runs": {int(r["imp"]): r for r in runs},
         "n_products": n_products["n"], "open_tasks": tasks["n"]})
@@ -251,13 +259,13 @@ async def detail(request: Request, iid: int):
                 meta[st["type"]] = {
                     "assignee": getattr(spec.ui, "assignee_role", None)
                     if spec.ui else None}
-        from keelflow.engine.diagram import workflow_mermaid
-        wf_diagram = workflow_mermaid(
+        from keelflow.engine.diagram import workflow_svg
+        wf_diagram = workflow_svg(
             app.state.registry.workflow(detail_["workflow"]),
             step_status={st["step_id"]: st["status"]
                          for st in detail_["steps"]},
             job_type_meta=meta)
-    return templates.TemplateResponse(request, "import.html", {
+    return i18n.render(templates, request, "import.html", {
         "nav": _nav(request), "imp": imp, "run": detail_,
         "layers": layers, "stats": stats, "sample": sample,
         "columns": cols, "fields": FIELDS,
@@ -278,16 +286,19 @@ async def do_map(request: Request, iid: int,
                "price": map_price, "stock": map_stock}
     async with await _conn() as conn:
         try:
-            await app.state.human.claim(conn, job_id, actor)
-        except PermissionError:
-            pass
-        await app.state.human.complete(
-            conn, job_id, actor,
-            {"decision": "approve", "mapping": mapping})
-        await conn.execute(
-            "UPDATE demo_imports SET mapping=%s WHERE id=%s",
-            (json.dumps(mapping), iid))
-        await conn.commit()
+            await app.state.human.claim(
+                conn, job_id, actor, roles=_ACTOR_ROLES.get(ctx.actor.id, []))
+            await app.state.human.complete(
+                conn, job_id, actor,
+                {"decision": "approve", "mapping": mapping},
+                roles=_ACTOR_ROLES.get(ctx.actor.id, []))
+            await conn.execute(
+                "UPDATE demo_imports SET mapping=%s WHERE id=%s",
+                (json.dumps(mapping), iid))
+            await conn.commit()
+        except PermissionError as e:
+            return RedirectResponse(
+                f"/imports/{iid}?as={ctx.actor.id}&err={e}", status_code=303)
     return RedirectResponse(f"/imports/{iid}?as={ctx.actor.id}",
                             status_code=303)
 
@@ -300,12 +311,15 @@ async def do_approve(request: Request, iid: int,
     actor = Actor.user(ctx.actor.id)
     async with await _conn() as conn:
         try:
-            await app.state.human.claim(conn, job_id, actor)
-        except PermissionError:
-            pass
-        await app.state.human.complete(
-            conn, job_id, actor, {"decision": decision})
-        await conn.commit()
+            await app.state.human.claim(
+                conn, job_id, actor, roles=_ACTOR_ROLES.get(ctx.actor.id, []))
+            await app.state.human.complete(
+                conn, job_id, actor, {"decision": decision},
+                roles=_ACTOR_ROLES.get(ctx.actor.id, []))
+            await conn.commit()
+        except PermissionError as e:
+            return RedirectResponse(
+                f"/imports/{iid}?as={ctx.actor.id}&err={e}", status_code=303)
     return RedirectResponse(f"/imports/{iid}?as={ctx.actor.id}",
                             status_code=303)
 
@@ -342,8 +356,8 @@ async def inbox(request: Request):
     uid = request.query_params.get("as") or "u-ops1"
     async with await _conn() as conn:
         tasks = await app.state.human.my_tasks(
-            conn, Actor.user(uid), roles=ROLES)
-    return templates.TemplateResponse(request, "inbox.html", {
+            conn, Actor.user(uid), roles=_ACTOR_ROLES.get(uid, []))
+    return i18n.render(templates, request, "inbox.html", {
         "nav": _nav(request), "tasks": tasks, "uid": uid})
 
 
@@ -351,7 +365,7 @@ async def inbox(request: Request):
 async def run(request: Request, run_id: str):
     async with await _conn() as conn:
         detail = await app.state.wf.get_run(conn, run_id)
-    return templates.TemplateResponse(request, "run.html", {
+    return i18n.render(templates, request, "run.html", {
         "nav": _nav(request), "run": detail,
         "steps": detail["steps"], "layers": _layers(detail["steps"])})
 
@@ -361,13 +375,21 @@ async def job(request: Request, job_id: str):
     async with await _conn() as conn:
         r = await (await conn.execute(
             "SELECT * FROM keelflow_jobs WHERE id=%s", (job_id,))).fetchone()
-        stats = await (await conn.execute(
-            "SELECT status, count(*) AS n FROM keelflow_row_status"
-            " WHERE job_id=%s GROUP BY status", (job_id,))).fetchall()
+        # bulk.progress stays correct after fan-in cleanup moves 'done'
+        # rows to keelflow_row_archive (default row_disposition).
+        try:
+            stats = await bulk.progress(conn, job_id)
+        except KeyError:
+            stats = {}
+        archived = await (await conn.execute(
+            "SELECT count(*) AS n FROM keelflow_row_archive WHERE job_id=%s",
+            (job_id,))).fetchone()
         chunks = await (await conn.execute(
             "SELECT idx, status, result FROM keelflow_chunks"
             " WHERE job_id=%s ORDER BY idx", (job_id,))).fetchall()
-    return templates.TemplateResponse(request, "job.html", {
+    if archived["n"]:
+        stats = dict(stats) | {"archive": archived["n"]}
+    return i18n.render(templates, request, "job.html", {
         "nav": _nav(request), "job": r,
-        "stats": {s["status"]: s["n"] for s in stats},
+        "stats": stats,
         "chunks": chunks})

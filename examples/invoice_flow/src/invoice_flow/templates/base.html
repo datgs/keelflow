@@ -1,5 +1,5 @@
 <!doctype html>
-<html>
+<html lang="{{ lang }}">
 <head>
   <title>{% block title %}keelflow invoice demo{% endblock %}</title>
   <style>
@@ -51,33 +51,30 @@
     pre { background:#0f172a; color:#e2e8f0; padding:12px; border-radius:6px;
           overflow:auto; font-size:12px; }
   </style>
-<script type="module">
-import mermaid from "https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.esm.min.mjs";
-mermaid.initialize({startOnLoad:true, theme:"dark",
-  themeCSS:`
-    .edgeLabel{background:#232c36;padding:5px 8px;border-radius:6px;}
-    .edgeLabel p,.edgeLabel span,.edgeLabel rect{background:#232c36 !important;}
-    .edgeLabel .label{color:#e6e9f0 !important;}
-    .flowchart-link{stroke:#6b7684 !important;}
-    .edgeLabel .edgeLabel{color:#e6e9f0;}
-    foreignObject{overflow:visible;}
-  `});
-</script>
 </head>
 <body>
 <header>
   <strong>keelflow · invoice_flow</strong>
-  <a href="/?as={{ me }}">Invoices</a>
-  <a href="/inbox?as={{ me }}">Inbox</a>
-  <span class="who">View as&nbsp;
+  <a href="/?as={{ me }}">{{ t('nav.invoices') }}</a>
+  <a href="/inbox?as={{ me }}">{{ t('nav.inbox') }}</a>
+  <select aria-label="language"
+          style="font:inherit;background:#1f2937;color:#fff;border:1px solid #374151;border-radius:4px"
+          onchange="const q=new URLSearchParams(location.search);q.set('lang',this.value);location.search='?'+q.toString()">
+    {% for l in locales %}
+    <option value="{{ l }}" {{ 'selected' if l == lang }}>{{ l }}</option>
+    {% endfor %}
+  </select>
+  <span class="who">{{ t('header.view_as') }}&nbsp;
     <select onchange="const q=new URLSearchParams(location.search);q.set('as',this.value);location.search='?'+q.toString()">
       {% for u in ["u1","fin1","gl1","mgr"] %}
       <option value="{{ u }}" {{ 'selected' if u == me }}>{{ {
         "u1":"Ulysses — Submitter","fin1":"Fiona — Finance",
-        "gl1":"Gary — GL Review","mgr":"Maya — Manager (all)"}[u] }}</option>
+        "gl1":"Gary — GL Review","mgr":"Maya — Manager (all)"}[u] }}
+        ({{ perms_of(u) | join(', ') or '—' }})</option>
       {% endfor %}
     </select>
-    &nbsp;— demo only, no auth</span>
+    · {{ t('header.can') }} <code>{{ perms_of(me) | join(', ') or '—' }}</code>
+    &nbsp;— {{ t('header.demo_only') }}</span>
 </header>
 <main>
 {% if err %}<div class="err">{{ err }}</div>{% endif %}

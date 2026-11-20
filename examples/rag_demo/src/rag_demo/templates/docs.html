@@ -1,0 +1,50 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="card">
+  <h2>Docs <span class="muted">— {{ n_chunks }} chunks indexed</span></h2>
+  <form method="post" action="/index?as={{ nav['as'] }}" class="inline">
+    <button>index pending docs</button>
+  </form>
+  <form method="post" action="/docs/add?as={{ nav['as'] }}" class="inline">
+    <input type="text" name="title" placeholder="title" required>
+    <input type="text" name="body" placeholder="body text" size="40" required>
+    <button class="ghost">add doc</button>
+  </form>
+  {% for k, v in settings.items() if k in ('flaky_embed',) %}
+  <form method="post" action="/knob/{{ k }}?as={{ nav['as'] }}" class="inline">
+    <button class="ghost">{{ '✓' if v else '·' }} {{ k }}</button>
+  </form>
+  {% endfor %}
+</div>
+
+<div class="card">
+  <table>
+    <tr><th>#</th><th>title</th><th>status</th><th>excerpt</th></tr>
+    {% for d in docs %}
+    <tr>
+      <td>{{ d.id }}</td>
+      <td>{{ d.title }}</td>
+      <td><span class="status st-{{ d.status }}">{{ d.status }}</span></td>
+      <td class="muted">{{ d.body[:120] }}…</td>
+    </tr>
+    {% endfor %}
+  </table>
+</div>
+
+{% if runs %}
+<div class="card">
+  <h3>Index runs</h3>
+  <table>
+    <tr><th>run</th><th>status</th><th>outcome</th><th>started</th></tr>
+    {% for r in runs %}
+    <tr>
+      <td><a href="/runs/{{ r.id }}?as={{ nav['as'] }}">{{ (r.id|string)[:8] }}…</a></td>
+      <td><span class="status st-{{ r.status }}">{{ r.status }}</span></td>
+      <td>{{ r.terminal_outcome or '—' }}</td>
+      <td class="muted">{{ r.created_at }}</td>
+    </tr>
+    {% endfor %}
+  </table>
+</div>
+{% endif %}
+{% endblock %}

@@ -1,0 +1,37 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="card">
+  <h2>Review inbox — {{ nav['as'] }}</h2>
+  <p class="muted">Low-confidence answers waiting for a reviewer
+    (assignee role:reviewer). Edit the draft or approve/reject.</p>
+  <table>
+    <tr><th>task</th><th>question</th><th>draft answer</th><th>conf</th>
+        <th>assignee</th><th>claimed by</th><th>complete</th></tr>
+    {% for t in tasks %}
+    <tr>
+      <td>{{ t.type }}</td>
+      <td><a href="/q/{{ t.payload.question_id }}?as={{ nav['as'] }}">{{ t.question }}</a></td>
+      <td class="muted">{{ t.draft[:120] }}</td>
+      <td>{{ t.confidence }}</td>
+      <td>{{ t.assignee or '—' }}</td>
+      <td>{{ t.claimed_by or '—' }}</td>
+      <td>
+        {% if t.claimed_by and t.claimed_by != 'user:' + nav['as'] %}
+          <span class="muted">claimed by {{ t.claimed_by }}</span>
+        {% else %}
+        <form method="post" action="/inbox/{{ t.id }}/complete?as={{ nav['as'] }}">
+          <select name="decision">
+            <option value="approve">approve</option>
+            <option value="reject">reject</option>
+          </select>
+          <input type="text" name="answer" placeholder="edited answer (optional)" size="30">
+          <button>{{ 'complete' if t.claimed_by else 'claim + complete' }}</button>
+        </form>
+        {% endif %}
+      </td>
+    </tr>
+    {% endfor %}
+    {% if not tasks %}<tr><td colspan="7" class="muted">no open tasks</td></tr>{% endif %}
+  </table>
+</div>
+{% endblock %}

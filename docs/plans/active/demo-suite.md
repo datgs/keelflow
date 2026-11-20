@@ -375,7 +375,9 @@ Before demo code, settle and test these engine API/data changes:
    state-changing route in one caller-owned transaction; no direct
    writes to engine tables.
 6. Templates — shared shell, actor switcher, visible errors, manual
-   refresh buttons; no polling/htmx in v1.
+   refresh buttons; no polling/htmx in v1. UI text is localized
+   (`?lang=` → `kf_lang` cookie; en/vi/es/zh-Hans/hi) — identifiers,
+   actor ids, and fixture values stay untranslated.
 7. Integration test full path: submit → review claim/approve → posting
    workflow + GL task → GL complete → posted; second path review reject →
    fix → resubmit; third path GL reject → `posting_rejected` → correction →

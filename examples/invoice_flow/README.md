@@ -36,8 +36,21 @@ draft ──submit──► in_review ──approve──► posting ──on_do
 | `GET /runs/{id}` | Run DAG — step nodes + statuses |
 | `GET /jobs/{id}` | Job drawer — payload/result/ctx `via` chain, retry |
 
-Actors: `u1` (clerk: submit/resubmit), `fin1` (finance: approve),
-`gl1` (GL check + fix-ups), `mgr` (all). Switch via `?as=` in the header.
+## Actors (`?as=`)
+
+| id | role | can | workflow step |
+|---|---|---|---|
+| `u1` | clerk | create, submit, resubmit invoices | — |
+| `fin1` | finance | review/approve (role:finance) | `human.review` task from `submit` |
+| `gl1` | GL | GL check + posting fix-ups (role:gl) | `gl_check`, `posting_fix` |
+| `mgr` | manager | all permissions | any human step |
+
+Switch via `?as=` in the header. Separation of duties: the submitter
+cannot approve their own review; the GL gate belongs to `role:gl`.
+
+UI language: `?lang=` picks `en`/`vi`/`es`/`zh-Hans`/`hi` and persists
+via the `kf_lang` cookie (selector in the header; `?as=` is kept).
+Identifiers, actor ids, and fixture values stay untranslated.
 
 ## Run
 
@@ -50,6 +63,18 @@ uv run uvicorn invoice_flow.app:app --port 8501
 ```
 
 → http://localhost:8501 — demo only, no auth, manual refresh.
+
+## The 60-second demo
+
+1. Create an invoice as `u1` → **submit** → `in_review`, a
+   `human.review` task lands in `fin1`'s inbox.
+2. Switch to `?as=fin1` → `/inbox` → claim → **approve** → invoice
+   `posting` and the `post.wf@v1` DAG kicks off: `ledger` → `record` →
+   `gl_check` task for `gl1`.
+3. Switch to `?as=gl1` → claim → **approve** → invoice `posted`.
+   Reject instead → `posting_rejected` (business rejection, no retries)
+   → repost resumes the same run. Toggle the chaos flag for the
+   technical-failure → `posting_failed` → resume path.
 
 ## Test
 
@@ -73,4 +98,5 @@ exposes and this demo fills in:
 | **`triggers_workflow` + `WorkflowTriggerSpec`** — SM transition kicks a DAG, outcome maps back | `triggers_workflow=WorkflowTriggerSpec(workflow="post.wf@v1", on_done="posted", on_rejected=…, failure_job=…)` |
 | **`WorkflowDefinition` / `StepSpec` + `needs`/`input` refs** — a DAG of steps | `StepSpec(id="gl_check", type="human.gl_check@v1", input={"journal_ref": "${{ steps.record.outputs.journal_ref }}"}, needs=("record",))` |
 | **`human.*` step type** — step that blocks until a person acts in the Inbox | `StepSpec(id="gl_check", type="human.gl_check@v1", …)` |
+| **`roles` argument** — pass trusted actor roles to task claim/completion | `roles=roles_for(request)` — the engine checks the assigned role; do not pass user-controlled role claims |
 | **App-side services** — drive everything from your API in the caller TX | `EngineStateMachineService`, `WorkflowService`, `HumanTaskService`, `JobService` in `app.py` |

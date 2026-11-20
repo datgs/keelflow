@@ -18,13 +18,14 @@ from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
 from psycopg.rows import dict_row
 
-from keelflow.engine.diagram import workflow_mermaid
+from keelflow.engine.diagram import workflow_svg
 from keelflow.engine.enqueue import JobService
 from keelflow.engine.human import HumanTaskService
 from keelflow.engine.workflow import WorkflowService
 from keelflow.sdk import Actor, JobContext
 
-from .registry import PERMISSIONS, ROLES, build_registry
+from . import i18n
+from .registry import PERMISSIONS, build_registry
 
 DSN = os.environ.get("KEELFLOW_DSN",
                      "postgresql://postgres:postgres@localhost:5544/keelflow")
@@ -32,6 +33,13 @@ TEMPLATES = os.path.join(os.path.dirname(__file__), "templates")
 
 # actor ids seen in this demo
 _ACTORS = ("u-proc1", "u-comp1", "u-fin1", "u-procadm", "u-mgr")
+_ACTOR_ROLES = {
+    "u-proc1": ["procurement"],
+    "u-comp1": ["compliance"],
+    "u-fin1": ["finance"],
+    "u-procadm": ["provisioning"],
+    "u-mgr": ["procurement", "compliance", "finance", "provisioning", "manager"],
+}
 _ACTOR_NAMES = {
     "u-proc1":   "Alice — Procurement",
     "u-comp1":   "Carol — Compliance",
@@ -80,7 +88,9 @@ def _nav(request: Request) -> dict:
     uid = request.query_params.get("as") or "u-proc1"
     return {"as": uid, "actors": sorted(_ACTORS),
             "names": _ACTOR_NAMES,
-            "perms": sorted(PERMISSIONS.get(uid, set()))}
+            "perms": sorted(PERMISSIONS.get(uid, set())),
+            "perms_of": {a: sorted(PERMISSIONS.get(a, set()))
+                         for a in _ACTORS}}
 
 
 # ── suppliers ───────────────────────────────────────────────────────────────
@@ -103,7 +113,7 @@ async def suppliers(request: Request):
             " WHERE type LIKE 'human.%' AND status IN ('pending','claimed')"
         )).fetchone()
     run_by_sup = {int(r["sup"]): r for r in runs}
-    return templates.TemplateResponse(request, "suppliers.html", {
+    return i18n.render(templates, request, "suppliers.html", {
         "nav": _nav(request), "suppliers": rows, "runs": run_by_sup,
         "open_tasks": open_tasks["count"],
     })
@@ -140,12 +150,12 @@ async def supplier(request: Request, sid: int):
                     meta[st["type"]] = {
                         "assignee": getattr(spec.ui, "assignee_role", None)
                         if spec.ui else None}
-            wf_diagram = workflow_mermaid(
+            wf_diagram = workflow_svg(
                 app.state.registry.workflow(latest["workflow"]),
                 step_status={st["step_id"]: st["status"]
                              for st in detail["steps"]},
                 job_type_meta=meta)
-        return templates.TemplateResponse(request, "supplier.html", {
+        return i18n.render(templates, request, "supplier.html", {
             "nav": _nav(request), "s": s, "checks": checks,
             "runs": runs, "vendor": vendor, "wf_diagram": wf_diagram,
             "blocked": blocked,
@@ -193,7 +203,7 @@ async def inbox(request: Request):
     uid = request.query_params.get("as") or "u-proc1"
     async with await _conn() as conn:
         tasks = await app.state.human.my_tasks(
-            conn, Actor.user(uid), roles=ROLES)
+            conn, Actor.user(uid), roles=_ACTOR_ROLES.get(uid, []))
         # attach supplier names for readability
         for t in tasks:
             sid = (t.get("payload") or {}).get("supplier_id")
@@ -202,7 +212,7 @@ async def inbox(request: Request):
                     "SELECT name FROM demo_suppliers WHERE id=%s",
                     (int(sid),))).fetchone()
                 t["supplier_name"] = r["name"] if r else f"#{sid}"
-    return templates.TemplateResponse(request, "inbox.html", {
+    return i18n.render(templates, request, "inbox.html", {
         "nav": _nav(request), "tasks": tasks, "uid": uid})
 
 
@@ -214,13 +224,16 @@ async def complete_task(request: Request, job_id: str,
     actor = Actor.user(ctx.actor.id)
     async with await _conn() as conn:
         try:
-            await app.state.human.claim(conn, job_id, actor)
-        except PermissionError:
-            pass  # already claimed by us or role task
-        await app.state.human.complete(
-            conn, job_id, actor,
-            {"decision": decision, "note": note})
-        await conn.commit()
+            await app.state.human.claim(
+                conn, job_id, actor, roles=_ACTOR_ROLES.get(ctx.actor.id, []))
+            await app.state.human.complete(
+                conn, job_id, actor,
+                {"decision": decision, "note": note},
+                roles=_ACTOR_ROLES.get(ctx.actor.id, []))
+            await conn.commit()
+        except PermissionError as e:
+            return RedirectResponse(
+                f"/inbox?as={ctx.actor.id}&err={e}", status_code=303)
     return RedirectResponse(f"/inbox?as={ctx.actor.id}", status_code=303)
 
 
@@ -253,7 +266,7 @@ async def run(request: Request, run_id: str):
                     "SELECT id, type, status, attempts, result"
                     " FROM keelflow_jobs WHERE id=%s",
                     (s["job_id"],))).fetchone()
-    return templates.TemplateResponse(request, "run.html", {
+    return i18n.render(templates, request, "run.html", {
         "nav": _nav(request), "run": detail,
         "steps": detail["steps"],
         "layers": _layers(detail["steps"])}) 
@@ -267,5 +280,5 @@ async def job(request: Request, job_id: str):
         audit = await (await conn.execute(
             "SELECT * FROM keelflow_audit WHERE job_id=%s"
             " ORDER BY created_at", (job_id,))).fetchall()
-    return templates.TemplateResponse(request, "job.html", {
+    return i18n.render(templates, request, "job.html", {
         "nav": _nav(request), "job": r, "audit": audit})

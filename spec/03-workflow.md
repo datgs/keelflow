@@ -43,11 +43,26 @@ When no step is `pending|claimed|running|blocked` the run terminalizes:
 | all steps done, none `decision="reject"` | `done` | `succeeded` |
 | a human step done with `outputs.decision == "reject"` | `done` | `rejected` |
 | any step `failed` | `failed` | `failed` |
+| any step `cancelled` (none failed) | `cancelled` | `cancelled` |
 
 `terminal_outcome` is written in the **same transaction** that sets the
 run's terminal status, together with the trigger callback below.
 `rejected` is business rejection — a deliberate human verdict, not a
-technical failure; it does not consume retries.
+technical failure; it does not consume retries. `cancelled` maps to the
+trigger's `on_failed` action (it is a terminal failure from the
+entity's perspective).
+
+## Advance safety rules
+
+- **Definition drift**: `step_runs` are snapshotted at `start()` while
+  the definition is re-read from the registry on every advance. If the
+  step sets diverge (the def was edited without a version bump while
+  the run was in flight) `advance_run` MUST terminalize the run
+  `failed` — never silently drop or add steps.
+- **Poisoned steps**: guard evaluation and enqueue inside a finish TX
+  run under their own savepoint; an exception marks that step `failed`
+  (which fails the run) instead of rolling the advance back into an
+  infinite re-delivery loop.
 
 ## Workflow triggers (SM → run → SM)
 

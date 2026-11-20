@@ -1,0 +1,74 @@
+<!doctype html>
+<html>
+<head>
+  <title>keelflow demo · employee helpdesk</title>
+  <style>
+    * { box-sizing: border-box; }
+    body { font: 14px/1.45 system-ui, sans-serif; margin: 0;
+           background: #f6f7f9; color: #1c2330; }
+    header { background: #16324f; color: #fff; padding: 10px 18px;
+             display: flex; gap: 16px; align-items: center; }
+    header a { color: #cfe3ff; text-decoration: none; }
+    header a:hover { text-decoration: underline; }
+    header .who { margin-left: auto; font-size: 12px; color: #9db8d6; }
+    main { max-width: 1100px; margin: 18px auto; padding: 0 16px; }
+    .card { background: #fff; border: 1px solid #dfe3e8; border-radius: 8px;
+            padding: 14px 16px; margin-bottom: 14px; }
+    table { border-collapse: collapse; width: 100%; }
+    th, td { text-align: left; padding: 6px 8px; border-bottom: 1px solid #eef1f4;
+             vertical-align: top; }
+    th { font-size: 11px; text-transform: uppercase; letter-spacing: .04em;
+         color: #66707f; }
+    button { font: inherit; padding: 4px 12px; border: 1px solid #16324f;
+             background: #16324f; color: #fff; border-radius: 6px; cursor: pointer; }
+    button.ghost { background: #fff; color: #16324f; }
+    button.warn { background: #8a2020; border-color: #8a2020; }
+    input, select, textarea { font: inherit; padding: 4px 8px;
+             border: 1px solid #c9d0d9; border-radius: 6px; }
+    form.inline { display: inline; }
+    .muted { color: #66707f; font-size: 12px; }
+    .status { font-size: 11px; padding: 2px 8px; border-radius: 10px;
+              background: #e8ecf1; }
+    .status.st-done, .status.st-succeeded { background: #d7ecd7; color: #1f5c1f; }
+    .status.st-failed, .status.st-rejected { background: #f6d8d8; color: #8a2020; }
+    .status.st-running, .status.st-claimed { background: #dbe8fb; color: #1d4f91; }
+    .status.st-blocked, .status.st-pending { background: #f3e8c8; color: #8a6410; }
+    .status.st-cancelled { background: #eee; color: #555; }
+    .status.st-answered, .status.st-indexed, .status.st-reviewed { background: #d7ecd7; color: #1f5c1f; }
+    .status.st-asked { background: #f3e8c8; color: #8a6410; }
+    .status.st-rejected { background: #f6d8d8; color: #8a2020; }
+    .knob { font-family: ui-monospace, monospace; font-size: 12px; }
+    .knob.on { background: #f6d8d8; color: #8a2020; padding: 2px 6px;
+               border-radius: 4px; }
+    .demo-warn { background: #fff3cd; border: 1px solid #e3cf86;
+                 border-radius: 8px; padding: 8px 12px; font-size: 12px;
+                 color: #6b5b16; margin-bottom: 14px; }
+    .answer { background: #f2f7f2; border: 1px solid #cfe0cf;
+              border-radius: 6px; padding: 10px 12px; }
+    .conf { font-size: 12px; color: #66707f; }
+  </style>
+</head>
+<body>
+<header>
+  <strong>keelflow · employee helpdesk</strong>
+  <a href="/?as={{ nav['as'] }}">questions</a>
+  <a href="/docs?as={{ nav['as'] }}">docs</a>
+  <a href="/inbox?as={{ nav['as'] }}">inbox</a>
+  <a href="/dlq?as={{ nav['as'] }}">dlq</a>
+  <span class="who">View as
+    <select onchange="const q=new URLSearchParams(location.search);q.set('as',this.value);location.search='?'+q.toString()">
+      {% for a in nav['actors'] %}
+      <option value="{{ a }}" {{ 'selected' if a == nav['as'] }}>{{ nav['names'].get(a, a) }}</option>
+      {% endfor %}
+    </select>
+    · perms: {{ nav['perms'] | join(', ') }}
+  </span>
+</header>
+<main>
+  <div class="demo-warn">DEMO ONLY — no auth, synthetic data, binds
+    localhost. Refresh manually. Toggle chaos knobs to see retries,
+    timeouts, DLQ.</div>
+{% block content %}{% endblock %}
+</main>
+</body>
+</html>

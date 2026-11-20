@@ -104,9 +104,11 @@ async def _deliver_row(conn, bus: OutboxEventBus, row) -> int:
         try:
             await handler(event, ctx)
         except Exception:
+            # Continue to other subscribers: one bad subscriber must not
+            # head-of-line-block the rest (retry handles it next pass).
             log.exception("event %s delivery to %s failed", row["id"], key)
             failed = True
-            break
+            continue
         await conn.execute(
             "INSERT INTO keelflow_outbox_deliveries (outbox_id, subscriber)"
             " VALUES (%s, %s) ON CONFLICT DO NOTHING",

@@ -1,5 +1,5 @@
 <!doctype html>
-<html>
+<html lang="{{ lang }}">
 <head>
 <title>{% block title %}keelflow · supplier onboarding{% endblock %}</title>
 <style>
@@ -49,36 +49,29 @@
         overflow: auto; font-size: 12px; }
   .muted { color: #8a7f72; }
 </style>
-<script type="module">
-import mermaid from "https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.esm.min.mjs";
-mermaid.initialize({startOnLoad:true, theme:"dark",
-  themeCSS:`
-    .edgeLabel{background:#232c36;padding:5px 8px;border-radius:6px;}
-    .edgeLabel p,.edgeLabel span,.edgeLabel rect{background:#232c36 !important;}
-    .edgeLabel .label{color:#e6e9f0 !important;}
-    .flowchart-link{stroke:#6b7684 !important;}
-    .edgeLabel .edgeLabel{color:#e6e9f0;}
-    foreignObject{overflow:visible;}
-  `});
-</script>
 </head>
 <body>
 <header>
   <strong>keelflow</strong>
-  <a href="/?as={{ nav['as'] }}">suppliers</a>
-  <a href="/inbox?as={{ nav['as'] }}">inbox</a>
-  <span class="who">View as
+  <a href="/?as={{ nav['as'] }}">{{ t('nav.suppliers') }}</a>
+  <a href="/inbox?as={{ nav['as'] }}">{{ t('nav.inbox') }}</a>
+  <select aria-label="language" style="font:inherit"
+          onchange="const q=new URLSearchParams(location.search);q.set('lang',this.value);location.search='?'+q.toString()">
+    {% for l in locales %}
+    <option value="{{ l }}" {{ 'selected' if l == lang }}>{{ l }}</option>
+    {% endfor %}
+  </select>
+  <span class="who">{{ t('header.view_as') }}
     <select onchange="const q=new URLSearchParams(location.search);q.set('as',this.value);location.search='?'+q.toString()">
       {% for a in nav['actors'] %}
-      <option value="{{ a }}" {{ 'selected' if a == nav['as'] }}>{{ nav['names'].get(a, a) }}</option>
+      <option value="{{ a }}" {{ 'selected' if a == nav['as'] }}>{{ nav['names'].get(a, a) }} ({{ nav['perms_of'].get(a, []) | join(', ') or '—' }})</option>
       {% endfor %}
     </select>
-    · perms: {{ nav['perms'] | join(', ') }}
+    · {{ t('header.perms') }} {{ nav['perms'] | join(', ') }}
   </span>
 </header>
 <main>
-  <div class="demo-warn">DEMO ONLY — no auth, synthetic data, binds
-    localhost. Refresh manually.</div>
+  <div class="demo-warn">{{ t('demo.warn') }}</div>
   {% block content %}{% endblock %}
 </main>
 </body>

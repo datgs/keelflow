@@ -18,6 +18,29 @@ adapters** (deterministic, synthetic data only — no real integrations).
 | Idempotent domain writes | `demo_check_results` upsert, `vendor_no` natural key |
 | DAG UI | `/runs/<id>` renders dependency layers (parallel lanes), human nodes dashed, skipped greyed |
 
+## The workflow — `sup.onboard@v1`
+
+```mermaid
+flowchart TD
+    validate --> sanction
+    validate --> media
+    validate --> credit
+    validate --> bank
+    sanction & media & credit & bank --> risk_score
+    risk_score -->|risk != low| comp_review[[comp_review · human]]
+    risk_score -->|risk == high| credit_signoff[[credit_signoff · human]]
+    risk_score -->|risk == low| bank_conf[[bank_conf · human]]
+    comp_review & credit_signoff --> erp
+    erp --> terms
+    erp & bank_conf --> provision
+    terms & provision --> activate
+```
+
+Four parallel checks fan out after `validate` and join at `risk_score`.
+The risk tier picks the human gates (`if:` guards — non-selected ones show
+as `skipped` but still satisfy `needs`). `erp`/`terms`/`provision` then
+provision the supplier; `activate` flips it to `active`.
+
 ## Layout
 
 ```
@@ -49,13 +72,17 @@ uv run --package keelflow-demo-supplier \
 
 ## Actors (`?as=`)
 
-| id | role | can |
-|---|---|---|
-| `u-proc1` | procurement | start onboarding runs |
-| `u-comp1` | compliance | `comp_review` tasks |
-| `u-fin1` | finance | `credit_signoff` + `bank_conf` |
-| `u-procadm` | provisioning | — |
-| `u-mgr` | manager | all permissions |
+| id | role | can | workflow step |
+|---|---|---|---|
+| `u-proc1` | procurement | start onboarding runs | — |
+| `u-comp1` | compliance | `comp_review` tasks | `comp_review` |
+| `u-fin1` | finance | `credit_signoff` + `bank_conf` | `credit_signoff`, `bank_conf` |
+| `u-procadm` | provisioning | — | — |
+| `u-mgr` | manager | all permissions | any human step |
+
+UI language: `?lang=` picks `en`/`vi`/`es`/`zh-Hans`/`hi` and persists
+via the `kf_lang` cookie (selector in the header; `?as=` is kept).
+Identifiers, actor ids, and fixture values stay untranslated.
 
 ## Try the paths
 
@@ -97,6 +124,7 @@ Same seams as `invoice_flow`, plus the parts it adds — all in
 | **skipped satisfies `needs`** — a branch you didn't take still unblocks dependents | `erp` needs `comp_review`+`credit_signoff`; only one runs, the other `skipped` → `erp` still proceeds |
 | **`TaskUiSpec(assignee_role)`** — which role may claim each human step | `ui=TaskUiSpec(assignee_role="finance")` etc. |
 | **Business reject via human decision** — completes the run with `terminal_outcome='rejected'` (not a job failure) | `human.*` step completed with `decision="reject"` |
+| **Actor roles for claim/completion** — app passes roles from its trusted actor map | `roles=_ACTOR_ROLES[ctx.actor.id]` — no user-supplied roles |
 | **`resume_run`** — restart a `failed` run from the point of failure | `WorkflowService.resume_run(…)` on `/resume/{run_id}` |
 
 ## SDK extension points it uses — code

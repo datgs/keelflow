@@ -65,7 +65,7 @@ async def db():
         await conn.execute(
             "TRUNCATE keelflow_jobs, keelflow_outbox, keelflow_audit,"
             " keelflow_step_runs, keelflow_workflow_runs, keelflow_chunks,"
-            " keelflow_row_status, keelflow_dlq, keelflow_entity_state,"
+            " keelflow_row_status, keelflow_row_archive, keelflow_dlq, keelflow_entity_state,"
             " demo_suppliers, demo_vendor_accounts, demo_check_results"
             " CASCADE")
         await conn.execute(
@@ -134,7 +134,8 @@ async def _complete_humans(db, env, run_id, decision="approve"):
     async with (await _conn(autocommit=False)) as c:
         for row in await _blocked_human_tasks(db, run_id):
             await env["human"].complete(
-                c, str(row["job_id"]), ACTOR, {"decision": decision})
+                c, str(row["job_id"]), ACTOR, {"decision": decision},
+                roles=["compliance", "finance"])
         await c.commit()
 
 

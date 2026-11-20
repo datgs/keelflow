@@ -41,6 +41,7 @@ from keelflow.sdk import (
     JobHandler,
     JobResult,
     JobTypeSpec,
+    RetryPolicy,
     StateMachineDefinition,
     StepSpec,
     TransitionSpec,
@@ -113,7 +114,7 @@ async def db():
         await conn.execute(
             "TRUNCATE keelflow_jobs, keelflow_outbox, keelflow_outbox_deliveries,"
             " keelflow_audit, keelflow_step_runs, keelflow_workflow_runs,"
-            " keelflow_chunks, keelflow_row_status, keelflow_dlq,"
+            " keelflow_chunks, keelflow_row_status, keelflow_row_archive, keelflow_dlq,"
             " keelflow_entity_state CASCADE"
         )
         await conn.execute(
@@ -155,7 +156,9 @@ async def env(db):
             type="human.review@v1", input_schema=Empty, handler=PostH,
             is_human=True))
         reg.register_job_type(JobTypeSpec(
-            type="flaky@v1", input_schema=Empty, handler=FlakyH))
+            type="flaky@v1", input_schema=Empty, handler=FlakyH,
+            retry=RetryPolicy(max_attempts=3, base_seconds=0.1,
+                              jitter=False)))
         reg.register_job_type(JobTypeSpec(
             type="slow@v1", input_schema=SlowP, handler=SlowH))
         reg.register_workflow(WorkflowDefinition(
@@ -231,8 +234,15 @@ async def test_e2e_scenario(env, db):
             " GROUP BY status",
             (ref.id,),
         )).fetchall()
-        assert dict(counts)["done"] == 49
+        # default row_disposition='archive': done rows moved to
+        # keelflow_row_archive at fan-in; only failed stay live
+        assert dict(counts).get("done", 0) == 0
         assert dict(counts)["failed"] == 1
+        archived = await (await db.execute(
+            "SELECT count(*) FROM keelflow_row_archive WHERE job_id=%s",
+            (ref.id,),
+        )).fetchone()
+        assert archived[0] == 49
         chunks = await (await db.execute(
             "SELECT count(*) FROM keelflow_chunks WHERE job_id=%s",
             (ref.id,),
@@ -273,8 +283,10 @@ async def test_e2e_scenario(env, db):
         assert await env["sm"].current(order, db) == "in_review"
         # claim + complete
         tid = str(tasks[0]["id"])
-        await env["human"].claim(db, tid, Actor.user("fin1"))
-        await env["human"].complete(db, tid, Actor.user("fin1"), {"ok": True})
+        await env["human"].claim(db, tid, Actor.user("fin1"),
+                                             roles=["finance"])
+        await env["human"].complete(
+            db, tid, Actor.user("fin1"), {"ok": True}, roles=["finance"])
         # approve triggers workflow
         async with (
             await _conn(autocommit=False) as conn,

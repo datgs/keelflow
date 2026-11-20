@@ -29,7 +29,7 @@ async def db():
         await apply_async(conn)
         await conn.execute(
             "TRUNCATE keelflow_jobs, keelflow_step_runs, keelflow_workflow_runs,"
-            " keelflow_row_status CASCADE"
+            " keelflow_row_status, keelflow_row_archive CASCADE"
         )
         yield conn
 

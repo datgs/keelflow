@@ -1,0 +1,53 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="card">
+  <h2>Ask the assistant</h2>
+  <form method="post" action="/ask?as={{ nav['as'] }}">
+    <input type="text" name="q" size="80"
+           placeholder="How do I reset my password?"
+           required>
+    <button>ask</button>
+  </form>
+  <p class="muted">{{ open_tasks }} open review task{{ 's' if open_tasks != 1 }} ·
+    confidence ≥ {{ threshold }} auto-publishes; below →
+    <a href="/inbox?as={{ nav['as'] }}">human review</a>.</p>
+</div>
+
+<div class="card">
+  <h3>Chaos knobs <span class="muted">— simulate an unreliable LLM/embedder</span></h3>
+  {% for k, v in settings.items() %}
+  <form method="post" action="/knob/{{ k }}?as={{ nav['as'] }}" class="inline">
+    <button class="ghost">{{ '✓' if v else '·' }} {{ k }}</button>
+  </form>
+  {% endfor %}
+  <p class="muted" style="margin-top:8px">
+    <b>flaky_llm</b> — generate step 503s ~half the time → engine retry
+    backoff (run_at +2s) then done · <b>slow_llm</b> — generate sleeps
+    30s → timeout_seconds=10 kills it → retry → eventual DLQ ·
+    <b>flaky_embed</b> — index embed rows 429 ~1 in 4 → row error queue ·
+    <b>weak_retrieval</b> — zero hits → low confidence → human review gate.
+  </p>
+</div>
+
+<div class="card">
+  <h3>Questions</h3>
+  <table>
+    <tr><th>#</th><th>question</th><th>status</th><th>confidence</th>
+        <th>run</th><th></th></tr>
+    {% for q in questions %}
+    <tr>
+      <td>{{ q.id }}</td>
+      <td><a href="/q/{{ q.id }}?as={{ nav['as'] }}">{{ q.q }}</a></td>
+      <td><span class="status st-{{ q.status }}">{{ q.status }}</span></td>
+      <td class="conf">{{ q.confidence if q.confidence is not none else '—' }}</td>
+      <td>{% set r = runs.get(q.id) %}
+          {% if r %}<a href="/runs/{{ r.id }}?as={{ nav['as'] }}">
+            <span class="status st-{{ r.status }}">{{ r.status }}</span></a>
+          {% else %}—{% endif %}</td>
+      <td><a href="/q/{{ q.id }}?as={{ nav['as'] }}">open →</a></td>
+    </tr>
+    {% endfor %}
+    {% if not questions %}<tr><td colspan="6" class="muted">no questions yet</td></tr>{% endif %}
+  </table>
+</div>
+{% endblock %}

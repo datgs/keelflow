@@ -1,27 +1,28 @@
 {% extends "base.html" %}
 {% block content %}
 <div class="card">
-  <h2>job {{ (job.id|string)[:8] }}…
+  <h2>{{ t('job.title', id=(job.id|string)[:8] + '…') }}
     <span class="status st-{{ job.status }}">{{ job.status }}</span>
   </h2>
   <table>
-    <tr><td>type</td><td>{{ job.type }}</td></tr>
-    <tr><td>status</td><td>{{ job.status }}</td></tr>
-    <tr><td>attempts</td><td>{{ job.attempts }}</td></tr>
-    <tr><td>assignee</td><td>{{ job.assignee or '—' }}</td></tr>
-    <tr><td>claimed_by</td><td>{{ job.claimed_by or '—' }}</td></tr>
-    <tr><td>created</td><td>{{ job.created_at }}</td></tr>
+    <tr><td>{{ t('job.type') }}</td><td>{{ job.type }}</td></tr>
+    <tr><td>{{ t('job.status') }}</td><td>{{ job.status }}</td></tr>
+    <tr><td>{{ t('job.attempts') }}</td><td>{{ job.attempts }}</td></tr>
+    <tr><td>{{ t('job.assignee') }}</td><td>{{ job.assignee or '—' }}</td></tr>
+    <tr><td>{{ t('job.claimed_by') }}</td><td>{{ job.claimed_by or '—' }}</td></tr>
+    <tr><td>{{ t('job.created') }}</td><td>{{ job.created_at }}</td></tr>
   </table>
-  <h4>payload</h4>
+  <h4>{{ t('job.payload') }}</h4>
   <pre>{{ job.payload | tojson(indent=2) }}</pre>
-  <h4>result</h4>
+  <h4>{{ t('job.result') }}</h4>
   <pre>{{ (job.result or {}) | tojson(indent=2) }}</pre>
 </div>
 {% if audit %}
 <div class="card">
-  <h3>audit</h3>
+  <h3>{{ t('job.audit') }}</h3>
   <table>
-    <tr><th>actor</th><th>action</th><th>changes</th><th>at</th></tr>
+    <tr><th>{{ t('audit.col.actor') }}</th><th>{{ t('audit.col.action') }}</th>
+        <th>{{ t('audit.col.changes') }}</th><th>{{ t('audit.col.at') }}</th></tr>
     {% for a in audit %}
     <tr>
       <td>{{ a.actor.id if a.actor is mapping else a.actor }}</td>

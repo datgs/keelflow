@@ -69,7 +69,7 @@ async def db():
         await conn.execute(
             "TRUNCATE keelflow_jobs, keelflow_outbox, keelflow_audit,"
             " keelflow_step_runs, keelflow_workflow_runs, keelflow_chunks,"
-            " keelflow_row_status, keelflow_dlq, keelflow_entity_state,"
+            " keelflow_row_status, keelflow_row_archive, keelflow_dlq, keelflow_entity_state,"
             " demo_imports, demo_import_raw, demo_products CASCADE")
         await conn.execute(
             f"TRUNCATE {KERNEL_PREFIX}jobs, {KERNEL_PREFIX}workers,"
@@ -161,12 +161,13 @@ async def test_full_import_approve(env, db):
         await _wait_step(db, ref.id, "map", "blocked")
         job_id = await _blocked(db, ref.id, "map")
         async with (await _conn(False)) as c:
-            await env["human"].claim(c, job_id, OPS)
+            await env["human"].claim(c, job_id, OPS, roles=["operations"])
             await env["human"].complete(
                 c, job_id, OPS,
                 {"decision": "approve",
                  "mapping": {"sku": "item_code", "name": "title",
-                             "price": "unit_price", "stock": "qty"}})
+                             "price": "unit_price", "stock": "qty"}},
+                roles=["operations"])
             await c.commit()
 
         # validate bulk pass runs, bad rows → error queue
@@ -178,7 +179,12 @@ async def test_full_import_approve(env, db):
             "SELECT status, count(*) AS n FROM keelflow_row_status"
             " WHERE job_id=%s GROUP BY status", (vjob["job_id"],))).fetchall()
         by = {r["status"]: r["n"] for r in stats}
-        assert by["done"] + by["failed"] == 120
+        # default row_disposition='archive': done rows moved out of live
+        # row_status at fan-in; archive + failed must cover all 120 rows
+        archived = await (await db.execute(
+            "SELECT count(*) AS n FROM keelflow_row_archive WHERE job_id=%s",
+            (vjob["job_id"],))).fetchone()
+        assert archived["n"] + by["failed"] == 120
         assert by["failed"] > 0            # synthetic bad rows detected
 
         # chunks fanned out
@@ -192,7 +198,8 @@ async def test_full_import_approve(env, db):
         ajob = await _blocked(db, ref.id, "approve")
         async with (await _conn(False)) as c:
             await env["human"].complete(
-                c, ajob, REV, {"decision": "approve"})
+                c, ajob, REV, {"decision": "approve"},
+                roles=["reviewer"])
             await c.commit()
 
         r = await _wait_run(db, ref.id)
@@ -201,7 +208,7 @@ async def test_full_import_approve(env, db):
         prods = await (await db.execute(
             "SELECT count(*) AS n FROM demo_products WHERE imported_by=%s",
             (iid,))).fetchone()
-        assert prods["n"] == by["done"]     # only valid rows imported
+        assert prods["n"] == archived["n"]       # only valid rows imported
         imp = await (await db.execute(
             "SELECT status FROM demo_imports WHERE id=%s", (iid,))).fetchone()
         assert imp["status"] == "imported"
@@ -227,13 +234,15 @@ async def test_reject_skips_process_and_aborts(env, db):
                 c, job_id, OPS,
                 {"decision": "approve",
                  "mapping": {"sku": "item_code", "name": "title",
-                             "price": "unit_price", "stock": "qty"}})
+                             "price": "unit_price", "stock": "qty"}},
+                roles=["operations"])
             await c.commit()
         await _wait_step(db, ref.id, "approve", "blocked")
         ajob = await _blocked(db, ref.id, "approve")
         async with (await _conn(False)) as c:
             await env["human"].complete(
-                c, ajob, REV, {"decision": "reject"})
+                c, ajob, REV, {"decision": "reject"},
+                roles=["reviewer"])
             await c.commit()
 
         r = await _wait_run(db, ref.id)

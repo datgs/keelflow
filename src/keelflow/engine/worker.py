@@ -15,9 +15,13 @@ Configuration (process-global, set by `configure` before the worker starts):
 """
 from __future__ import annotations
 
+import asyncio
+import json
 import logging
 import os
+import random
 import traceback
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import chancy
@@ -45,8 +49,10 @@ def configure(registry: Registry | None = None, dsn: str | None = None,
         _REGISTRY = registry
     if dsn is not None:
         os.environ[DSN_ENV] = dsn
-    if kernel is not None:
-        _kernel_client = kernel
+    # Always reset: a stale client from an earlier configure() would
+    # silently route retry pushes into the wrong kernel (test pollution
+    # and a real bug when re-configuring between registries).
+    _kernel_client = kernel
 
 
 def _get_registry() -> Registry:
@@ -80,7 +86,7 @@ async def dispatch(job_id: str, step_run_id: str | None = None) -> None:
         if row is None:
             log.error("job %s not found in keelflow_jobs", job_id)
             return
-        _, type_name, status, payload_json, ctx_json, _ck = row
+        _, type_name, status, payload_json, ctx_json, _ck, cancel_req = row
         # Re-claim of an already-terminal job (e.g. double execution or
         # kernel retry of a declared-failed job): mark kernel-side done and
         # idempotently advance the run — never re-run the handler, or
@@ -103,6 +109,20 @@ async def dispatch(job_id: str, step_run_id: str | None = None) -> None:
                         conn, _kernel_client, registry, job_id, step_run_id,
                         JobStatus(status),
                         (sr_row[0] or {}) if sr_row else {},
+                    )
+                await conn.commit()
+            return
+        # Cooperative cancel (scheduler kill_previous, cancel_requested):
+        # honored at claim time — an in-flight job runs to completion.
+        if cancel_req:
+            await _finish(conn, job_id, JobStatus.CANCELLED)
+            if step_run_id and _kernel_client is not None:
+                async with conn.transaction():
+                    from .workflow import on_job_finished
+
+                    await on_job_finished(
+                        conn, _kernel_client, registry, job_id, step_run_id,
+                        JobStatus.CANCELLED, {},
                     )
                 await conn.commit()
             return
@@ -145,7 +165,12 @@ async def dispatch(job_id: str, step_run_id: str | None = None) -> None:
         try:
             async with conn.transaction(), conn.cursor() as tx_cur:
                 object.__setattr__(ctx, "tx", tx_cur)
-                result = await handler.run(ctx, payload)
+                run = handler.run(ctx, payload)
+                if spec.timeout_seconds:
+                    result = await asyncio.wait_for(
+                        run, timeout=spec.timeout_seconds)
+                else:
+                    result = await run
                 object.__setattr__(ctx, "tx", None)
                 status = JobStatus.DONE if result.status == "done" else JobStatus.FAILED
                 bulk_hold = bool(result.outputs.get("_bulk_parent"))
@@ -174,6 +199,7 @@ async def dispatch(job_id: str, step_run_id: str | None = None) -> None:
             await conn.commit()
         except Exception as exc:
             tb = traceback.format_exc(limit=10)
+            exc_text = str(exc) or type(exc).__name__  # TimeoutError → ''
             cur = await conn.execute(
                 "SELECT attempts, max_attempts FROM keelflow_jobs WHERE id=%s",
                 (job_id,),
@@ -181,10 +207,14 @@ async def dispatch(job_id: str, step_run_id: str | None = None) -> None:
             att = await cur.fetchone()
             exhausted = bool(att and att[0] >= att[1])
             if exhausted:
-                # Kernel retries are done → terminal failure.
+                # Retries are done → terminal failure + DLQ copy.
                 await _finish(
                     conn, job_id, JobStatus.FAILED,
-                    error=str(exc), trace=tb)
+                    error=exc_text, trace=tb)
+                await _write_dlq(
+                    conn, job_id, type_name, payload_json, ctx_json,
+                    exc_text, att[0] if att else 0,
+                )
                 jlog.error("handler failed permanently: %s", exc)
                 if step_run_id and _kernel_client is not None:
                     async with conn.transaction():
@@ -196,23 +226,43 @@ async def dispatch(job_id: str, step_run_id: str | None = None) -> None:
                         )
                     await conn.commit()
             else:
-                # Kernel will re-deliver → stay 'running'; error is
-                # recorded on the row but status must not be 'failed'
-                # or the redelivered dispatch would skip the handler.
-                await conn.execute(
-                    "UPDATE keelflow_jobs SET error=%s, updated_at=now()"
-                    " WHERE id=%s",
-                    (str(exc), job_id),
-                )
-                await conn.commit()
-                jlog.error("handler failed (retryable): %s", exc)
-            await lock.release()
-            raise
-        await lock.release()
-        jlog.info("%s", result.status)
+                # Engine-scheduled retry: keep the engine job 'running',
+                # record the error, and push a replacement kernel job at
+                # the spec's backoff delay inside one TX (push rolls back
+                # with the error write if either fails). Kernel crash
+                # recovery still redelivers the original kernel job — the
+                # attempts>=max_attempts check above converges both.
+                delay = _retry_delay(spec, att[0] if att else 1)
+                from psycopg.rows import dict_row
 
-        if result.status != "done":
-            raise _JobFailedError(result.error or "handler returned failed")
+                async with (
+                    conn.transaction(),
+                    conn.cursor(row_factory=dict_row) as rtx_cur,
+                ):
+                    await rtx_cur.execute(
+                        "UPDATE keelflow_jobs SET error=%s,"
+                        " run_at=run_at + interval '1 second' * %s,"
+                        " updated_at=now() WHERE id=%s",
+                        (exc_text, delay, job_id),
+                    )
+                    if _kernel_client is not None:
+                        await _kernel_client.push_ex(
+                            rtx_cur, _retry_kernel_job(
+                                job_id, type_name, spec, step_run_id, delay))
+                await conn.commit()
+                jlog.error(
+                    "handler failed (retryable in %.1fs): %s", delay, exc)
+            await lock.release()
+            if _kernel_client is None and not exhausted:
+                # No kernel client to push a redelivery through — fall
+                # back to kernel retry semantics.
+                raise
+        await lock.release()
+        if result is not None:
+            jlog.info("%s", result.status)
+            if result.status != "done":
+                raise _JobFailedError(
+                    result.error or "handler returned failed")
     finally:
         await conn.close()
 
@@ -268,13 +318,57 @@ class _JobFailedError(RuntimeError):
     """Internal: handler returned status='failed' → kernel records failure."""
 
 
+def _retry_delay(spec, attempt: int) -> float:
+    """RetryPolicy backoff in seconds (jitter = uniform 0.5–1.5×)."""
+    retry = getattr(spec, "retry", None)
+    base = getattr(retry, "base_seconds", 30.0)
+    backoff = getattr(retry, "backoff", "exponential")
+    delay = base if backoff == "fixed" else base * (2 ** (attempt - 1))
+    if getattr(retry, "jitter", False):
+        delay *= random.uniform(0.5, 1.5)
+    return delay
+
+
+def _retry_kernel_job(job_id, type_name: str, spec, step_run_id, delay: float):
+    """Replacement kernel job for an engine-scheduled retry."""
+    from .enqueue import DEFAULT_QUEUE, DISPATCH_FUNC
+
+    return chancy.Job(
+        func=DISPATCH_FUNC,
+        queue=DEFAULT_QUEUE,
+        kwargs={"job_id": str(job_id),
+                "step_run_id": str(step_run_id) if step_run_id else None},
+        max_attempts=spec.retry.max_attempts if spec.retry else 3,
+        scheduled_at=datetime.now(UTC) + timedelta(seconds=delay),
+        meta={"job_id": str(job_id), "type": type_name,
+              "step_run_id": str(step_run_id) if step_run_id else None},
+    )
+
+
+async def _write_dlq(conn, job_id, type_name: str, payload, context,
+                     error: str, attempts: int) -> None:
+    """Copy a terminally-failed job to keelflow_dlq for ops replay."""
+    async with conn.transaction():
+        await conn.execute(
+            "INSERT INTO keelflow_dlq (id, type, payload, context, error,"
+            " attempts) VALUES (%s, %s, %s, %s, %s, %s)"
+            " ON CONFLICT (id) DO UPDATE"
+            " SET error=EXCLUDED.error, attempts=EXCLUDED.attempts, dead_at=now()",
+            (job_id, type_name,
+             json.dumps(payload) if not isinstance(payload, str) else payload,
+             json.dumps(context) if not isinstance(context, str) else context,
+             error, attempts),
+        )
+    await conn.commit()
+
+
 # ── db helpers ────────────────────────────────────────────────────────────
 
 
 async def _load_job(conn, job_id: str):
     cur = await conn.execute(
-        "SELECT id, type, status, payload, context, concurrency_key"
-        " FROM keelflow_jobs WHERE id=%s",
+        "SELECT id, type, status, payload, context, concurrency_key,"
+        " cancel_requested FROM keelflow_jobs WHERE id=%s",
         (job_id,),
     )
     row = await cur.fetchone()
@@ -290,7 +384,7 @@ async def _load_job(conn, job_id: str):
         import json
 
         context = json.loads(context)
-    return (row[0], row[1], row[2], payload, context, row[5])
+    return (row[0], row[1], row[2], payload, context, row[5], row[6])
 
 
 async def _set_status(

@@ -135,8 +135,9 @@ async def main() -> None:
                                          roles=["finance"])
             print("inbox:", [t["type"] for t in tasks])
             tid = str(tasks[0]["id"])
-            await human.claim(conn, tid, Actor.user("fin"))
-            await human.complete(conn, tid, Actor.user("fin"), {"ok": True})
+            await human.claim(conn, tid, Actor.user("fin"), roles=["finance"])
+            await human.complete(conn, tid, Actor.user("fin"), {"ok": True},
+                                 roles=["finance"])
             async with conn.transaction(), conn.cursor() as cur:
                 await sm.transition(order, "approve", ctx, cur)
             print("order state:", await sm.current(order, conn))

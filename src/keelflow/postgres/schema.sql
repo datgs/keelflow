@@ -15,6 +15,7 @@ CREATE TABLE IF NOT EXISTS keelflow_jobs (
     lease_until     TIMESTAMPTZ,
     concurrency_key TEXT,
     assignee        TEXT,
+    due_at          TIMESTAMPTZ,          -- human task SLA (nullable)
     parent_job_id   UUID REFERENCES keelflow_jobs(id),
     result          JSONB,
     error           TEXT,
@@ -44,7 +45,7 @@ CREATE TABLE IF NOT EXISTS keelflow_workflow_runs (
     trigger_config           JSONB,           -- on_done/on_rejected/on_failed/failure_job
     trigger_ctx              JSONB,           -- serialized initiating JobContext
     terminal_outcome         TEXT CHECK (terminal_outcome IN
-                                 ('succeeded','rejected','failed')),
+                                 ('succeeded','rejected','failed','cancelled')),
     callback_state           TEXT NOT NULL DEFAULT 'none'
                            CHECK (callback_state IN
                                   ('none','pending','done','failed')),
@@ -101,6 +102,23 @@ CREATE TABLE IF NOT EXISTS keelflow_row_status (
 );
 CREATE INDEX IF NOT EXISTS ix_row_status_job ON keelflow_row_status (job_id, status);
 CREATE INDEX IF NOT EXISTS ix_row_status_chunk ON keelflow_row_status (chunk_id, status);
+
+
+-- Cold store for completed bulk rows moved at fan-in. No FKs to live
+-- jobs/chunks: archive rows must survive job retention. `row_id` is the
+-- source keelflow_row_status.id — a stable identity for idempotent moves.
+CREATE TABLE IF NOT EXISTS keelflow_row_archive (
+    id          BIGSERIAL PRIMARY KEY,
+    job_id      UUID NOT NULL,
+    row_id      BIGINT NOT NULL,
+    row_key     TEXT NOT NULL,
+    chunk_id    UUID,
+    data        JSONB,
+    archived_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    UNIQUE (job_id, row_id)
+);
+CREATE INDEX IF NOT EXISTS ix_row_archive_job ON keelflow_row_archive (job_id, id);
+CREATE INDEX IF NOT EXISTS ix_row_archive_key ON keelflow_row_archive (job_id, row_key);
 
 
 CREATE TABLE IF NOT EXISTS keelflow_outbox (

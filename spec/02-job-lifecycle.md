@@ -37,15 +37,30 @@ kernel claims job → dispatch(job_id)
   kernel completion update (same worker TX)
 ```
 
-- Retry policy is per job type (`max_attempts`, backoff+jitter); kernel
-  owns attempt counter. On handler exception: retries remaining → job
-  stays `running` (redelivery re-runs the handler); exhausted → status
-  `failed` and the owning step terminalizes (`on_failed` path in
-  `03-workflow.md`). DLQ row written by a reaper or ops action.
-- `cancel_requested` is cooperative: worker checks/sets flag; handler
-  `on_cancel` may clean up; kernel must not force-kill mid-transaction.
+- Retry policy is per job type (`RetryPolicy.max_attempts`, `backoff`,
+  `base_seconds`, `jitter`); engine owns the attempt counter
+  (`keelflow_jobs.attempts` per dispatch claim). On handler exception:
+  attempts remaining → job stays `running` AND a replacement kernel job
+  is pushed at `scheduled_at = now + backoff` inside the same TX
+  (redelivery re-runs the handler); exhausted → status `failed`, the
+  row is copied to `keelflow_dlq`, and the owning step terminalizes
+  (`on_failed` path in `03-workflow.md`). Without a kernel client
+  configured, dispatch falls back to kernel-managed retries.
+- `timeout_seconds` (per job type) wraps `handler.run` in a deadline;
+  `TimeoutError` counts as a failed, retryable attempt.
+- `cancel_requested` is honored at claim time: a job carrying the flag
+  finishes `cancelled` before the handler runs and its owning step
+  becomes `cancelled`. An already-running job is not force-killed
+  mid-transaction.
+- DLQ: `keelflow_dlq` holds a copy of every terminally-failed job;
+  `MonitoringService.dlq_list` reads it and `dlq_replay` re-enqueues
+  the payload as a fresh job.
 
 ## Human jobs (`type LIKE 'human.%'`)
 
 No kernel claim. Row sits `pending`/`claimed` in `keelflow_jobs` until
 `HumanTaskService.claim|complete` (see `05-human-sm-events.md`).
+`ui.due_in_seconds` sets `due_at` at insert; `release()` returns a
+claimed task to `pending` (claim owner only); `escalate_overdue`
+reassigns any task past `due_at` (or older than N days when `due_at`
+is unset).

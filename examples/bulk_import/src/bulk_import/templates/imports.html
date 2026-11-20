@@ -1,24 +1,25 @@
 {% extends "base.html" %}
 {% block content %}
 <div class="card">
-  <h2>New import</h2>
+  <h2>{{ t('list.new') }}</h2>
   <form method="post" action="/upload?as={{ nav['as'] }}" enctype="multipart/form-data" style="display:inline">
     <input type="file" name="file" accept=".csv,text/csv">
-    <button>upload CSV</button>
+    <button>{{ t('list.upload') }}</button>
   </form>
-  or
+  {{ t('list.or') }}
   <form method="post" action="/upload?as={{ nav['as'] }}" style="display:inline">
     <input type="hidden" name="generate" value="1">
-    <button>generate sample.csv (250,000 rows, ~8% bad)</button>
+    <button>{{ t('list.generate') }}</button>
   </form>
-  <p class="muted">{{ n_products }} products imported · {{ open_tasks }} open human tasks</p>
+  <p class="muted">{{ t('list.counts', products=n_products, tasks=open_tasks) }}</p>
 </div>
 
 <div class="card">
-  <h2>Imports</h2>
+  <h2>{{ t('list.title') }}</h2>
   <table>
-    <tr><th>#</th><th>file</th><th>rows</th><th>status</th>
-        <th>latest run</th><th></th></tr>
+    <tr><th>{{ t('list.col.id') }}</th><th>{{ t('list.col.file') }}</th>
+        <th>{{ t('list.col.rows') }}</th><th>{{ t('list.col.status') }}</th>
+        <th>{{ t('list.col.latest_run') }}</th><th></th></tr>
     {% for i in imports %}
     <tr>
       <td>{{ i.id }}</td>
@@ -36,13 +37,13 @@
       <td>
         {% if i.status == 'uploaded' %}
         <form method="post" action="/imports/{{ i.id }}/start?as={{ nav['as'] }}" style="display:inline">
-          <button>start import</button>
+          <button>{{ t('list.start') }}</button>
         </form>
         {% endif %}
       </td>
     </tr>
     {% endfor %}
-    {% if not imports %}<tr><td colspan="6" class="muted">no imports yet</td></tr>{% endif %}
+    {% if not imports %}<tr><td colspan="6" class="muted">{{ t('list.empty') }}</td></tr>{% endif %}
   </table>
 </div>
 {% endblock %}

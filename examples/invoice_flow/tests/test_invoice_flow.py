@@ -88,7 +88,7 @@ async def db():
         await conn.execute(
             "TRUNCATE keelflow_jobs, keelflow_outbox, keelflow_audit,"
             " keelflow_step_runs, keelflow_workflow_runs, keelflow_chunks,"
-            " keelflow_row_status, keelflow_dlq, keelflow_entity_state,"
+            " keelflow_row_status, keelflow_row_archive, keelflow_dlq, keelflow_entity_state,"
             " demo_invoices, demo_ledger_postings, demo_gl_records CASCADE")
         await conn.execute(
             f"TRUNCATE {KERNEL_PREFIX}jobs, {KERNEL_PREFIX}workers,"
@@ -156,10 +156,12 @@ async def test_happy_path_sm_to_posted(env, db):
 
     task = next(t for t in fin_tasks
                 if t["payload"].get("entity_id") == "INV-9001")
-    await env["human"].claim(db, str(task["id"]), Actor.user("fin1"))
+    await env["human"].claim(db, str(task["id"]), Actor.user("fin1"),
+                         roles=["finance"])
     # complete_and_transition: approve → posting + workflow triggered
     await env["human"].complete_and_transition(
-        db, str(task["id"]), Actor.user("fin1"), "approve", CTX["fin1"])
+            db, str(task["id"]), Actor.user("fin1"), "approve", CTX["fin1"],
+            roles=["finance"])
     assert await _state(db, "INV-9001") == "posting"
 
     w = Worker(env["kernel"], shutdown_timeout=5)
@@ -184,7 +186,8 @@ async def test_happy_path_sm_to_posted(env, db):
         assert run[0] == "running"
 
         await env["human"].complete(
-            db, str(gl_task["id"]), Actor.user("gl1"), {"decision": "approve"})
+            db, str(gl_task["id"]), Actor.user("gl1"), {"decision": "approve"},
+            roles=["gl"])
         # callback fires on_done → posted, inside terminal TX
         for _ in range(150):
             if await _state(db, "INV-9001") == "posted":
@@ -222,7 +225,8 @@ async def test_business_reject_and_repost(env, db):
         "SELECT id FROM keelflow_jobs WHERE type='human.review@v1'"
         " AND payload->>'entity_id'='INV-9001'")).fetchone()
     await env["human"].complete_and_transition(
-        db, str(task[0]), Actor.user("fin1"), "approve", CTX["fin1"])
+        db, str(task[0]), Actor.user("fin1"), "approve", CTX["fin1"],
+        roles=["finance"])
 
     w = Worker(env["kernel"], shutdown_timeout=5)
     await w.start()
@@ -236,7 +240,8 @@ async def test_business_reject_and_repost(env, db):
             await asyncio.sleep(0.1)
         await env["human"].complete(
             db, str(row[0]), Actor.user("gl1"),
-            {"decision": "reject", "note": "wrong cost center"})
+            {"decision": "reject", "note": "wrong cost center"},
+            roles=["gl"])
         for _ in range(150):
             if await _state(db, "INV-9001") == "posting_rejected":
                 break
@@ -258,7 +263,8 @@ async def test_business_reject_and_repost(env, db):
                 break
             await asyncio.sleep(0.1)
         await env["human"].complete(
-            db, str(row[0]), Actor.user("gl1"), {"decision": "approve"})
+            db, str(row[0]), Actor.user("gl1"), {"decision": "approve"},
+            roles=["gl"])
         for _ in range(150):
             if await _state(db, "INV-9001") == "posted":
                 break
@@ -282,7 +288,8 @@ async def test_technical_failure_and_fix_task(env, db):
         "SELECT id FROM keelflow_jobs WHERE type='human.review@v1'"
         " AND payload->>'entity_id'='INV-9002'")).fetchone()
     await env["human"].complete_and_transition(
-        db, str(task[0]), Actor.user("fin1"), "approve", CTX["fin1"])
+        db, str(task[0]), Actor.user("fin1"), "approve", CTX["fin1"],
+        roles=["finance"])
 
     w = Worker(env["kernel"], shutdown_timeout=5)
     await w.start()
@@ -320,7 +327,8 @@ async def test_technical_failure_and_fix_task(env, db):
             await asyncio.sleep(0.1)
         assert row is not None
         await env["human"].complete(
-            db, str(row[0]), Actor.user("gl1"), {"decision": "approve"})
+            db, str(row[0]), Actor.user("gl1"), {"decision": "approve"},
+            roles=["gl"])
         for _ in range(150):
             if await _state(db, "INV-9002") == "posted":
                 break

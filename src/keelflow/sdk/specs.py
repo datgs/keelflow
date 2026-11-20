@@ -51,6 +51,7 @@ class TaskUiSpec:
     form_schema: dict[str, Any] | None = None       # level 3 embedded form
     display_fields: tuple[str, ...] = ()            # summary card fields
     assignee_role: str | None = None                # role:X inbox assignment
+    due_in_seconds: float | None = None             # sets keelflow_jobs.due_at
 
 
 @dataclass(frozen=True)
@@ -74,6 +75,9 @@ class JobTypeSpec:
     ui: TaskUiSpec | None = None
     is_human: bool = False                       # human.* vs machine
     payload_max_bytes: int = 8192
+    # kill the handler coroutine after N seconds; counts as a failed
+    # attempt (retryable until max_attempts).
+    timeout_seconds: float | None = None
 
 
 @dataclass(frozen=True)

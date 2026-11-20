@@ -1,22 +1,23 @@
 {% extends "base.html" %}
 {% block content %}
 <div class="card">
-  <h2>Inbox — {{ nav['as'] }}</h2>
-  <p class="muted">Open human tasks (all roles visible — demo only).</p>
+  <h2>{{ t('inbox.title', me=nav['as']) }}</h2>
+  <p class="muted">{{ t('inbox.hint') }}</p>
   <table>
-    <tr><th>type</th><th>import</th><th>assignee</th><th>status</th><th></th></tr>
-    {% for t in tasks %}
+    <tr><th>{{ t('inbox.col.type') }}</th><th>{{ t('inbox.col.import') }}</th>
+        <th>{{ t('inbox.col.assignee') }}</th><th>{{ t('inbox.col.status') }}</th><th></th></tr>
+    {% for task in tasks %}
     <tr>
-      <td><a href="/jobs/{{ t.id }}?as={{ nav['as'] }}">{{ t.type }}</a></td>
-      <td>{% if t.payload and t.payload.import_id %}
-          <a href="/imports/{{ t.payload.import_id }}?as={{ nav['as'] }}">#{{ t.payload.import_id }}</a>{% endif %}</td>
-      <td>{{ t.assignee or '—' }}</td>
-      <td><span class="status st-{{ t.status }}">{{ t.status }}</span></td>
-      <td>{% if t.payload and t.payload.import_id %}
-          <a href="/imports/{{ t.payload.import_id }}?as={{ nav['as'] }}">open import</a>{% endif %}</td>
+      <td><a href="/jobs/{{ task.id }}?as={{ nav['as'] }}">{{ task.type }}</a></td>
+      <td>{% if task.payload and task.payload.import_id %}
+          <a href="/imports/{{ task.payload.import_id }}?as={{ nav['as'] }}">#{{ task.payload.import_id }}</a>{% endif %}</td>
+      <td>{{ task.assignee or '—' }}</td>
+      <td><span class="status st-{{ task.status }}">{{ task.status }}</span></td>
+      <td>{% if task.payload and task.payload.import_id %}
+          <a href="/imports/{{ task.payload.import_id }}?as={{ nav['as'] }}">{{ t('inbox.open_import') }}</a>{% endif %}</td>
     </tr>
     {% endfor %}
-    {% if not tasks %}<tr><td colspan="5" class="muted">no open tasks</td></tr>{% endif %}
+    {% if not tasks %}<tr><td colspan="5" class="muted">{{ t('inbox.empty') }}</td></tr>{% endif %}
   </table>
 </div>
 {% endblock %}

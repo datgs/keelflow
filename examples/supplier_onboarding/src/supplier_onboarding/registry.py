@@ -229,7 +229,8 @@ def build_registry() -> InMemoryRegistry:
     def j(type_: str, handler, *, human=False, ui=None, attempts=3):
         r.register_job_type(JobTypeSpec(
             type=type_, input_schema=Sup, handler=handler,
-            retry=RetryPolicy(max_attempts=attempts), is_human=human, ui=ui))
+            retry=RetryPolicy(max_attempts=attempts, base_seconds=5),
+            is_human=human, ui=ui))
 
     j("sup.validate@v1", ValidateIntakeH)
     j("sup.sanction_screen@v1", SanctionScreenH, attempts=4)

@@ -174,8 +174,15 @@ uv run python examples/order_flow.py   # applies schema + runs a demo flow
 ```
 
 Full walkthrough of every feature: **[docs/guide.md](docs/guide.md)**.
-Complete demo app (SM + human tasks + DAG + failure paths):
-**[examples/invoice_flow](examples/invoice_flow/)**.
+Demo apps:
+[examples/invoice_flow](examples/invoice_flow/) (SM + human tasks + DAG
++ failure paths),
+[examples/supplier_onboarding](examples/supplier_onboarding/) (~20-step
+conditional DAG, parallel checks, HITL gates),
+[examples/bulk_import](examples/bulk_import/) (chunked bulk processing,
+error queue, human map/approve),
+[examples/rag_demo](examples/rag_demo/) (employee helpdesk RAG — durable
+'LLM': timeout, retry backoff, DLQ replay, confidence-gated human review).
 
 ## Layout
 

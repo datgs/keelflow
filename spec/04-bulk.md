@@ -29,6 +29,24 @@ Three levels: parent job → chunks → rows.
    step-finish hook (`on_job_finished`) **in the same transaction** —
    step completion and downstream advance are atomic with the parent's
    final status. Without this, a bulk job can never be a DAG step.
+5. Row retention: inside that same fan-in TX, `done` staging rows are
+   disposed per `BulkJobPayload.row_disposition`:
+   - `archive` (default) — moved to `keelflow_row_archive`
+     (job_id, row_id, row_key, chunk_id, data, archived_at), a cold
+     table with no FKs to live jobs/chunks so rows survive job cleanup;
+   - `keep` — left in `keelflow_row_status` for debugging or strict
+     per-row audit;
+   - `delete` — removed; use only when the app already has a durable
+     source copy.
+   `failed` rows are NEVER moved or deleted — they stay in the live
+   error queue. The parent `result` records `row_disposition` +
+   `archived_rows`/`deleted_rows`/`kept_rows`. The move is idempotent
+   (`ON CONFLICT (job_id, row_id) DO NOTHING`) so a retried fan-in
+   cannot duplicate archive rows. Once `keelflow_jobs.result` carries
+   `rows_total`, `bulk.progress()` MUST read row counters from it —
+   the live table may no longer hold `done` rows. Archived rows are
+   inspectable via `MonitoringService.rows_list_archived` (keyset
+   pagination on (job_id, id)).
 
 ## Invariants
 
@@ -41,3 +59,8 @@ Three levels: parent job → chunks → rows.
 - Row `data` is the carrier between staging and `process_row` — chunk
   workers' `ctx` has no parent payload; self-contained rows make
   per-row retries deterministic.
+- Live `keelflow_row_status` is a hot operational table: after fan-in
+  it holds only `failed` rows (default) — apps MUST NOT depend on
+  reading `done` rows there unless they opt into `row_disposition='keep'`.
+  Inspect completed rows via `keelflow_row_archive` / the summary in
+  `keelflow_jobs.result`.

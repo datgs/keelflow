@@ -1,14 +1,14 @@
 {% extends "base.html" %}
 {% block content %}
 <div class="card">
-  <h2>run {{ (run.id|string)[:8] }}…
+  <h2>{{ t('run.title', id=(run.id|string)[:8] + '…') }}
     <span class="status st-{{ run.status }}">{{ run.status }}</span>
   </h2>
-  <p class="muted">{{ run.workflow }} · inputs: {{ run.inputs | tojson }}</p>
+  <p class="muted">{{ run.workflow }} · {{ t('run.inputs') }} {{ run.inputs | tojson }}</p>
 </div>
 
 <div class="card">
-  <h3>DAG — parallel lanes on one layer · human steps dashed · skipped = guard false</h3>
+  <h3>{{ t('run.dag_title') }}</h3>
   <div class="dag">
     {% for layer in layers %}
     <div class="dag-layer" data-l="{{ loop.index0 }}">
@@ -20,8 +20,8 @@
         <span class="sid">{{ s.step_id }}</span>
         <small>{{ s.type.split('@')[0] }}</small>
         <span class="status st-{{ s.status }}">{{ s.status }}</span>
-        {% if s.job_id %}<small><a href="/jobs/{{ s.job_id }}?as={{ nav['as'] }}">job {{ (s.job_id|string)[:8] }}…</a></small>{% endif %}
-        {% if s.needs %}<small class="muted">needs: {{ s.needs | join(', ') }}</small>{% endif %}
+        {% if s.job_id %}<small><a href="/jobs/{{ s.job_id }}?as={{ nav['as'] }}">{{ t('run.job') }} {{ (s.job_id|string)[:8] }}…</a></small>{% endif %}
+        {% if s.needs %}<small class="muted">{{ t('run.needs') }} {{ s.needs | join(', ') }}</small>{% endif %}
       </div>
       {% endfor %}
     </div>
@@ -30,10 +30,10 @@
 </div>
 
 <div class="card">
-  <h3>Step outputs</h3>
+  <h3>{{ t('run.outputs') }}</h3>
   {% for s in steps %}
   <h4>{{ s.step_id }} <span class="status st-{{ s.status }}">{{ s.status }}</span>
-    {% if s.attempts %}<small class="muted">attempts: {{ s.attempts }}</small>{% endif %}</h4>
+    {% if s.attempts %}<small class="muted">{{ t('run.attempts') }} {{ s.attempts }}</small>{% endif %}</h4>
   <pre>{{ (s.outputs or {}) | tojson(indent=2) }}</pre>
   {% endfor %}
 </div>

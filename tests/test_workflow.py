@@ -71,7 +71,7 @@ async def db():
         await conn.execute(
             "TRUNCATE keelflow_jobs, keelflow_outbox, keelflow_audit,"
             " keelflow_step_runs, keelflow_workflow_runs, keelflow_chunks,"
-            " keelflow_row_status, keelflow_dlq CASCADE"
+            " keelflow_row_status, keelflow_row_archive, keelflow_dlq CASCADE"
         )
         await conn.execute(
             f"TRUNCATE {CHANCY_PREFIX}jobs, {CHANCY_PREFIX}workers,"
