@@ -17,6 +17,21 @@ normative; types adapt per DB (`jsonb`→`json`/`nvarchar(max)`…).
 | `keelflow_entity_state` | State-machine current state | PK `(entity_type, entity_id)`; `version` for optimistic checks |
 | `keelflow_audit` | Append-only audit | actor JSONB incl. `via` chain; `changes` JSONB `{k:{before,after}}`; `correlation_id` |
 | `keelflow_dlq` | Execution failures after retry exhaustion | requeue with edited payload |
+| `keelflow_row_archive` | Cold store for completed bulk rows (`row_disposition='archive'`) | no FKs — survives job deletion |
+
+## Retention
+
+`MonitoringService.sweep` — **caller-invoked** (ops command or cron job),
+batched, idempotent; never implicit:
+
+- terminal `keelflow_workflow_runs` and `keelflow_jobs` past cutoff
+  (runs → step_runs cascade frees job links; `chunks`/`row_status`
+  cascade with jobs — failed rows share the parent's lifetime);
+- `keelflow_outbox` `status='published'` past cutoff;
+- `keelflow_row_archive` and `keelflow_dlq` past their own cutoffs.
+- never: non-terminal rows, pending/failed outbox, `keelflow_audit`,
+  `keelflow_entity_state`. `None` disables a category; per-table `batch`
+  bounds each call — callers repeat until counts reach 0.
 
 ## Status enums (normative)
 

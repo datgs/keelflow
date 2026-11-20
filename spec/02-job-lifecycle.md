@@ -52,9 +52,12 @@ kernel claims job → dispatch(job_id)
   finishes `cancelled` before the handler runs and its owning step
   becomes `cancelled`. An already-running job is not force-killed
   mid-transaction.
-- DLQ: `keelflow_dlq` holds a copy of every terminally-failed job;
-  `MonitoringService.dlq_list` reads it and `dlq_replay` re-enqueues
-  the payload as a fresh job.
+- DLQ: `keelflow_dlq` holds a copy of every terminally-failed job,
+  plus `run_id`/`step_run_id` when it was a DAG step.
+  `MonitoringService.dlq_list` reads it; `dlq_replay` **resumes the
+  owning run** via `resume_step` when the link and a live step_run
+  exist (registry must be passed), otherwise it re-enqueues the
+  payload as a fresh standalone job.
 
 ## Human jobs (`type LIKE 'human.%'`)
 

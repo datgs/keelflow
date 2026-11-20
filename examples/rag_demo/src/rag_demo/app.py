@@ -65,7 +65,7 @@ async def _lifespan(app: FastAPI):
     app.state.jobs = jobs
     app.state.wf = WorkflowService(registry, jobs)
     app.state.human = HumanTaskService(registry, kernel)
-    app.state.mon = MonitoringService(jobs)
+    app.state.mon = MonitoringService(jobs, registry=registry)
     async with kernel:
         yield
 

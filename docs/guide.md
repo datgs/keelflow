@@ -150,8 +150,10 @@ retry=RetryPolicy(max_attempts=5, backoff="exponential",
 timeout_seconds=60,    # kill the handler coroutine after 60s
 ```
 
-Ops replay: `MonitoringService(jobs)` exposes `dlq_list`/`dlq_replay` —
-re-enqueues a DLQ row as a fresh job.
+Ops replay: `MonitoringService(jobs, registry=reg)` exposes
+`dlq_list`/`dlq_replay`. A dead DAG-step job replays **into its run**
+(`resume_step` — the run advances when the re-enqueued step finishes);
+a non-step job re-enqueues standalone.
 
 `ctx` (`JobContext`): `actor`, `tenant_id`, `correlation_id`,
 `permissions`, `request_id`, `extra` (read-only in handlers — downstream
@@ -516,7 +518,18 @@ await mon.jobs_list(conn, statuses=["failed"])
 await mon.runs_get(conn, run_id)      # run + step details
 await mon.rows_list_failed(conn, job_id)
 await mon.retry_job(conn, job_id)     # ops retry
+
+# retention — caller-invoked, batched, idempotent; repeat until 0
+await mon.sweep(conn, jobs_days=30, outbox_days=7,
+                archive_days=90, dlq_days=90, batch=500)
 ```
+
+`sweep` deletes, oldest-first and `batch` per table per call: terminal
+`workflow_runs` + `jobs` (their `chunks`/`row_status`/`step_runs`
+cascade — a job still linked to a live run or child job is skipped),
+`published` outbox rows, `row_archive`, and `keelflow_dlq`. In-flight
+work, pending/failed outbox, `keelflow_audit`, and `entity_state` are
+never touched; `None` disables a category.
 
 - **SuperAdmin** (no auth — bind localhost): `python -m keelflow.admin.app`
   → http://127.0.0.1:8410

@@ -178,5 +178,10 @@ CREATE TABLE IF NOT EXISTS keelflow_dlq (
     context    JSONB NOT NULL,
     error      TEXT,
     attempts   INT NOT NULL,
+    -- workflow link (nullable): set when the dead job was a DAG step, so
+    -- dlq_replay can resume the owning run instead of a standalone job.
+    -- no FK — a DLQ entry may outlive its run.
+    run_id     UUID,
+    step_run_id UUID,
     dead_at    TIMESTAMPTZ NOT NULL DEFAULT now()
 );

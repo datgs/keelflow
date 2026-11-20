@@ -10,9 +10,12 @@ from psycopg.rows import dict_row
 
 
 class MonitoringService:
-    def __init__(self, jobs=None) -> None:
+    def __init__(self, jobs=None, registry=None) -> None:
         # Optional JobService — required only for dlq_replay().
+        # Optional registry — required to resume a workflow run from a
+        # DLQ entry that links to a step (otherwise replay stays standalone).
         self._jobs = jobs
+        self._registry = registry
 
     async def jobs_list(
         self, conn, *, types=None, statuses=None, limit: int = 50, cursor: str | None = None
@@ -139,6 +142,92 @@ class MonitoringService:
         )
         await conn.commit()
 
+    async def sweep(
+        self,
+        conn,
+        *,
+        jobs_days: float | None = 30,
+        outbox_days: float | None = 7,
+        archive_days: float | None = 90,
+        dlq_days: float | None = 90,
+        batch: int = 500,
+    ) -> dict[str, int]:
+        """Time-based retention for engine tables — **caller-invoked**.
+
+        Deletes, oldest-first and bounded by `batch` per table per call:
+
+        - terminal `keelflow_workflow_runs` older than `jobs_days`
+          (cascades to their step_runs, releasing the job_id link);
+        - terminal `keelflow_jobs` older than `jobs_days` (cascades to
+          chunks and row_status — failed rows share the parent's
+          lifetime); jobs still referenced by a step_run are skipped;
+        - `keelflow_outbox` rows `status='published'` older than
+          `outbox_days`;
+        - `keelflow_row_archive` rows older than `archive_days`;
+        - `keelflow_dlq` entries older than `dlq_days`.
+
+        Never touched: non-terminal jobs/runs, pending or failed outbox
+        rows, `keelflow_audit`, `keelflow_entity_state`. `None` disables
+        a category. Returns per-table deleted counts; callers typically
+        run it periodically (cron job / ops command) until counts reach 0.
+        """
+        out: dict[str, int] = {}
+        async with conn.cursor() as cur:
+            if jobs_days is not None:
+                await cur.execute(
+                    "DELETE FROM keelflow_workflow_runs WHERE id IN ("
+                    " SELECT id FROM keelflow_workflow_runs"
+                    " WHERE status IN ('done','failed','cancelled')"
+                    " AND updated_at < now() - make_interval(days => %s)"
+                    " ORDER BY updated_at LIMIT %s)",
+                    (jobs_days, batch),
+                )
+                out["workflow_runs"] = cur.rowcount
+                await cur.execute(
+                    "DELETE FROM keelflow_jobs WHERE id IN ("
+                    " SELECT j.id FROM keelflow_jobs j"
+                    " WHERE j.status IN ('done','failed','cancelled')"
+                    " AND j.updated_at < now() - make_interval(days => %s)"
+                    " AND NOT EXISTS ("
+                    "   SELECT 1 FROM keelflow_step_runs s"
+                    "   WHERE s.job_id = j.id)"
+                    " AND NOT EXISTS ("
+                    "   SELECT 1 FROM keelflow_jobs c"
+                    "   WHERE c.parent_job_id = j.id)"
+                    " ORDER BY j.updated_at LIMIT %s)",
+                    (jobs_days, batch),
+                )
+                out["jobs"] = cur.rowcount
+            if outbox_days is not None:
+                await cur.execute(
+                    "DELETE FROM keelflow_outbox WHERE id IN ("
+                    " SELECT id FROM keelflow_outbox"
+                    " WHERE status='published'"
+                    " AND published_at < now() - make_interval(days => %s)"
+                    " ORDER BY published_at LIMIT %s)",
+                    (outbox_days, batch),
+                )
+                out["outbox"] = cur.rowcount
+            if archive_days is not None:
+                await cur.execute(
+                    "DELETE FROM keelflow_row_archive WHERE id IN ("
+                    " SELECT id FROM keelflow_row_archive"
+                    " WHERE archived_at < now() - make_interval(days => %s)"
+                    " ORDER BY archived_at LIMIT %s)",
+                    (archive_days, batch),
+                )
+                out["row_archive"] = cur.rowcount
+            if dlq_days is not None:
+                await cur.execute(
+                    "DELETE FROM keelflow_dlq WHERE id IN ("
+                    " SELECT id FROM keelflow_dlq"
+                    " WHERE dead_at < now() - make_interval(days => %s)"
+                    " ORDER BY dead_at LIMIT %s)",
+                    (dlq_days, batch),
+                )
+                out["dlq"] = cur.rowcount
+        return out
+
     async def dlq_list(self, conn, *, limit: int = 50) -> list[dict[str, Any]]:
         """Terminal-failure copies in keelflow_dlq, newest first."""
         async with conn.cursor(row_factory=dict_row) as cur:
@@ -150,17 +239,43 @@ class MonitoringService:
             return await cur.fetchall()
 
     async def dlq_replay(self, conn, dlq_id: str, ctx) -> str:
-        """Re-enqueue a DLQ entry as a fresh job. Returns the new job id."""
+        """Replay a DLQ entry.
+
+        If the dead job was a DAG step (`run_id`/`step_run_id` populated,
+        the step_run still exists, and a registry is available), resume
+        the owning run via `resume_step` — the step is re-enqueued in
+        place and the run advances when it finishes. Returns the run id.
+        Otherwise enqueue a fresh standalone job and return its job id.
+        """
         if self._jobs is None:
             raise RuntimeError(
                 "dlq_replay requires MonitoringService(jobs=JobService(...))"
             )
         async with conn.cursor(row_factory=dict_row) as cur:
             await cur.execute(
-                "SELECT type, payload FROM keelflow_dlq WHERE id=%s", (dlq_id,))
+                "SELECT type, payload, run_id, step_run_id"
+                " FROM keelflow_dlq WHERE id=%s", (dlq_id,))
             row = await cur.fetchone()
         if row is None:
             raise KeyError(f"no dlq entry {dlq_id}")
+
+        step = None
+        if row["step_run_id"] and self._registry is not None:
+            async with conn.cursor(row_factory=dict_row) as cur:
+                await cur.execute(
+                    "SELECT run_id, step_id, status FROM keelflow_step_runs"
+                    " WHERE id=%s", (row["step_run_id"],))
+                step = await cur.fetchone()
+        if step is not None and step["status"] == "failed":
+            from .workflow import WorkflowService
+
+            wf = WorkflowService(self._registry, self._jobs)
+            async with conn.transaction():
+                await wf.resume_step(conn, str(step["run_id"]),
+                                     step["step_id"], ctx)
+            await conn.commit()
+            return str(step["run_id"])
+
         ref = await self._jobs.builder(row["type"]) \
             .payload(row["payload"] or {}) \
             .context(ctx) \

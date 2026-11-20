@@ -72,6 +72,18 @@ class BoomH(JobHandler):
         raise RuntimeError("always boom")
 
 
+class BoomThenOkH(JobHandler):
+    """Fails while `armed`, succeeds once disarmed — simulates an ops fix
+    between DLQ write and replay."""
+
+    armed = True
+
+    async def run(self, ctx, payload: In):
+        if type(self).armed:
+            raise RuntimeError("boom (armed)")
+        return JobResult(status="done", outputs={"n": 1})
+
+
 async def _conn(autocommit: bool = True) -> psycopg.AsyncConnection:
     return await psycopg.AsyncConnection.connect(DSN, autocommit=autocommit)
 
@@ -334,6 +346,64 @@ async def test_exhausted_failure_lands_in_dlq(env, db):
         "SELECT type, status, payload FROM keelflow_jobs WHERE id=%s",
         (new_id,))).fetchone()
     assert row[0] == "t.boom@v1" and row[1] == "pending"
+
+
+@pytest.mark.asyncio
+async def test_dlq_replay_resumes_owning_run(env, db):
+    """A dead DAG-step job replays INTO its run via resume_step — the run
+    completes, instead of an orphaned standalone re-run."""
+    BoomThenOkH.armed = True
+    env["reg"].register_job_type(JobTypeSpec(
+        type="t.boomthenok@v1", input_schema=In, handler=BoomThenOkH,
+        retry=RetryPolicy(max_attempts=2, base_seconds=0.05,
+                          jitter=False)))
+    env["reg"].register_workflow(WorkflowDefinition(
+        name="wf.dlqresume@v1",
+        steps=(
+            StepSpec(id="a", type="t.ok@v1", input={"x": 1}),
+            StepSpec(id="b", type="t.boomthenok@v1",
+                     needs=("a",), input={"x": 1}),
+        ),
+    ))
+    ref = await _start(env, "wf.dlqresume@v1")
+    w = Worker(env["kernel"], shutdown_timeout=5)
+    await w.start()
+    try:
+        run = await _wait_run(db, ref.id, "failed")
+        assert run[1] == "failed"                    # terminal_outcome
+    finally:
+        await w.stop(timeout=5)
+
+    dlq = await MonitoringService(env["jobs"]).dlq_list(db)
+    assert len(dlq) == 1 and dlq[0]["type"] == "t.boomthenok@v1"
+    entry = await (await db.execute(
+        "SELECT run_id, step_run_id FROM keelflow_dlq WHERE id=%s",
+        (dlq[0]["id"],))).fetchone()
+    assert str(entry[0]) == ref.id and entry[1] is not None
+
+    # ops fixes the root cause, then replays — run resumes, not standalone
+    BoomThenOkH.armed = False
+    mon = MonitoringService(env["jobs"], registry=env["reg"])
+    resumed = await mon.dlq_replay(
+        db, str(dlq[0]["id"]), JobContext(actor=Actor.user("ops")))
+    assert resumed == ref.id                      # returns run id
+
+    w = Worker(env["kernel"], shutdown_timeout=5)
+    await w.start()
+    try:
+        run = await _wait_run(db, ref.id, "done")
+        assert run[1] == "succeeded"
+        step = await (await db.execute(
+            "SELECT status, job_id FROM keelflow_step_runs"
+            " WHERE run_id=%s AND step_id='b'", (ref.id,))).fetchone()
+        assert step[0] == "done"
+        new_job = await (await db.execute(
+            "SELECT status FROM keelflow_jobs WHERE id=%s",
+            (step[1],))).fetchone()
+        assert new_job[0] == "done"              # re-enqueued job finished
+    finally:
+        await w.stop(timeout=5)
+        BoomThenOkH.armed = True
 
 
 # ── human tasks: release + due_at ─────────────────────────────────────────

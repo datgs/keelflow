@@ -211,9 +211,19 @@ async def dispatch(job_id: str, step_run_id: str | None = None) -> None:
                 await _finish(
                     conn, job_id, JobStatus.FAILED,
                     error=exc_text, trace=tb)
+                # keep the workflow link so dlq_replay can resume the run
+                _dlq_run_id = None
+                if step_run_id:
+                    _sr = await conn.execute(
+                        "SELECT run_id FROM keelflow_step_runs WHERE id=%s",
+                        (step_run_id,),
+                    )
+                    _sr_row = await _sr.fetchone()
+                    _dlq_run_id = str(_sr_row[0]) if _sr_row else None
                 await _write_dlq(
                     conn, job_id, type_name, payload_json, ctx_json,
                     exc_text, att[0] if att else 0,
+                    run_id=_dlq_run_id, step_run_id=step_run_id,
                 )
                 jlog.error("handler failed permanently: %s", exc)
                 if step_run_id and _kernel_client is not None:
@@ -346,18 +356,26 @@ def _retry_kernel_job(job_id, type_name: str, spec, step_run_id, delay: float):
 
 
 async def _write_dlq(conn, job_id, type_name: str, payload, context,
-                     error: str, attempts: int) -> None:
-    """Copy a terminally-failed job to keelflow_dlq for ops replay."""
+                     error: str, attempts: int, *,
+                     run_id: str | None = None,
+                     step_run_id: str | None = None) -> None:
+    """Copy a terminally-failed job to keelflow_dlq for ops replay.
+
+    `run_id`/`step_run_id` link a dead DAG-step job back to its run so
+    `dlq_replay` can resume the workflow rather than orphan the run.
+    """
     async with conn.transaction():
         await conn.execute(
             "INSERT INTO keelflow_dlq (id, type, payload, context, error,"
-            " attempts) VALUES (%s, %s, %s, %s, %s, %s)"
+            " attempts, run_id, step_run_id)"
+            " VALUES (%s, %s, %s, %s, %s, %s, %s, %s)"
             " ON CONFLICT (id) DO UPDATE"
-            " SET error=EXCLUDED.error, attempts=EXCLUDED.attempts, dead_at=now()",
+            " SET error=EXCLUDED.error, attempts=EXCLUDED.attempts,"
+            " dead_at=now()",
             (job_id, type_name,
              json.dumps(payload) if not isinstance(payload, str) else payload,
              json.dumps(context) if not isinstance(context, str) else context,
-             error, attempts),
+             error, attempts, run_id, step_run_id),
         )
     await conn.commit()
 
