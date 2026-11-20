@@ -300,10 +300,10 @@ CI must be green on `main` after each pushed batch.
 - [x] Evidence gathered for items 1–7; three policy decisions confirmed.
 - [x] Phase A — T1 plan housekeeping.
 - [x] Phase A — T2 PII/secrets audit.
-- [ ] Phase B — T3 retention sweep.
-- [ ] Phase C — T4 DLQ replay resumes owning run.
-- [ ] Phase C — T6 result/outputs size visibility (hard cap opt-in + soft warning).
-- [ ] Phase C — T5 `unique_key` idempotent enqueue.
+- [x] Phase B — T3 retention sweep (`MonitoringService.sweep`, 5 tests).
+- [x] Phase C — T4 DLQ replay resumes owning run (alembic 0005 + test).
+- [x] Phase C — T6 result/outputs size visibility (alembic 0006 + 2 tests).
+- [x] Phase C — T5 `unique_key` idempotent enqueue (alembic 0007 + 2 tests).
 - [ ] Phase D — T7 release validation (own approval gate).
 
 ## Phase A audit record (2026-11-20)

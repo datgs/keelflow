@@ -5,6 +5,32 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added (next release)
+
+- Engine hardening: `cancelled` as a distinct terminal outcome, a
+  definition-drift guard in `advance_run`, a per-step savepoint, claim-time
+  `cancel_requested`, real `RetryPolicy` backoff scheduling,
+  `JobTypeSpec.timeout_seconds`, `TaskUiSpec.due_in_seconds` → `due_at`,
+  `HumanTaskService.release`, and a non-blocking outbox subscriber path.
+- `keelflow_dlq` + `MonitoringService.dlq_list`/`dlq_replay`, with
+  `run_id`/`step_run_id` links so replay of a dead DAG step **resumes the
+  owning run** rather than orphaning it.
+- `MonitoringService.sweep` — caller-invoked, batched retention for
+  terminal jobs/runs, published outbox, `row_archive`, and DLQ rows.
+- Bulk `row_disposition` (`archive` default / `keep` / `delete`) — `done`
+  staging rows move to `keelflow_row_archive` at fan-in; a `FOR UPDATE`
+  parent lock removes a fan-in race.
+- Size visibility — `result_max_bytes` (opt-in hard cap),
+  `result_warning_bytes` (soft warning), `result_bytes`/`outputs_bytes`
+  columns, and `results_oversized`.
+- `JobBuilder.unique_key` — idempotent enqueue dedup on
+  `(type, unique_key)` for non-terminal jobs.
+- `examples/rag_demo` — employee-helpdesk RAG demo; i18n (5 locales)
+  across the demo UIs; Mermaid workflow diagrams + roles in demo READMEs.
+- Alembic 0003–0007.
+
+## [0.1.0a1] — 2026-11-19
+
 ### Added — engine (0.1.x alpha)
 
 - Durable jobs with transactional enqueue (`keelflow_jobs` + kernel row
