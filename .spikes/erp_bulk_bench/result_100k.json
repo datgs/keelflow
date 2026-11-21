@@ -1,0 +1,102 @@
+{
+  "env": {
+    "host": "Darwin/arm64",
+    "python": "3.12.13",
+    "time": "2026-11-21T08:24:40.447476+00:00"
+  },
+  "sizes": [
+    {
+      "size": 100000,
+      "batch_id": "1acba63f-fcfa-4566-8001-85a3d4b864d3",
+      "stage_s": 0.6400312497280538,
+      "runs": [
+        {
+          "variant": "keelflow",
+          "workers": 1,
+          "rep": 0,
+          "process_s": 28.294820457696915,
+          "rows_s": 3534.2157462885557,
+          "errors": 8019,
+          "status": "done",
+          "n_products": 91981,
+          "n_errors": 0
+        },
+        {
+          "variant": "keelflow",
+          "workers": 4,
+          "rep": 0,
+          "process_s": 29.51048008305952,
+          "rows_s": 3388.626674948774,
+          "errors": 8019,
+          "status": "done",
+          "n_products": 91981,
+          "n_errors": 0
+        },
+        {
+          "variant": "keelflow",
+          "workers": 8,
+          "rep": 0,
+          "process_s": 28.310352792032063,
+          "rows_s": 3532.2767163871217,
+          "errors": 8019,
+          "status": "done",
+          "n_products": 91981,
+          "n_errors": 0
+        },
+        {
+          "variant": "sql",
+          "workers": 0,
+          "rep": 0,
+          "process_s": 0.6378543749451637,
+          "rows_s": 156775.59632415627,
+          "errors": 8019,
+          "status": "done",
+          "n_products": 91981,
+          "n_errors": 8019
+        }
+      ],
+      "summary": [
+        {
+          "variant": "keelflow",
+          "workers": 1,
+          "n": 1,
+          "mean_s": 28.294820457696915,
+          "median_s": 28.294820457696915,
+          "min_s": 28.294820457696915,
+          "max_s": 28.294820457696915,
+          "rows_s_mean": 3534.2157462885557
+        },
+        {
+          "variant": "keelflow",
+          "workers": 4,
+          "n": 1,
+          "mean_s": 29.51048008305952,
+          "median_s": 29.51048008305952,
+          "min_s": 29.51048008305952,
+          "max_s": 29.51048008305952,
+          "rows_s_mean": 3388.626674948774
+        },
+        {
+          "variant": "keelflow",
+          "workers": 8,
+          "n": 1,
+          "mean_s": 28.310352792032063,
+          "median_s": 28.310352792032063,
+          "min_s": 28.310352792032063,
+          "max_s": 28.310352792032063,
+          "rows_s_mean": 3532.2767163871217
+        },
+        {
+          "variant": "sql",
+          "workers": 0,
+          "n": 1,
+          "mean_s": 0.6378543749451637,
+          "median_s": 0.6378543749451637,
+          "min_s": 0.6378543749451637,
+          "max_s": 0.6378543749451637,
+          "rows_s_mean": 156775.59632415627
+        }
+      ]
+    }
+  ]
+}

@@ -1,0 +1,1005 @@
+{
+  "env": {
+    "host": "Darwin/arm64",
+    "python": "3.12.13",
+    "time": "2026-11-21T16:27:04.812363+00:00",
+    "postgres": {
+      "server_version": "16.16",
+      "max_connections": "100",
+      "shared_buffers": "128MB",
+      "work_mem": "4MB",
+      "synchronous_commit": "on"
+    },
+    "git": {
+      "rev": "cbb7f4f",
+      "dirty": true
+    },
+    "keelflow_version": "0.1.0a1"
+  },
+  "config": {
+    "invocation_id": "f4bdc910-fe6f-49d4-90fa-b20da541c138",
+    "sizes": [
+      100000,
+      500000
+    ],
+    "reps": 3,
+    "workers": [
+      1,
+      4,
+      8
+    ],
+    "chunk": 1000,
+    "row_disposition": "archive",
+    "seed": 42,
+    "kernel_prefix": "keelflow_bench_"
+  },
+  "sizes": [
+    {
+      "size": 100000,
+      "batch_id": "82f680c9-31bc-4e2f-a3bc-787fc92f8d78",
+      "stage_s": 0.6465567499399185,
+      "expected_errors": 8019,
+      "runs": [
+        {
+          "variant": "keelflow-row",
+          "workers": 1,
+          "rep": 0,
+          "process_s": 84.71974920900539,
+          "rows_s": 1180.362323232307,
+          "errors": 8019,
+          "status": "done",
+          "correct": true,
+          "phases": {
+            "enqueue_s": 0.003970500081777573,
+            "process_s": 84.71974920900539,
+            "parent_queue_s": 0.002719334326684475,
+            "parent_stage_s": 1.5783668751828372,
+            "parent_partition_s": 1.6754831252619624,
+            "callback_s": 12.591462600044906,
+            "callback_calls": 100000
+          },
+          "diagnostics": []
+        },
+        {
+          "variant": "keelflow-row",
+          "workers": 4,
+          "rep": 0,
+          "process_s": 35.82602691696957,
+          "rows_s": 2791.266813698323,
+          "errors": 8019,
+          "status": "done",
+          "correct": true,
+          "phases": {
+            "enqueue_s": 0.0023626666516065598,
+            "process_s": 35.82602691696957,
+            "parent_queue_s": 0.0020744167268276215,
+            "parent_stage_s": 1.539032416883856,
+            "parent_partition_s": 1.894389749970287,
+            "callback_s": 18.71198015846312,
+            "callback_calls": 100000
+          },
+          "diagnostics": []
+        },
+        {
+          "variant": "keelflow-row",
+          "workers": 8,
+          "rep": 0,
+          "process_s": 29.546366000082344,
+          "rows_s": 3384.510975045842,
+          "errors": 8019,
+          "status": "done",
+          "correct": true,
+          "phases": {
+            "enqueue_s": 0.0020414162427186966,
+            "process_s": 29.546366000082344,
+            "parent_queue_s": 0.002037458121776581,
+            "parent_stage_s": 1.5969096668995917,
+            "parent_partition_s": 2.219653000123799,
+            "callback_s": 29.213229379616678,
+            "callback_calls": 100000
+          },
+          "diagnostics": []
+        },
+        {
+          "variant": "keelflow-batch",
+          "workers": 1,
+          "rep": 0,
+          "process_s": 14.251495332922786,
+          "rows_s": 7016.807546432488,
+          "errors": 8019,
+          "status": "done",
+          "correct": true,
+          "phases": {
+            "enqueue_s": 0.0016906657256186008,
+            "process_s": 14.251495332922786,
+            "parent_queue_s": 0.002593332901597023,
+            "parent_stage_s": 1.627030042000115,
+            "parent_partition_s": 1.8546114577911794,
+            "callback_s": 1.0392011664807796,
+            "callback_calls": 100
+          },
+          "diagnostics": []
+        },
+        {
+          "variant": "keelflow-batch",
+          "workers": 4,
+          "rep": 0,
+          "process_s": 6.981270957738161,
+          "rows_s": 14324.039362654772,
+          "errors": 8019,
+          "status": "done",
+          "correct": true,
+          "phases": {
+            "enqueue_s": 0.002077625133097172,
+            "process_s": 6.981270957738161,
+            "parent_queue_s": 0.002204416785389185,
+            "parent_stage_s": 1.5857526659965515,
+            "parent_partition_s": 1.7737129162997007,
+            "callback_s": 1.2703966312110424,
+            "callback_calls": 100
+          },
+          "diagnostics": []
+        },
+        {
+          "variant": "keelflow-batch",
+          "workers": 8,
+          "rep": 0,
+          "process_s": 6.363213791046292,
+          "rows_s": 15715.329279162437,
+          "errors": 8019,
+          "status": "done",
+          "correct": true,
+          "phases": {
+            "enqueue_s": 0.0028293333016335964,
+            "process_s": 6.363213791046292,
+            "parent_queue_s": 0.006693750154227018,
+            "parent_stage_s": 1.5812506661750376,
+            "parent_partition_s": 1.8656870000995696,
+            "callback_s": 1.4137092982418835,
+            "callback_calls": 100
+          },
+          "diagnostics": []
+        },
+        {
+          "variant": "sql",
+          "workers": 0,
+          "rep": 0,
+          "process_s": 0.616193332709372,
+          "rows_s": 162286.72835570108,
+          "errors": 8019,
+          "status": "done",
+          "correct": true,
+          "phases": {
+            "process_s": 0.616193332709372
+          },
+          "diagnostics": []
+        },
+        {
+          "variant": "sql",
+          "workers": 0,
+          "rep": 1,
+          "process_s": 0.6884779580868781,
+          "rows_s": 145247.9325233258,
+          "errors": 8019,
+          "status": "done",
+          "correct": true,
+          "phases": {
+            "process_s": 0.6884779580868781
+          },
+          "diagnostics": []
+        },
+        {
+          "variant": "keelflow-batch",
+          "workers": 8,
+          "rep": 1,
+          "process_s": 6.401417917106301,
+          "rows_s": 15621.539055085477,
+          "errors": 8019,
+          "status": "done",
+          "correct": true,
+          "phases": {
+            "enqueue_s": 0.0016335421241819859,
+            "process_s": 6.401417917106301,
+            "parent_queue_s": 0.0025012092664837837,
+            "parent_stage_s": 1.5590752912685275,
+            "parent_partition_s": 1.806125917006284,
+            "callback_s": 1.418861836194992,
+            "callback_calls": 100
+          },
+          "diagnostics": []
+        },
+        {
+          "variant": "keelflow-batch",
+          "workers": 4,
+          "rep": 1,
+          "process_s": 6.722018083091825,
+          "rows_s": 14876.484824034349,
+          "errors": 8019,
+          "status": "done",
+          "correct": true,
+          "phases": {
+            "enqueue_s": 0.0018729581497609615,
+            "process_s": 6.722018083091825,
+            "parent_queue_s": 0.002541415859013796,
+            "parent_stage_s": 1.6277082087472081,
+            "parent_partition_s": 1.8457233337685466,
+            "callback_s": 1.2422139993868768,
+            "callback_calls": 100
+          },
+          "diagnostics": []
+        },
+        {
+          "variant": "keelflow-batch",
+          "workers": 1,
+          "rep": 1,
+          "process_s": 14.266312374733388,
+          "rows_s": 7009.519865631627,
+          "errors": 8019,
+          "status": "done",
+          "correct": true,
+          "phases": {
+            "enqueue_s": 0.0016025002114474773,
+            "process_s": 14.266312374733388,
+            "parent_queue_s": 0.00267783273011446,
+            "parent_stage_s": 1.622008458711207,
+            "parent_partition_s": 1.7655950831249356,
+            "callback_s": 1.039054619614035,
+            "callback_calls": 100
+          },
+          "diagnostics": []
+        },
+        {
+          "variant": "keelflow-row",
+          "workers": 8,
+          "rep": 1,
+          "process_s": 29.801824958063662,
+          "rows_s": 3355.499206532397,
+          "errors": 8019,
+          "status": "done",
+          "correct": true,
+          "phases": {
+            "enqueue_s": 0.0017961249686777592,
+            "process_s": 29.801824958063662,
+            "parent_queue_s": 0.0021867919713258743,
+            "parent_stage_s": 1.583608416840434,
+            "parent_partition_s": 1.754594708327204,
+            "callback_s": 30.14013408916071,
+            "callback_calls": 100000
+          },
+          "diagnostics": []
+        },
+        {
+          "variant": "keelflow-row",
+          "workers": 4,
+          "rep": 1,
+          "process_s": 37.00840108282864,
+          "rows_s": 2702.0891763518675,
+          "errors": 8019,
+          "status": "done",
+          "correct": true,
+          "phases": {
+            "enqueue_s": 0.0021098749712109566,
+            "process_s": 37.00840108282864,
+            "parent_queue_s": 0.003032625187188387,
+            "parent_stage_s": 1.6208257502876222,
+            "parent_partition_s": 1.7884624167345464,
+            "callback_s": 19.400190896354616,
+            "callback_calls": 100000
+          },
+          "diagnostics": []
+        },
+        {
+          "variant": "keelflow-row",
+          "workers": 1,
+          "rep": 1,
+          "process_s": 84.18118945788592,
+          "rows_s": 1187.913839706766,
+          "errors": 8019,
+          "status": "done",
+          "correct": true,
+          "phases": {
+            "enqueue_s": 0.0024512498639523983,
+            "process_s": 84.18118945788592,
+            "parent_queue_s": 0.00034570787101984024,
+            "parent_stage_s": 1.7309692497365177,
+            "parent_partition_s": 1.9857304580509663,
+            "callback_s": 12.340321542695165,
+            "callback_calls": 100000
+          },
+          "diagnostics": []
+        },
+        {
+          "variant": "keelflow-row",
+          "workers": 1,
+          "rep": 2,
+          "process_s": 84.1819754592143,
+          "rows_s": 1187.9027482367583,
+          "errors": 8019,
+          "status": "done",
+          "correct": true,
+          "phases": {
+            "enqueue_s": 0.002498249989002943,
+            "process_s": 84.1819754592143,
+            "parent_queue_s": 0.002479792106896639,
+            "parent_stage_s": 1.59038779232651,
+            "parent_partition_s": 1.7537130829878151,
+            "callback_s": 12.460413044784218,
+            "callback_calls": 100000
+          },
+          "diagnostics": []
+        },
+        {
+          "variant": "keelflow-row",
+          "workers": 4,
+          "rep": 2,
+          "process_s": 35.83269654074684,
+          "rows_s": 2790.7472686652504,
+          "errors": 8019,
+          "status": "done",
+          "correct": true,
+          "phases": {
+            "enqueue_s": 0.0016392911784350872,
+            "process_s": 35.83269654074684,
+            "parent_queue_s": 0.001829375047236681,
+            "parent_stage_s": 1.6422751657664776,
+            "parent_partition_s": 1.952234041877091,
+            "callback_s": 18.74417983321473,
+            "callback_calls": 100000
+          },
+          "diagnostics": []
+        },
+        {
+          "variant": "keelflow-row",
+          "workers": 8,
+          "rep": 2,
+          "process_s": 28.627361833117902,
+          "rows_s": 3493.161562806455,
+          "errors": 8019,
+          "status": "done",
+          "correct": true,
+          "phases": {
+            "enqueue_s": 0.001576999668031931,
+            "process_s": 28.627361833117902,
+            "parent_queue_s": 0.0032748328521847725,
+            "parent_stage_s": 1.595930750016123,
+            "parent_partition_s": 1.7956776660867035,
+            "callback_s": 29.31694879150018,
+            "callback_calls": 100000
+          },
+          "diagnostics": []
+        },
+        {
+          "variant": "keelflow-batch",
+          "workers": 1,
+          "rep": 2,
+          "process_s": 9.370379542000592,
+          "rows_s": 10671.926313312368,
+          "errors": 8019,
+          "status": "done",
+          "correct": true,
+          "phases": {
+            "enqueue_s": 0.001683874987065792,
+            "process_s": 9.370379542000592,
+            "parent_queue_s": 0.0032632919028401375,
+            "parent_stage_s": 1.6710829166695476,
+            "parent_partition_s": 1.7939425837248564,
+            "callback_s": 1.0617795432917774,
+            "callback_calls": 100
+          },
+          "diagnostics": []
+        },
+        {
+          "variant": "keelflow-batch",
+          "workers": 4,
+          "rep": 2,
+          "process_s": 6.665089583024383,
+          "rows_s": 15003.549277821337,
+          "errors": 8019,
+          "status": "done",
+          "correct": true,
+          "phases": {
+            "enqueue_s": 0.0012950417585670948,
+            "process_s": 6.665089583024383,
+            "parent_queue_s": 0.0027537080459296703,
+            "parent_stage_s": 1.5992667921818793,
+            "parent_partition_s": 1.85060141608119,
+            "callback_s": 1.2322725397534668,
+            "callback_calls": 100
+          },
+          "diagnostics": []
+        },
+        {
+          "variant": "keelflow-batch",
+          "workers": 8,
+          "rep": 2,
+          "process_s": 6.68409666698426,
+          "rows_s": 14960.884766066398,
+          "errors": 8019,
+          "status": "done",
+          "correct": true,
+          "phases": {
+            "enqueue_s": 0.0014278749004006386,
+            "process_s": 6.68409666698426,
+            "parent_queue_s": 0.0036865421570837498,
+            "parent_stage_s": 1.5607562502846122,
+            "parent_partition_s": 1.734973959159106,
+            "callback_s": 1.6191332545131445,
+            "callback_calls": 100
+          },
+          "diagnostics": []
+        },
+        {
+          "variant": "sql",
+          "workers": 0,
+          "rep": 2,
+          "process_s": 0.695942749734968,
+          "rows_s": 143689.98030094063,
+          "errors": 8019,
+          "status": "done",
+          "correct": true,
+          "phases": {
+            "process_s": 0.695942749734968
+          },
+          "diagnostics": []
+        }
+      ],
+      "summary": [
+        {
+          "variant": "keelflow-batch",
+          "workers": 1,
+          "n": 3,
+          "mean_s": 12.629395749885589,
+          "median_s": 14.251495332922786,
+          "min_s": 9.370379542000592,
+          "max_s": 14.266312374733388,
+          "rows_s_mean": 7918.035191897911
+        },
+        {
+          "variant": "keelflow-batch",
+          "workers": 4,
+          "n": 3,
+          "mean_s": 6.789459541284789,
+          "median_s": 6.722018083091825,
+          "min_s": 6.665089583024383,
+          "max_s": 6.981270957738161,
+          "rows_s_mean": 14728.712851432163
+        },
+        {
+          "variant": "keelflow-batch",
+          "workers": 8,
+          "n": 3,
+          "mean_s": 6.482909458378951,
+          "median_s": 6.401417917106301,
+          "min_s": 6.363213791046292,
+          "max_s": 6.68409666698426,
+          "rows_s_mean": 15425.173009435328
+        },
+        {
+          "variant": "keelflow-row",
+          "workers": 1,
+          "n": 3,
+          "mean_s": 84.36097137536854,
+          "median_s": 84.1819754592143,
+          "min_s": 84.18118945788592,
+          "max_s": 84.71974920900539,
+          "rows_s_mean": 1185.3822729831404
+        },
+        {
+          "variant": "keelflow-row",
+          "workers": 4,
+          "n": 3,
+          "mean_s": 36.222374846848346,
+          "median_s": 35.83269654074684,
+          "min_s": 35.82602691696957,
+          "max_s": 37.00840108282864,
+          "rows_s_mean": 2760.7245638313207
+        },
+        {
+          "variant": "keelflow-row",
+          "workers": 8,
+          "n": 3,
+          "mean_s": 29.325184263754636,
+          "median_s": 29.546366000082344,
+          "min_s": 28.627361833117902,
+          "max_s": 29.801824958063662,
+          "rows_s_mean": 3410.0382490553716
+        },
+        {
+          "variant": "sql",
+          "workers": 0,
+          "n": 3,
+          "mean_s": 0.6668713468437394,
+          "median_s": 0.6884779580868781,
+          "min_s": 0.616193332709372,
+          "max_s": 0.695942749734968,
+          "rows_s_mean": 149953.96109503545
+        }
+      ],
+      "n_invalid_runs": 0
+    },
+    {
+      "size": 500000,
+      "batch_id": "d974f7c5-a400-4e5e-997f-57dcf3702e99",
+      "stage_s": 3.3533154586330056,
+      "expected_errors": 40283,
+      "runs": [
+        {
+          "variant": "keelflow-row",
+          "workers": 1,
+          "rep": 0,
+          "process_s": 417.8515847912058,
+          "rows_s": 1196.597112943445,
+          "errors": 40283,
+          "status": "done",
+          "correct": true,
+          "phases": {
+            "enqueue_s": 0.0018459171988070011,
+            "process_s": 417.8515847912058,
+            "parent_queue_s": 0.003959833178669214,
+            "parent_stage_s": 8.069143292028457,
+            "parent_partition_s": 9.37386691570282,
+            "callback_s": 61.61621109675616,
+            "callback_calls": 500000
+          },
+          "diagnostics": []
+        },
+        {
+          "variant": "keelflow-row",
+          "workers": 4,
+          "rep": 0,
+          "process_s": 182.84755750000477,
+          "rows_s": 2734.518343237847,
+          "errors": 40283,
+          "status": "done",
+          "correct": true,
+          "phases": {
+            "enqueue_s": 0.0024102497845888138,
+            "process_s": 182.84755750000477,
+            "parent_queue_s": 0.003500124905258417,
+            "parent_stage_s": 8.322315792087466,
+            "parent_partition_s": 9.81579833291471,
+            "callback_s": 98.60879685543478,
+            "callback_calls": 500000
+          },
+          "diagnostics": []
+        },
+        {
+          "variant": "keelflow-row",
+          "workers": 8,
+          "rep": 0,
+          "process_s": 145.09475004207343,
+          "rows_s": 3446.024062586785,
+          "errors": 40283,
+          "status": "done",
+          "correct": true,
+          "phases": {
+            "enqueue_s": 0.002818749751895666,
+            "process_s": 145.09475004207343,
+            "parent_queue_s": 0.007264833897352219,
+            "parent_stage_s": 7.9236070001497865,
+            "parent_partition_s": 9.29464733414352,
+            "callback_s": 151.53052463708445,
+            "callback_calls": 500000
+          },
+          "diagnostics": []
+        },
+        {
+          "variant": "keelflow-batch",
+          "workers": 1,
+          "rep": 0,
+          "process_s": 45.98093495797366,
+          "rows_s": 10874.072057408086,
+          "errors": 40283,
+          "status": "done",
+          "correct": true,
+          "phases": {
+            "enqueue_s": 0.0027153328992426395,
+            "process_s": 45.98093495797366,
+            "parent_queue_s": 0.005451582837849855,
+            "parent_stage_s": 7.877970250323415,
+            "parent_partition_s": 9.250810250174254,
+            "callback_s": 5.410739991348237,
+            "callback_calls": 500
+          },
+          "diagnostics": []
+        },
+        {
+          "variant": "keelflow-batch",
+          "workers": 4,
+          "rep": 0,
+          "process_s": 34.135256291832775,
+          "rows_s": 14647.612302229303,
+          "errors": 40283,
+          "status": "done",
+          "correct": true,
+          "phases": {
+            "enqueue_s": 0.0020907497964799404,
+            "process_s": 34.135256291832775,
+            "parent_queue_s": 0.0033691669814288616,
+            "parent_stage_s": 8.08495600009337,
+            "parent_partition_s": 9.692999333143234,
+            "callback_s": 6.191196004394442,
+            "callback_calls": 500
+          },
+          "diagnostics": []
+        },
+        {
+          "variant": "keelflow-batch",
+          "workers": 8,
+          "rep": 0,
+          "process_s": 32.98662183387205,
+          "rows_s": 15157.660051341752,
+          "errors": 40283,
+          "status": "done",
+          "correct": true,
+          "phases": {
+            "enqueue_s": 0.003324500285089016,
+            "process_s": 32.98662183387205,
+            "parent_queue_s": 0.006138500291854143,
+            "parent_stage_s": 8.324325708206743,
+            "parent_partition_s": 9.227504125330597,
+            "callback_s": 7.318845166359097,
+            "callback_calls": 500
+          },
+          "diagnostics": []
+        },
+        {
+          "variant": "sql",
+          "workers": 0,
+          "rep": 0,
+          "process_s": 3.3549323747865856,
+          "rows_s": 149034.30058908596,
+          "errors": 40283,
+          "status": "done",
+          "correct": true,
+          "phases": {
+            "process_s": 3.3549323747865856
+          },
+          "diagnostics": []
+        },
+        {
+          "variant": "sql",
+          "workers": 0,
+          "rep": 1,
+          "process_s": 3.140752541832626,
+          "rows_s": 159197.51503512292,
+          "errors": 40283,
+          "status": "done",
+          "correct": true,
+          "phases": {
+            "process_s": 3.140752541832626
+          },
+          "diagnostics": []
+        },
+        {
+          "variant": "keelflow-batch",
+          "workers": 8,
+          "rep": 1,
+          "process_s": 33.49697883287445,
+          "rows_s": 14926.719286973199,
+          "errors": 40283,
+          "status": "done",
+          "correct": true,
+          "phases": {
+            "enqueue_s": 0.00226620864123106,
+            "process_s": 33.49697883287445,
+            "parent_queue_s": 0.004068582784384489,
+            "parent_stage_s": 8.26270162500441,
+            "parent_partition_s": 9.393611792009324,
+            "callback_s": 7.465844818390906,
+            "callback_calls": 500
+          },
+          "diagnostics": []
+        },
+        {
+          "variant": "keelflow-batch",
+          "workers": 4,
+          "rep": 1,
+          "process_s": 39.2939712498337,
+          "rows_s": 12724.598305958094,
+          "errors": 40283,
+          "status": "done",
+          "correct": true,
+          "phases": {
+            "enqueue_s": 0.004608375020325184,
+            "process_s": 39.2939712498337,
+            "parent_queue_s": 0.033605583012104034,
+            "parent_stage_s": 8.084999457933009,
+            "parent_partition_s": 9.657497792039067,
+            "callback_s": 7.590743564069271,
+            "callback_calls": 500
+          },
+          "diagnostics": []
+        },
+        {
+          "variant": "keelflow-batch",
+          "workers": 1,
+          "rep": 1,
+          "process_s": 58.84212329192087,
+          "rows_s": 8497.314033340652,
+          "errors": 40283,
+          "status": "done",
+          "correct": true,
+          "phases": {
+            "enqueue_s": 0.0029857922345399857,
+            "process_s": 58.84212329192087,
+            "parent_queue_s": 0.004238917026668787,
+            "parent_stage_s": 8.28881200030446,
+            "parent_partition_s": 9.5619413331151,
+            "callback_s": 5.370717125013471,
+            "callback_calls": 500
+          },
+          "diagnostics": []
+        },
+        {
+          "variant": "keelflow-row",
+          "workers": 8,
+          "rep": 1,
+          "process_s": 146.47675050003454,
+          "rows_s": 3413.5110063073257,
+          "errors": 40283,
+          "status": "done",
+          "correct": true,
+          "phases": {
+            "enqueue_s": 0.001998750027269125,
+            "process_s": 146.47675050003454,
+            "parent_queue_s": 0.00342579185962677,
+            "parent_stage_s": 8.515857166610658,
+            "parent_partition_s": 9.097385792061687,
+            "callback_s": 150.5032482482493,
+            "callback_calls": 500000
+          },
+          "diagnostics": []
+        },
+        {
+          "variant": "keelflow-row",
+          "workers": 4,
+          "rep": 1,
+          "process_s": 175.5998857920058,
+          "rows_s": 2847.3822619237862,
+          "errors": 40283,
+          "status": "done",
+          "correct": true,
+          "phases": {
+            "enqueue_s": 0.003258374985307455,
+            "process_s": 175.5998857920058,
+            "parent_queue_s": 0.003147583920508623,
+            "parent_stage_s": 8.20716108288616,
+            "parent_partition_s": 9.413246500305831,
+            "callback_s": 94.16513035213575,
+            "callback_calls": 500000
+          },
+          "diagnostics": []
+        },
+        {
+          "variant": "keelflow-row",
+          "workers": 1,
+          "rep": 1,
+          "process_s": 419.0115615003742,
+          "rows_s": 1193.2844960402208,
+          "errors": 40283,
+          "status": "done",
+          "correct": true,
+          "phases": {
+            "enqueue_s": 0.0027157915756106377,
+            "process_s": 419.0115615003742,
+            "parent_queue_s": 0.007092708256095648,
+            "parent_stage_s": 8.071694375015795,
+            "parent_partition_s": 9.570892166811973,
+            "callback_s": 61.53390371007845,
+            "callback_calls": 500000
+          },
+          "diagnostics": []
+        },
+        {
+          "variant": "keelflow-row",
+          "workers": 1,
+          "rep": 2,
+          "process_s": 415.81837883312255,
+          "rows_s": 1202.4480529290445,
+          "errors": 40283,
+          "status": "done",
+          "correct": true,
+          "phases": {
+            "enqueue_s": 0.009990625083446503,
+            "process_s": 415.81837883312255,
+            "parent_queue_s": 0.0040703751146793365,
+            "parent_stage_s": 8.051962541881949,
+            "parent_partition_s": 9.550235541071743,
+            "callback_s": 61.317110198549926,
+            "callback_calls": 500000
+          },
+          "diagnostics": []
+        },
+        {
+          "variant": "keelflow-row",
+          "workers": 4,
+          "rep": 2,
+          "process_s": 176.85016479203478,
+          "rows_s": 2827.2521011669405,
+          "errors": 40283,
+          "status": "done",
+          "correct": true,
+          "phases": {
+            "enqueue_s": 0.0501530421897769,
+            "process_s": 176.85016479203478,
+            "parent_queue_s": 0.0004949169233441353,
+            "parent_stage_s": 7.90450383303687,
+            "parent_partition_s": 9.306557458359748,
+            "callback_s": 94.66519306227565,
+            "callback_calls": 500000
+          },
+          "diagnostics": []
+        },
+        {
+          "variant": "keelflow-row",
+          "workers": 8,
+          "rep": 2,
+          "process_s": 146.15826829196885,
+          "rows_s": 3420.949124829458,
+          "errors": 40283,
+          "status": "done",
+          "correct": true,
+          "phases": {
+            "enqueue_s": 0.010948749724775553,
+            "process_s": 146.15826829196885,
+            "parent_queue_s": 0.0033965827897191048,
+            "parent_stage_s": 7.943102665711194,
+            "parent_partition_s": 9.69342300016433,
+            "callback_s": 151.58347857370973,
+            "callback_calls": 500000
+          },
+          "diagnostics": []
+        },
+        {
+          "variant": "keelflow-batch",
+          "workers": 1,
+          "rep": 2,
+          "process_s": 47.305857207626104,
+          "rows_s": 10569.515690319122,
+          "errors": 40283,
+          "status": "done",
+          "correct": true,
+          "phases": {
+            "enqueue_s": 0.005438374821096659,
+            "process_s": 47.305857207626104,
+            "parent_queue_s": 0.0038365828804671764,
+            "parent_stage_s": 7.882008249871433,
+            "parent_partition_s": 9.804269375279546,
+            "callback_s": 5.228917453438044,
+            "callback_calls": 500
+          },
+          "diagnostics": []
+        },
+        {
+          "variant": "keelflow-batch",
+          "workers": 4,
+          "rep": 2,
+          "process_s": 35.985389582812786,
+          "rows_s": 13894.52791248391,
+          "errors": 40283,
+          "status": "done",
+          "correct": true,
+          "phases": {
+            "enqueue_s": 0.005518291145563126,
+            "process_s": 35.985389582812786,
+            "parent_queue_s": 0.003265165723860264,
+            "parent_stage_s": 8.398336417041719,
+            "parent_partition_s": 9.433243707753718,
+            "callback_s": 6.424097133334726,
+            "callback_calls": 500
+          },
+          "diagnostics": []
+        },
+        {
+          "variant": "keelflow-batch",
+          "workers": 8,
+          "rep": 2,
+          "process_s": 50.079504875000566,
+          "rows_s": 9984.124268960124,
+          "errors": 40283,
+          "status": "done",
+          "correct": true,
+          "phases": {
+            "enqueue_s": 0.004600999876856804,
+            "process_s": 50.079504875000566,
+            "parent_queue_s": 0.0031933332793414593,
+            "parent_stage_s": 8.167077084071934,
+            "parent_partition_s": 9.825505374930799,
+            "callback_s": 15.783932781778276,
+            "callback_calls": 500
+          },
+          "diagnostics": []
+        },
+        {
+          "variant": "sql",
+          "workers": 0,
+          "rep": 2,
+          "process_s": 3.1315549998544157,
+          "rows_s": 159665.08652194988,
+          "errors": 40283,
+          "status": "done",
+          "correct": true,
+          "phases": {
+            "process_s": 3.1315549998544157
+          },
+          "diagnostics": []
+        }
+      ],
+      "summary": [
+        {
+          "variant": "keelflow-batch",
+          "workers": 1,
+          "n": 3,
+          "mean_s": 50.70963848584021,
+          "median_s": 47.305857207626104,
+          "min_s": 45.98093495797366,
+          "max_s": 58.84212329192087,
+          "rows_s_mean": 9860.058460870636
+        },
+        {
+          "variant": "keelflow-batch",
+          "workers": 4,
+          "n": 3,
+          "mean_s": 36.47153904149309,
+          "median_s": 35.985389582812786,
+          "min_s": 34.135256291832775,
+          "max_s": 39.2939712498337,
+          "rows_s_mean": 13709.320010629603
+        },
+        {
+          "variant": "keelflow-batch",
+          "workers": 8,
+          "n": 3,
+          "mean_s": 38.85436851391569,
+          "median_s": 33.49697883287445,
+          "min_s": 32.98662183387205,
+          "max_s": 50.079504875000566,
+          "rows_s_mean": 12868.565855623803
+        },
+        {
+          "variant": "keelflow-row",
+          "workers": 1,
+          "n": 3,
+          "mean_s": 417.56050837490085,
+          "median_s": 417.8515847912058,
+          "min_s": 415.81837883312255,
+          "max_s": 419.0115615003742,
+          "rows_s_mean": 1197.4312464220923
+        },
+        {
+          "variant": "keelflow-row",
+          "workers": 4,
+          "n": 3,
+          "mean_s": 178.4325360280151,
+          "median_s": 176.85016479203478,
+          "min_s": 175.5998857920058,
+          "max_s": 182.84755750000477,
+          "rows_s_mean": 2802.179530315573
+        },
+        {
+          "variant": "keelflow-row",
+          "workers": 8,
+          "n": 3,
+          "mean_s": 145.90992294469228,
+          "median_s": 146.15826829196885,
+          "min_s": 145.09475004207343,
+          "max_s": 146.47675050003454,
+          "rows_s_mean": 3426.771736350837
+        },
+        {
+          "variant": "sql",
+          "workers": 0,
+          "n": 3,
+          "mean_s": 3.2090799721578755,
+          "median_s": 3.140752541832626,
+          "min_s": 3.1315549998544157,
+          "max_s": 3.3549323747865856,
+          "rows_s_mean": 155807.8964494568
+        }
+      ],
+      "n_invalid_runs": 0
+    }
+  ],
+  "all_correct": true
+}

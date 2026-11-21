@@ -1,0 +1,341 @@
+{
+  "env": {
+    "host": "Darwin/arm64",
+    "python": "3.12.13",
+    "time": "2026-11-21T13:05:17.841228+00:00"
+  },
+  "sizes": [
+    {
+      "size": 500000,
+      "batch_id": "11407a35-5dd1-446b-a3a6-2f47f309b5ea",
+      "stage_s": 3.1800399580970407,
+      "expected_errors": 40283,
+      "runs": [
+        {
+          "variant": "keelflow-row",
+          "workers": 1,
+          "rep": 0,
+          "process_s": 414.8978191250935,
+          "rows_s": 1205.1159995354128,
+          "errors": 40283,
+          "status": "done",
+          "correct": true,
+          "n_products": 459717,
+          "n_errors": 0
+        },
+        {
+          "variant": "keelflow-row",
+          "workers": 4,
+          "rep": 0,
+          "process_s": 175.99051579181105,
+          "rows_s": 2841.062188779978,
+          "errors": 40283,
+          "status": "done",
+          "correct": true,
+          "n_products": 459717,
+          "n_errors": 0
+        },
+        {
+          "variant": "keelflow-row",
+          "workers": 8,
+          "rep": 0,
+          "process_s": 144.88690120913088,
+          "rows_s": 3450.967588010569,
+          "errors": 40283,
+          "status": "done",
+          "correct": true,
+          "n_products": 459717,
+          "n_errors": 0
+        },
+        {
+          "variant": "keelflow-batch",
+          "workers": 1,
+          "rep": 0,
+          "process_s": 45.228627250064164,
+          "rows_s": 11054.945294615163,
+          "errors": 40283,
+          "status": "done",
+          "correct": true,
+          "n_products": 459717,
+          "n_errors": 0
+        },
+        {
+          "variant": "keelflow-batch",
+          "workers": 4,
+          "rep": 0,
+          "process_s": 35.72126733325422,
+          "rows_s": 13997.263740262988,
+          "errors": 40283,
+          "status": "done",
+          "correct": true,
+          "n_products": 459717,
+          "n_errors": 0
+        },
+        {
+          "variant": "keelflow-batch",
+          "workers": 8,
+          "rep": 0,
+          "process_s": 33.6933668339625,
+          "rows_s": 14839.716151370369,
+          "errors": 40283,
+          "status": "done",
+          "correct": true,
+          "n_products": 459717,
+          "n_errors": 0
+        },
+        {
+          "variant": "sql",
+          "workers": 0,
+          "rep": 0,
+          "process_s": 3.326187875121832,
+          "rows_s": 150322.23637748844,
+          "errors": 40283,
+          "status": "done",
+          "correct": true,
+          "n_products": 459717,
+          "n_errors": 40283
+        },
+        {
+          "variant": "sql",
+          "workers": 0,
+          "rep": 1,
+          "process_s": 3.2209931248798966,
+          "rows_s": 155231.6259658716,
+          "errors": 40283,
+          "status": "done",
+          "correct": true,
+          "n_products": 459717,
+          "n_errors": 40283
+        },
+        {
+          "variant": "keelflow-batch",
+          "workers": 8,
+          "rep": 1,
+          "process_s": 34.02426500013098,
+          "rows_s": 14695.394595535721,
+          "errors": 40283,
+          "status": "done",
+          "correct": true,
+          "n_products": 459717,
+          "n_errors": 0
+        },
+        {
+          "variant": "keelflow-batch",
+          "workers": 4,
+          "rep": 1,
+          "process_s": 35.45691549964249,
+          "rows_s": 14101.621445470671,
+          "errors": 40283,
+          "status": "done",
+          "correct": true,
+          "n_products": 459717,
+          "n_errors": 0
+        },
+        {
+          "variant": "keelflow-batch",
+          "workers": 1,
+          "rep": 1,
+          "process_s": 49.5242742090486,
+          "rows_s": 10096.059114151436,
+          "errors": 40283,
+          "status": "done",
+          "correct": true,
+          "n_products": 459717,
+          "n_errors": 0
+        },
+        {
+          "variant": "keelflow-row",
+          "workers": 8,
+          "rep": 1,
+          "process_s": 149.8584319590591,
+          "rows_s": 3336.4822617161685,
+          "errors": 40283,
+          "status": "done",
+          "correct": true,
+          "n_products": 459717,
+          "n_errors": 0
+        },
+        {
+          "variant": "keelflow-row",
+          "workers": 4,
+          "rep": 1,
+          "process_s": 181.05677229119465,
+          "rows_s": 2761.5647494027294,
+          "errors": 40283,
+          "status": "done",
+          "correct": true,
+          "n_products": 459717,
+          "n_errors": 0
+        },
+        {
+          "variant": "keelflow-row",
+          "workers": 1,
+          "rep": 1,
+          "process_s": 416.3843111670576,
+          "rows_s": 1200.8137352691824,
+          "errors": 40283,
+          "status": "done",
+          "correct": true,
+          "n_products": 459717,
+          "n_errors": 0
+        },
+        {
+          "variant": "keelflow-row",
+          "workers": 1,
+          "rep": 2,
+          "process_s": 415.80348591692746,
+          "rows_s": 1202.4911212502293,
+          "errors": 40283,
+          "status": "done",
+          "correct": true,
+          "n_products": 459717,
+          "n_errors": 0
+        },
+        {
+          "variant": "keelflow-row",
+          "workers": 4,
+          "rep": 2,
+          "process_s": 181.74469837499782,
+          "rows_s": 2751.111886457007,
+          "errors": 40283,
+          "status": "done",
+          "correct": true,
+          "n_products": 459717,
+          "n_errors": 0
+        },
+        {
+          "variant": "keelflow-row",
+          "workers": 8,
+          "rep": 2,
+          "process_s": 153.51269374974072,
+          "rows_s": 3257.05964625381,
+          "errors": 40283,
+          "status": "done",
+          "correct": true,
+          "n_products": 459717,
+          "n_errors": 0
+        },
+        {
+          "variant": "keelflow-batch",
+          "workers": 1,
+          "rep": 2,
+          "process_s": 49.770298541057855,
+          "rows_s": 10046.15231687884,
+          "errors": 40283,
+          "status": "done",
+          "correct": true,
+          "n_products": 459717,
+          "n_errors": 0
+        },
+        {
+          "variant": "keelflow-batch",
+          "workers": 4,
+          "rep": 2,
+          "process_s": 37.91346308309585,
+          "rows_s": 13187.927436334106,
+          "errors": 40283,
+          "status": "done",
+          "correct": true,
+          "n_products": 459717,
+          "n_errors": 0
+        },
+        {
+          "variant": "keelflow-batch",
+          "workers": 8,
+          "rep": 2,
+          "process_s": 35.786191042046994,
+          "rows_s": 13971.86974753823,
+          "errors": 40283,
+          "status": "done",
+          "correct": true,
+          "n_products": 459717,
+          "n_errors": 0
+        },
+        {
+          "variant": "sql",
+          "workers": 0,
+          "rep": 2,
+          "process_s": 3.280014583375305,
+          "rows_s": 152438.34662633546,
+          "errors": 40283,
+          "status": "done",
+          "correct": true,
+          "n_products": 459717,
+          "n_errors": 40283
+        }
+      ],
+      "summary": [
+        {
+          "variant": "keelflow-batch",
+          "workers": 1,
+          "n": 3,
+          "mean_s": 48.17440000005687,
+          "median_s": 49.5242742090486,
+          "min_s": 45.228627250064164,
+          "max_s": 49.770298541057855,
+          "rows_s_mean": 10378.956458189614
+        },
+        {
+          "variant": "keelflow-batch",
+          "workers": 4,
+          "n": 3,
+          "mean_s": 36.36388197199752,
+          "median_s": 35.72126733325422,
+          "min_s": 35.45691549964249,
+          "max_s": 37.91346308309585,
+          "rows_s_mean": 13749.907129965703
+        },
+        {
+          "variant": "keelflow-batch",
+          "workers": 8,
+          "n": 3,
+          "mean_s": 34.50127429204682,
+          "median_s": 34.02426500013098,
+          "min_s": 33.6933668339625,
+          "max_s": 35.786191042046994,
+          "rows_s_mean": 14492.218338592183
+        },
+        {
+          "variant": "keelflow-row",
+          "workers": 1,
+          "n": 3,
+          "mean_s": 415.6952054030262,
+          "median_s": 415.80348591692746,
+          "min_s": 414.8978191250935,
+          "max_s": 416.3843111670576,
+          "rows_s_mean": 1202.804346793556
+        },
+        {
+          "variant": "keelflow-row",
+          "workers": 4,
+          "n": 3,
+          "mean_s": 179.5973288193345,
+          "median_s": 181.05677229119465,
+          "min_s": 175.99051579181105,
+          "max_s": 181.74469837499782,
+          "rows_s_mean": 2784.0057716168694
+        },
+        {
+          "variant": "keelflow-row",
+          "workers": 8,
+          "n": 3,
+          "mean_s": 149.4193423059769,
+          "median_s": 149.8584319590591,
+          "min_s": 144.88690120913088,
+          "max_s": 153.51269374974072,
+          "rows_s_mean": 3346.2869818829313
+        },
+        {
+          "variant": "sql",
+          "workers": 0,
+          "n": 3,
+          "mean_s": 3.275731861125678,
+          "median_s": 3.280014583375305,
+          "min_s": 3.2209931248798966,
+          "max_s": 3.326187875121832,
+          "rows_s_mean": 152637.64593606853
+        }
+      ]
+    }
+  ]
+}

@@ -1,0 +1,190 @@
+{
+  "env": {
+    "host": "Darwin/arm64",
+    "python": "3.12.13",
+    "time": "2026-11-21T08:38:52.931638+00:00"
+  },
+  "sizes": [
+    {
+      "size": 100000,
+      "batch_id": "42354f4f-90db-4a46-affc-526d69551d28",
+      "stage_s": 0.6400516671128571,
+      "runs": [
+        {
+          "variant": "keelflow",
+          "workers": 1,
+          "rep": 0,
+          "process_s": 28.611903832759708,
+          "rows_s": 3495.0487945336663,
+          "errors": 8019,
+          "status": "done",
+          "n_products": 91981,
+          "n_errors": 0
+        },
+        {
+          "variant": "keelflow",
+          "workers": 4,
+          "rep": 0,
+          "process_s": 29.228122209198773,
+          "rows_s": 3421.3624564813017,
+          "errors": 8019,
+          "status": "done",
+          "n_products": 91981,
+          "n_errors": 0
+        },
+        {
+          "variant": "keelflow",
+          "workers": 8,
+          "rep": 0,
+          "process_s": 28.624154875054955,
+          "rows_s": 3493.552925370273,
+          "errors": 8019,
+          "status": "done",
+          "n_products": 91981,
+          "n_errors": 0
+        },
+        {
+          "variant": "sql",
+          "workers": 0,
+          "rep": 0,
+          "process_s": 0.6952409171499312,
+          "rows_s": 143835.03262428762,
+          "errors": 8019,
+          "status": "done",
+          "n_products": 91981,
+          "n_errors": 8019
+        },
+        {
+          "variant": "sql",
+          "workers": 0,
+          "rep": 1,
+          "process_s": 0.6667892090044916,
+          "rows_s": 149972.43304116878,
+          "errors": 8019,
+          "status": "done",
+          "n_products": 91981,
+          "n_errors": 8019
+        },
+        {
+          "variant": "keelflow",
+          "workers": 8,
+          "rep": 1,
+          "process_s": 28.6191485831514,
+          "rows_s": 3494.164045777091,
+          "errors": 8019,
+          "status": "done",
+          "n_products": 91981,
+          "n_errors": 0
+        },
+        {
+          "variant": "keelflow",
+          "workers": 4,
+          "rep": 1,
+          "process_s": 28.645625417120755,
+          "rows_s": 3490.934428690552,
+          "errors": 8019,
+          "status": "done",
+          "n_products": 91981,
+          "n_errors": 0
+        },
+        {
+          "variant": "keelflow",
+          "workers": 1,
+          "rep": 1,
+          "process_s": 28.895175542216748,
+          "rows_s": 3460.785343002914,
+          "errors": 8019,
+          "status": "done",
+          "n_products": 91981,
+          "n_errors": 0
+        },
+        {
+          "variant": "keelflow",
+          "workers": 1,
+          "rep": 2,
+          "process_s": 28.642301665619016,
+          "rows_s": 3491.3395287654444,
+          "errors": 8019,
+          "status": "done",
+          "n_products": 91981,
+          "n_errors": 0
+        },
+        {
+          "variant": "keelflow",
+          "workers": 4,
+          "rep": 2,
+          "process_s": 29.232073709368706,
+          "rows_s": 3420.899967420053,
+          "errors": 8019,
+          "status": "done",
+          "n_products": 91981,
+          "n_errors": 0
+        },
+        {
+          "variant": "keelflow",
+          "workers": 8,
+          "rep": 2,
+          "process_s": 28.923312708735466,
+          "rows_s": 3457.418623067953,
+          "errors": 8019,
+          "status": "done",
+          "n_products": 91981,
+          "n_errors": 0
+        },
+        {
+          "variant": "sql",
+          "workers": 0,
+          "rep": 2,
+          "process_s": 0.6878778329119086,
+          "rows_s": 145374.65115961406,
+          "errors": 8019,
+          "status": "done",
+          "n_products": 91981,
+          "n_errors": 8019
+        }
+      ],
+      "summary": [
+        {
+          "variant": "keelflow",
+          "workers": 1,
+          "n": 3,
+          "mean_s": 28.71646034686516,
+          "median_s": 28.642301665619016,
+          "min_s": 28.611903832759708,
+          "max_s": 28.895175542216748,
+          "rows_s_mean": 3482.323336236547
+        },
+        {
+          "variant": "keelflow",
+          "workers": 4,
+          "n": 3,
+          "mean_s": 29.035273778562743,
+          "median_s": 29.228122209198773,
+          "min_s": 28.645625417120755,
+          "max_s": 29.232073709368706,
+          "rows_s_mean": 3444.0866913344476
+        },
+        {
+          "variant": "keelflow",
+          "workers": 8,
+          "n": 3,
+          "mean_s": 28.72220538898061,
+          "median_s": 28.624154875054955,
+          "min_s": 28.6191485831514,
+          "max_s": 28.923312708735466,
+          "rows_s_mean": 3481.6267986985918
+        },
+        {
+          "variant": "sql",
+          "workers": 0,
+          "n": 3,
+          "mean_s": 0.6833026530221105,
+          "median_s": 0.6878778329119086,
+          "min_s": 0.6667892090044916,
+          "max_s": 0.6952409171499312,
+          "rows_s_mean": 146348.03415107503
+        }
+      ]
+    }
+  ]
+}
