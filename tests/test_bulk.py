@@ -185,6 +185,70 @@ async def _wait(db, sql, want, timeout=20):
 
 
 @pytest.mark.asyncio
+async def test_partition_exact_membership_and_shape(env, db):
+    """Set-based partition must produce exactly ceil(n/size) chunks,
+    assign each pending row to exactly one chunk honoring chunk_size,
+    and create one engine+kernel job per chunk — same contract as the
+    old per-chunk loop."""
+    for n, size, want_chunks in ((0, 10, 0), (1, 10, 1), (10, 10, 1),
+                                 (11, 10, 2), (25, 10, 3), (7, 3, 3)):
+        keys = [f"k{i}" for i in range(n)]
+        parent = await _enqueue(
+            env, "imp.rows@v1", {"chunk_size": size, "atomic": "row"})
+        await _stage(db, parent, keys)
+
+        w = Worker(env["kernel"], shutdown_timeout=5)
+        await w.start()
+        try:
+            assert await _wait(
+                db,
+                f"SELECT status FROM keelflow_jobs WHERE id='{parent}'",
+                "done") == "done"
+        finally:
+            await w.stop(timeout=5)
+
+        chunks = await (await db.execute(
+            "SELECT id, idx FROM keelflow_chunks WHERE job_id=%s"
+            " ORDER BY idx", (parent,))).fetchall()
+        assert len(chunks) == want_chunks
+        assert [c[1] for c in chunks] == list(range(want_chunks))
+        # every pending row claimed exactly once; counts honor size.
+        # row_disposition=archive moves done rows at fan-in, so
+        # membership = live rows + archived rows per chunk.
+        members = await (await db.execute(
+            "SELECT chunk_id, count(*) FROM keelflow_row_status"
+            " WHERE job_id=%s AND chunk_id IS NOT NULL GROUP BY chunk_id",
+            (parent,))).fetchall()
+        archived = await (await db.execute(
+            "SELECT chunk_id, count(*) FROM keelflow_row_archive"
+            " WHERE job_id=%s GROUP BY chunk_id", (parent,))).fetchall()
+        live = dict(members)
+        for m_chunk, cnt in archived:
+            live[m_chunk] = live.get(m_chunk, 0) + cnt
+        assert set(live) == {c[0] for c in chunks}
+        assert sum(live.values()) == n
+        for i, (cid, _) in enumerate(chunks):
+            want_n = min(size, n - i * size)
+            assert live[cid] == want_n
+        # one engine child job + one kernel job per chunk
+        kids = await (await db.execute(
+            "SELECT count(*) FROM keelflow_jobs"
+            " WHERE parent_job_id=%s", (parent,))).fetchone()
+        assert kids[0] == want_chunks
+        await db.execute(
+            f"DELETE FROM {CHANCY_PREFIX}jobs")
+        await db.execute(
+            "DELETE FROM keelflow_row_status WHERE job_id=%s", (parent,))
+        await db.execute(
+            "DELETE FROM keelflow_row_archive WHERE job_id=%s", (parent,))
+        await db.execute(
+            "DELETE FROM keelflow_chunks WHERE job_id=%s", (parent,))
+        await db.execute(
+            "DELETE FROM keelflow_jobs WHERE id=%s"
+            " OR parent_job_id=%s", (parent, parent))
+
+
+@pytest.mark.asyncio
 async def test_bulk_partitions_and_applies(env, db):
     keys = [f"row-{i}" for i in range(25)]
     parent = await _enqueue(

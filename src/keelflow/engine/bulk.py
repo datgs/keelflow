@@ -130,82 +130,135 @@ class BulkJobHandler(JobHandler):
         cur = (ctx.tx.connection.cursor(row_factory=dict_row)
                if hasattr(ctx.tx, "connection") else ctx.tx)
 
-        # rows staged for this job that are not yet in a chunk
+        size = max(1, payload.chunk_size)
+
+        # Pending count first: chunk ids are generated in Python, so we
+        # need the chunk count up front. Rows inserted concurrently
+        # between this count and the partition statement simply stay
+        # unchunked (same eventual behavior as the previous loop, which
+        # also only saw its snapshot of claimed ids).
         await cur.execute(
-            "SELECT id FROM keelflow_row_status"
-            " WHERE job_id=%s AND status='pending' AND chunk_id IS NULL"
-            " ORDER BY id FOR UPDATE SKIP LOCKED",
+            "SELECT count(*) FROM keelflow_row_status"
+            " WHERE job_id=%s AND status='pending' AND chunk_id IS NULL",
             (job_id,),
         )
-        row_ids = [r["id"] for r in await cur.fetchall()]
-        if not row_ids:
+        n_pending = (await cur.fetchone())["count"]
+        if n_pending == 0:
             return JobResult(status="done", outputs={"chunks": 0})
+        n_chunks = -(-n_pending // size)
+        chunk_ids = [uuid.uuid4() for _ in range(n_chunks)]
 
-        size = max(1, payload.chunk_size)
-        n_chunks = (len(row_ids) + size - 1) // size
+        # Set-based partition — one statement claims the pending,
+        # unchunked rows (same SKIP LOCKED contract as before), numbers
+        # them in id order, inserts the pre-generated chunks, and stamps
+        # each claimed row with its chunk id. The chunk table is passed
+        # via unnest so the row→chunk join can hash (joining through a
+        # data-modifying CTE forces a nested loop — measured ~4x slower).
+        await cur.execute(
+            """
+            WITH claimed AS (
+                SELECT id FROM keelflow_row_status
+                WHERE job_id=%s AND status='pending' AND chunk_id IS NULL
+                ORDER BY id
+                FOR UPDATE SKIP LOCKED
+            ),
+            numbered AS (
+                SELECT id,
+                       (row_number() OVER () - 1) / %s AS ci
+                FROM claimed
+            ),
+            cids(idx, cid) AS (
+                SELECT * FROM unnest(%s::int[], %s::uuid[])
+            ),
+            ins AS (
+                INSERT INTO keelflow_chunks (id, job_id, idx, status)
+                SELECT cid, %s, idx, 'pending' FROM cids
+                RETURNING id
+            ),
+            upd AS (
+                UPDATE keelflow_row_status rs SET chunk_id = c.cid
+                FROM numbered n JOIN cids c ON c.idx = n.ci
+                WHERE rs.id = n.id
+                RETURNING rs.id
+            )
+            SELECT (SELECT count(*) FROM upd) AS n_rows,
+                   (SELECT count(*) FROM ins) AS n_chunks
+            """,
+            (job_id, size, list(range(n_chunks)), chunk_ids, job_id),
+        )
+        part = await cur.fetchone()
+        n_rows = int(part["n_rows"])
+        if int(part["n_chunks"]) != n_chunks:
+            raise RuntimeError(
+                f"partition inserted {part['n_chunks']} chunks,"
+                f" expected {n_chunks}")
+        # Rows claimed but not mapped (ci beyond the chunk list — can
+        # only happen if pending rows appeared between the count and
+        # this statement) remain unchunked; flag loudly rather than
+        # silently dropping them from this pass.
+        if n_rows != n_pending:
+            log.warning(
+                "bulk %s: claimed %d rows but %d were pending at count"
+                " — %d rows stay unchunked for a later pass",
+                job_id, n_rows, n_pending, n_pending - n_rows)
+
+        # Parent invariants, fetched once (were per-chunk before).
+        # Children inherit a cancel request already committed on the
+        # parent — they will be cancelled at claim instead of starting
+        # work for a cancelled parent. Retry budget comes from the
+        # parent job type's registered RetryPolicy — the app tunes
+        # chunk retry behavior on its own bulk type.
+        await cur.execute(
+            "SELECT cancel_requested FROM keelflow_jobs WHERE id=%s",
+            (job_id,),
+        )
+        parent_cancel = (await cur.fetchone())["cancel_requested"]
+        try:
+            parent_spec = _get_registry().job_type(
+                await self._own_type(cur, job_id))
+            chunk_max_attempts = (
+                parent_spec.retry.max_attempts if parent_spec.retry else 3)
+        except KeyError:
+            chunk_max_attempts = 3
+
+        # Build all child jobs in one pass — identical per-job rows,
+        # inserted as one multi-row INSERT via unnest.
         now = datetime.now(UTC)
-
-        for ci in range(n_chunks):
-            chunk_id = uuid.uuid4()
-            ids = row_ids[ci * size : (ci + 1) * size]
-            await cur.execute(
-                "INSERT INTO keelflow_chunks (id, job_id, idx, status)"
-                " VALUES (%s, %s, %s, 'pending')",
-                (chunk_id, job_id, ci),
-            )
-            await cur.execute(
-                "UPDATE keelflow_row_status SET chunk_id=%s WHERE id = ANY(%s)",
-                (chunk_id, ids),
-            )
-            child_id = uuid.uuid4()
+        child_ids = [uuid.uuid4() for _ in chunk_ids]
+        payloads, contexts, kernel_jobs = [], [], []
+        for child_id, chunk_id in zip(child_ids, chunk_ids):
             child_ctx = _child_ctx(ctx, child_id)
             child_payload = ChunkPayload(
                 parent_job_id=job_id, chunk_id=str(chunk_id)
             ).model_dump(mode="json")
-            # Children inherit a cancel request already committed on the
-            # parent — they will be cancelled at claim instead of
-            # starting work for a cancelled parent. Retry budget comes
-            # from the parent job type's registered RetryPolicy — the
-            # app tunes chunk retry behavior on its own bulk type.
-            await cur.execute(
-                "SELECT cancel_requested FROM keelflow_jobs WHERE id=%s",
-                (job_id,),
-            )
-            parent_cancel = (await cur.fetchone())["cancel_requested"]
-            try:
-                parent_spec = _get_registry().job_type(
-                    await self._own_type(cur, job_id))
-                chunk_max_attempts = (
-                    parent_spec.retry.max_attempts
-                    if parent_spec.retry else 3)
-            except KeyError:
-                chunk_max_attempts = 3
-            await cur.execute(
-                """
-                INSERT INTO keelflow_jobs
-                    (id, type, status, payload, context, attempts,
-                     max_attempts, run_at, parent_job_id,
-                     cancel_requested, created_at, updated_at)
-                VALUES (%s,%s,'pending',%s,%s,0,%s,%s,%s,%s,%s,%s)
-                """,
-                (
-                    child_id, CHUNK_TYPE,
-                    json.dumps(child_payload),
-                    json.dumps(_ctx_d(child_ctx)),
-                    chunk_max_attempts, now, job_id, parent_cancel,
-                    now, now,
-                ),
-            )
-            await kernel.push_ex(
-                cur,
-                _kernel_job(child_id, str(chunk_id)),
-            )
+            payloads.append(json.dumps(child_payload))
+            contexts.append(json.dumps(_ctx_d(child_ctx)))
+            kernel_jobs.append(_kernel_job(child_id, str(chunk_id)))
+        await cur.execute(
+            """
+            INSERT INTO keelflow_jobs
+                (id, type, status, payload, context, attempts,
+                 max_attempts, run_at, parent_job_id,
+                 cancel_requested, created_at, updated_at)
+            SELECT j.id, %s, 'pending', j.payload::jsonb,
+                   j.context::jsonb, 0, %s, %s, %s, %s, %s, %s
+            FROM unnest(%s::uuid[], %s::text[], %s::text[])
+                 AS j(id, payload, context)
+            """,
+            (CHUNK_TYPE, chunk_max_attempts, now, job_id,
+             parent_cancel, now, now,
+             child_ids, payloads, contexts),
+        )
+        # push_many_ex still inserts one kernel row per job (Chancy
+        # 0.26), but sends a single queue notification at the end
+        # instead of one per chunk.
+        await kernel.push_many_ex(cur, kernel_jobs)
 
         # parent stays running until fan-in (dispatch honors marker)
         return JobResult(
             status="done",
             outputs={PARENT_HOLD: True, "chunks": n_chunks,
-                     "rows": len(row_ids)},
+                     "rows": n_rows},
         )
 
 

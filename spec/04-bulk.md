@@ -15,6 +15,15 @@ Three levels: parent job → chunks → rows.
    A conforming implementation MUST NOT partition on a connection that
    cannot see the handler's uncommitted rows. Parent stays `running`
    until fan-in.
+
+   Staging guidance (app-owned, not a contract): for large imports,
+   stage rows with one `INSERT … SELECT` (or `COPY`) that builds the
+   `data` JSONB server-side — e.g.
+   `INSERT INTO keelflow_row_status … SELECT job_id, 'row-'||row_no,
+   'pending', jsonb_build_object(…) FROM staging_table` — instead of
+   fetching rows to Python and `executemany`-ing them back. Measured
+   ~2× faster at 1M rows in the bulk_import benchmark; the atomicity
+   contract is unchanged because the statement still runs in `ctx.tx`.
 3. Chunk handler claims chunk, resets stranded `processing` rows to
    `pending` (kill-resume), processes rows via `process_row(ctx, row, tx)`:
    - `atomic='chunk'` (default): all rows in ONE transaction; a failing
@@ -94,6 +103,12 @@ MUST, in the one chunk transaction:
 
 ## Invariants
 
+- Partition claims pending+unchunked rows with
+  `FOR UPDATE SKIP LOCKED` in row-`id` order and assigns them to
+  `ceil(n/chunk_size)` deterministic chunks; every claimed row belongs
+  to exactly one chunk (set-based, single statement in the postgres
+  adapter). Rows staged concurrently mid-partition stay unchunked for
+  a later pass — the same eventual behavior as per-chunk assignment.
 - A dead worker's chunk is re-claimed by the kernel; only `pending`
   rows resume — `done`/`failed` rows are never re-processed.
 - `process_row` receives the caller's row `data` + `row_key`; engine

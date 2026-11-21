@@ -40,6 +40,52 @@ KEELFLOW_BENCH_DSN=postgresql://postgres:postgres@localhost:5544/keelflow \
 **Never run `soak.py` against the same database concurrently** — the
 advisory lock enforces this; use a separate database if both are needed.
 
+## Results (v4 — set-based partition + INSERT…SELECT staging)
+
+Same v3 protocol; engine partition now uses one set-based statement
+(claim + number + chunk insert + row assignment via `unnest`, hash
+join) and the demo stages rows with `INSERT … SELECT` building JSONB
+server-side. All runs pass the exact oracle gate.
+
+### 1,000,000 rows (stage ≈6.5s, expected bad 80,458; reduced matrix w4+w8)
+
+| variant | workers | mean s | rows/s | vs v3 |
+|---|---|---|---|---|
+| keelflow-batch | 4 | 61.9 | ~16,164 | -8% time |
+| keelflow-batch | 8 | 60.5 | ~16,521 | -13% time |
+| keelflow-row | 4 | 365.5 | ~2,736 | ~-1% |
+| keelflow-row | 8 | 292.7 | ~3,416 | ~-0.6% |
+| sql baseline | — | 6.9 | ~145,100 | ~same |
+
+v4 1M phases (rep means, seconds):
+
+| phase | v3 | v4 | change |
+|---|---|---|---|
+| parent stage (INSERT…SELECT) | ~17 | ~9 | -47% |
+| parent super().run (partition+chunk jobs+push) | ~20 | ~17 | -15% |
+| parent dispatch TX total | ~37 | ~26 | -30% |
+| batch total w8 | ~69 | ~60 | -13% |
+
+Notes:
+
+- First set-based attempt was **slower** (measured `super_run` ~80s):
+  joining row→chunk through a data-modifying CTE forced a nested loop
+  with ~250M comparisons (EXPLAIN evidence). Passing chunk ids via
+  `unnest` lets the join hash — that is what shipped.
+- `push_many_ex` is used for call-site simplicity and one queue
+  notification; Chancy 0.26 still inserts one kernel row per job —
+  that part of the remaining ~17s `super_run` is kernel-row inserts.
+- Remaining 1M batch cost (~60s): staging ~9s + partition ~17s +
+  callback ~15s (aggregate, overlapped) + residual ~20s (chunk
+  dispatch/row-status/fan-in archive).
+
+### 100,000 / 500,000 (v4, all gates pass)
+
+100k: batch w8 ~16.8k r/s · row w8 ~3.5k · sql ~155k.
+500k: batch w8 ~11.4k r/s · row w8 ~3.2k · sql ~156k.
+(v4 500k numbers are slightly below v3's — run-to-run DB variance;
+both measured with the same exact oracle gate.)
+
 ## Results (v3 — exact oracle gate, dedicated-DSN + lock, all runs valid)
 
 ### 100,000 rows (stage ≈0.6s, expected bad 8,019)

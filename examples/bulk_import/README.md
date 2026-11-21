@@ -10,7 +10,7 @@ validation report → HITL **approve** → bulk **process** pass → finalize
 | Feature | Where |
 |---|---|
 | Bulk jobs as workflow steps | `imp.validate@v1`, `imp.process@v1` are `BulkJobHandler` types inside `imp.import@v1` — fan-in advances the run atomically |
-| Handler-staged rows | `_ImportBulk.run` stages `demo_import_raw` → `keelflow_row_status` in `ctx.tx` before partitioning (parent + chunk enqueue atomic) |
+| Handler-staged rows | `_ImportBulk.run` stages `demo_import_raw` → `keelflow_row_status` in `ctx.tx` before partitioning (parent + chunk enqueue atomic); set-based `INSERT … SELECT` builds `data` JSONB server-side (staging guidance in `spec/04-bulk.md`) |
 | Row-level atomicity + error queue | `atomic='row'` — bad rows → `failed` with `error`, don't block siblings; `/imports/N/errors.csv` exports them |
 | Row retention | `row_disposition='archive'` (default) — done staging rows move to `keelflow_row_archive` at fan-in, so the live table only keeps the error queue; parent `result` keeps `rows_done`/`archived_rows` totals |
 | Chunk fan-out/fan-in | `chunk_size=50` → multiple `bulk.chunk@v1` jobs + `keelflow_chunks` bookkeeping |
@@ -123,13 +123,14 @@ KEELFLOW_BENCH_DSN=... uv run --package keelflow-demo-import \
   --out .spikes/erp_bulk_bench/result.json
 ```
 
-Local findings (see `.spikes/erp_bulk_bench/RESULTS.md`): per-row
-processing ≈3.3k rows/s at 8 workers; the `process_batch` chunk
-callback ≈14.5k rows/s at the same concurrency (≈4–5×, and it scales
-with worker count); direct set-based SQL ≈150k rows/s — the data-path
+Local findings (see `.spikes/erp_bulk_bench/RESULTS.md`, v4 —
+set-based partition + `INSERT … SELECT` staging): at 1M rows the
+`process_batch` chunk callback reaches ≈16.5k rows/s at 8 workers,
+the per-row `process_row` path ≈3.4k rows/s (≈5×, and it scales with
+worker count); direct set-based SQL ≈145k rows/s — the data-path
 floor, without any of the engine's durable row/chunk bookkeeping.
-Every timed run is gated on matching the staged data's expected
-valid/invalid split.
+Every timed run passes an exact per-row oracle gate (full product
+and error set must match the staged data).
 
 ## SDK extension points it uses
 
@@ -140,7 +141,7 @@ a 250k-row import is just one node in a workflow.
 |---|---|
 | **`BulkJobHandler`** — subclass for chunked row processing; engine fans out to `bulk.chunk` workers + fans back in | `class ValidateRowsH(_ImportBulk)` `class ProcessRowsH(_ImportBulk)` |
 | **`process_row(ctx, row, tx)`** — per-row business logic; engine owns chunking, retries, error queue | `async def process_row(self, ctx, row, tx): … if not sku: raise ValueError("missing sku")` |
-| **Stage rows before `super().run()`** — hook in `_ImportBulk.run` writes `keelflow_row_status` inside `ctx.tx`, then engine partitions | `await cur.executemany("INSERT INTO keelflow_row_status …", batch); return await super().run(ctx, payload)` |
+| **Stage rows before `super().run()`** — hook in `_ImportBulk.run` writes `keelflow_row_status` inside `ctx.tx`, then engine partitions; `INSERT … SELECT` builds JSONB server-side | `await cur.execute("INSERT INTO keelflow_row_status … SELECT %s, 'row-'||row_no, 'pending', jsonb_build_object(…) FROM demo_import_raw"); return await super().run(ctx, payload)` |
 | **Row `data` self-contained** — chunk workers' ctx has no parent payload, so each row carries cells+mapping+import_id | `{"cells":…,"mapping":…,"import_id":…}` |
 | **`BulkJobPayload` via `${{ steps.*.outputs }}`** — feed a human step's output (mapping) into the bulk step's payload | `"mapping": "${{ steps.map.outputs.mapping }}"` |
 | **`atomic` + `chunk_size`** — engine bulk knobs on the step input | `"atomic": "row", "chunk_size": 5000` |
@@ -155,10 +156,12 @@ a 250k-row import is just one node in a workflow.
 ```python
 class _ImportBulk(BulkJobHandler):
     async def run(self, ctx, payload: ImpBulk) -> JobResult:
-        # stage rows in the same TX the engine will partition from
-        await cur.executemany(
+        # stage rows in the same TX the engine partitions from —
+        # set-based INSERT…SELECT builds the JSONB server-side
+        await cur.execute(
             "INSERT INTO keelflow_row_status (job_id,row_key,status,data)"
-            " VALUES (%s,%s,'pending',%s)", batch)
+            " SELECT %s, 'row-'||row_no, 'pending', jsonb_build_object(…)"
+            " FROM demo_import_raw WHERE import_id=%s ORDER BY row_no")
         return await super().run(ctx, payload)
 
 class ProcessRowsH(_ImportBulk):

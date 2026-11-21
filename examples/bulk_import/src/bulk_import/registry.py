@@ -123,18 +123,18 @@ class _ImportBulk(BulkJobHandler):
     async def run(self, ctx, payload: ImpBulk) -> JobResult:
         cur = _dict_cur(ctx.tx)
         job_id = ctx.extra["job_id"]
+        # Set-based staging: one INSERT … SELECT builds the JSONB `data`
+        # payload server-side (cells + mapping + import_id) instead of
+        # shipping every staged row to Python and back. Same atomicity —
+        # it all happens inside this dispatch transaction.
         await cur.execute(
-            "SELECT row_no, data FROM demo_import_raw WHERE import_id=%s",
-            (payload.import_id,))
-        rows = await cur.fetchall()
-        batch = [
-            (job_id, f"row-{r['row_no']}", json.dumps(
-                {"cells": r["data"], "mapping": payload.mapping,
-                 "import_id": payload.import_id}))
-            for r in rows]
-        await cur.executemany(
             "INSERT INTO keelflow_row_status (job_id, row_key, status, data)"
-            " VALUES (%s, %s, 'pending', %s)", batch)
+            " SELECT %s, 'row-'||row_no, 'pending',"
+            " jsonb_build_object('cells', data, 'mapping', %s::jsonb,"
+            " 'import_id', %s)"
+            " FROM demo_import_raw WHERE import_id=%s ORDER BY row_no",
+            (job_id, json.dumps(payload.mapping), payload.import_id,
+             payload.import_id))
         return await super().run(ctx, payload)
 
 

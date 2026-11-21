@@ -19,7 +19,6 @@ from __future__ import annotations
 
 import argparse
 import asyncio
-import json
 import os
 import random
 import time
@@ -82,17 +81,14 @@ class _SoakBatchH(BulkJobHandler):
         cur = ctx.tx.connection.cursor(row_factory=dict_row) \
             if hasattr(ctx.tx, "connection") else ctx.tx
         job_id = ctx.extra["job_id"]
+        # Set-based staging: identical JSONB built server-side.
         await cur.execute(
-            "SELECT row_no, sku, name, price, qty FROM bench_staging"
-            " WHERE batch_id=%s ORDER BY row_no", (payload.batch_id,))
-        staged = await cur.fetchall()
-        await cur.executemany(
             "INSERT INTO keelflow_row_status (job_id,row_key,status,data)"
-            " VALUES (%s,%s,'pending',%s)",
-            [(job_id, f"r-{r['row_no']}", json.dumps(
-                {"sku": r["sku"], "name": r["name"], "price": r["price"],
-                 "qty": r["qty"], "batch_id": payload.batch_id}))
-             for r in staged])
+            " SELECT %s, 'r-'||row_no, 'pending',"
+            " jsonb_build_object('sku', sku, 'name', name, 'price', price,"
+            " 'qty', qty, 'batch_id', %s::text)"
+            " FROM bench_staging WHERE batch_id=%s ORDER BY row_no",
+            (job_id, str(payload.batch_id), payload.batch_id))
         return await super().run(ctx, payload)
 
     async def process_batch(self, ctx, rows, tx):

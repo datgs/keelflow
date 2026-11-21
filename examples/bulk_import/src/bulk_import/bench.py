@@ -231,25 +231,25 @@ class _BenchH(BulkJobHandler):
             if hasattr(ctx.tx, "connection") else ctx.tx
         job_id = str(ctx.extra["job_id"])
         meta = {"start": time.perf_counter(), "stage_s": 0.0,
-                "partition_s": 0.0}
+                "parent_super_run_s": 0.0, "parent_tx_s": 0.0}
         _PARENT_META[job_id] = meta
-        await cur.execute(
-            "SELECT row_no, sku, name, price, qty FROM bench_staging"
-            " WHERE batch_id=%s ORDER BY row_no", (payload.batch_id,))
-        staged = await cur.fetchall()
+        # Set-based staging: one INSERT … SELECT builds the same JSONB
+        # `data` payload server-side instead of shipping 1M rows to
+        # Python and back (identical content — verified by the exact
+        # oracle gate).
         t = time.perf_counter()
-        await cur.executemany(
+        await cur.execute(
             "INSERT INTO keelflow_row_status (job_id,row_key,status,data)"
-            " VALUES (%s,%s,'pending',%s)",
-            [(job_id, f"r-{r['row_no']}", json.dumps({
-                "sku": r["sku"], "name": r["name"],
-                "price": r["price"], "qty": r["qty"],
-                "batch_id": payload.batch_id}))
-             for r in staged])
+            " SELECT %s, 'r-'||row_no, 'pending',"
+            " jsonb_build_object('sku', sku, 'name', name, 'price', price,"
+            " 'qty', qty, 'batch_id', %s::text)"
+            " FROM bench_staging WHERE batch_id=%s ORDER BY row_no",
+            (job_id, str(payload.batch_id), payload.batch_id))
         meta["stage_s"] = time.perf_counter() - t
         t = time.perf_counter()
         res = await super().run(ctx, payload)
-        meta["partition_s"] = time.perf_counter() - t
+        meta["parent_super_run_s"] = time.perf_counter() - t
+        meta["parent_tx_s"] = time.perf_counter() - meta["start"]
         return res
 
     async def process_row(self, ctx, row, tx):
@@ -331,7 +331,8 @@ async def run_keelflow(conn, kernel, batch_id: str, n_workers: int,
                       "atomic": "chunk" if batch else "row",
                       "row_disposition": "archive"}) \
             .enqueue(cur)
-    t_enq = time.perf_counter() - t0
+    t_enq_end = time.perf_counter()   # enqueue TX committed here
+    t_enq = t_enq_end - t0
     job_id = str(ref.id)
 
     # true per-run concurrency: re-declare the queue at this level so
@@ -359,16 +360,28 @@ async def run_keelflow(conn, kernel, batch_id: str, n_workers: int,
         "SELECT count(*) FROM keelflow_row_status"
         " WHERE job_id=%s AND status='failed'", (ref.id,))).fetchone()
     meta = _PARENT_META.get(job_id, {})
+    cbs = _CB_TIMES.get(batch_id, [])
     return {"job_id": job_id, "enqueue_s": t_enq,
+            # process_s: enqueue-commit → parent terminal (whole e2e).
+            # Includes worker startup when it is not already running.
             "process_s": t_proc, "errors": errors[0],
             "status": row[0],
             # phase hooks (in-process approximations; see module docstring)
-            "parent_queue_s": (meta.get("start", t0) - t0
+            # parent_queue_s: enqueue-commit → handler start (contains
+            # worker startup + kernel claim latency).
+            "parent_queue_s": (meta.get("start", t_enq_end) - t_enq_end
                                if meta else None),
+            # parent_stage_s: app-owned row staging INSERT.
             "parent_stage_s": meta.get("stage_s"),
-            "parent_partition_s": meta.get("partition_s"),
-            "callback_s": sum(_CB_TIMES.get(batch_id, [])),
-            "callback_calls": len(_CB_TIMES.get(batch_id, []))}
+            # parent_super_run_s: whole engine partition+enqueue call.
+            "parent_super_run_s": meta.get("parent_super_run_s"),
+            # parent_tx_s: dispatch handler TX (stage + partition).
+            "parent_tx_s": meta.get("parent_tx_s"),
+            # callback_* aggregate worker-time — callbacks on different
+            # chunks overlap, so sum can exceed wall time. Not a phase.
+            "callback_sum_s": sum(cbs),
+            "callback_max_s": max(cbs) if cbs else 0.0,
+            "callback_calls": len(cbs)}
 
 
 # ── SQL baseline variant ─────────────────────────────────────────────
@@ -635,17 +648,19 @@ def _md(results: dict) -> str:
              (f"config: `{json.dumps(results['config'], sort_keys=True)}`"
               f" — all_correct=`{results['all_correct']}`\n"),
              ("Phase fields (approximate, in-process hooks): "
-              "`enqueue_s` parent enqueue · `parent_queue_s` enqueue → "
-              "handler start · `parent_stage_s` row staging · "
-              "`parent_partition_s` partition+chunk enqueue · "
-              "`callback_s` summed process_row/process_batch duration · "
-              "residual = engine bookkeeping + chunk queue + fan-in.\n")]
+              "`enqueue_s` parent enqueue TX · `parent_queue_s` "
+              "enqueue-commit → handler start (incl. worker startup) · "
+              "`parent_stage_s` app-owned row staging · "
+              "`parent_super_run_s` engine partition+enqueue · "
+              "`parent_tx_s` dispatch handler TX · "
+              "`callback_sum_s`/`callback_max_s` aggregate worker-time "
+              "(overlaps across workers — not a wall-time phase).\n")]
     for s in results["sizes"]:
         lines.append(f"## {s['size']:,} rows (stage {s['stage_s']:.1f}s,"
                      f" expected bad {s['expected_errors']:,},"
                      f" invalid runs {s['n_invalid_runs']})\n")
         lines.append("| variant | workers | n | mean s | median s | "
-                     "callback mean s | rows/s mean | correct |"
+                     "callback sum s | rows/s mean | correct |"
                      "\n|---|---|---|---|---|---|---|---|")
         byv: dict[tuple, list[dict]] = {}
         for r in s["runs"]:
@@ -653,7 +668,8 @@ def _md(results: dict) -> str:
         for (v, w), rs in sorted(byv.items()):
             ok_rs = [r for r in rs if r["correct"]]
             ts = [r["process_s"] for r in ok_rs]
-            cb = [r["phases"].get("callback_s") or 0 for r in ok_rs]
+            cb = [r["phases"].get("callback_sum_s") or 0
+                  for r in ok_rs]
             all_ok = len(ok_rs) == len(rs)
             if ts:
                 lines.append(
