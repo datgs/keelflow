@@ -102,6 +102,9 @@ permissions, and transactions.
 - **Chancy ≤0.26 kernel**: a DB disconnect can crash the worker loop
   (upstream issue); run workers under a restart supervisor — systemd,
   Docker restart policy, or a process manager.
+- **Cancellation is cooperative** — running jobs drain by default;
+  mid-run stops only happen at `ctx.execution.checkpoint()` on job
+  types that opt in, and external side effects never roll back.
 
 ## Feature matrix
 
@@ -112,16 +115,23 @@ permissions, and transactions.
 | Retry with backoff | ✅ | per job type (`max_attempts`), kernel-tracked |
 | DAG workflows (`needs`, `if:`, `${{ }}` refs) | ✅ | parallel ready steps, code or YAML defs |
 | Human steps in a DAG | ✅ | `human.*` types park the run (`blocked`) |
+| External wait steps | ✅ | `wait.*` + `is_wait` park the run with no kernel claim; `signal`/`signal_failure` resolve atomically — provider auth + correlation stay app-owned |
 | Business vs technical failure | ✅ | `decision=reject` → `rejected`; retry exhaustion → `failed` |
 | Workflow triggers (SM → run → SM) | ✅ | `on_done/on_rejected/on_failed`, exactly-once callback |
 | Resume failed/rejected runs | ✅ | `resume_run` in-place, `resume_step` |
 | Entity state machines | ✅ | guards, `creates_job`, `allowed_actions`, row-lock serialization |
 | Human task inbox | ✅ | `user:`/`role:` assignees, first-claim-wins, escalation |
 | Bulk chunk/row processing | ✅ | `atomic='chunk'\|'row'`, kill-resume pending rows, error queue |
+| Bulk set-based batch callback | ✅ | `process_batch` per chunk — one TX, one outcome per engine row id; ~4–5× the per-row path on write-heavy imports |
 | Bulk job as DAG step | ✅ | fan-in advances the run atomically |
 | Transactional outbox events | ✅ | per-subscriber dedup, at-least-once |
 | `concurrency_key` serialized execution | ✅ | pg advisory locks |
 | Cron scheduling | ✅ | window + overlap policies |
+| Cooperative cancellation | ✅ | `JobService.cancel` (`job.cancel` perm); pre-start default + opt-in `ctx.execution.checkpoint()`; bulk chunks checkpoint per row, cascade to children |
+| Dead-letter queue | ✅ | `keelflow_dlq` + `dlq_replay` — replay resumes the owning run |
+| Retention & sweep | ✅ | `row_disposition` archive/keep/delete + `MonitoringService.sweep` (terminal jobs/runs, outbox, archive, DLQ) |
+| Idempotent enqueue | ✅ | `unique_key` dedup over non-terminal jobs |
+| Result size visibility | ✅ | `result_warning_bytes` soft + `result_max_bytes` opt-in hard cap |
 | Audit trail | ✅ | append-only, `via` actor chains |
 | Monitoring APIs / SuperAdmin UI | ✅ | data APIs; SuperAdmin = no-auth, localhost |
 | Read-only MCP tools | ✅ | agent-inspectable jobs/runs/audit |
@@ -141,10 +151,32 @@ alphas — pin `keelflow~=0.1.0a1`.
 **0.2** — hardening & ops
 - [ ] Admin UI auth (token or proxy-ready session)
 - [ ] `enqueue_many` batch API (5–10× enqueue throughput, same TX)
-- [ ] DLQ requeue UI + prune/archive policies
-- [ ] Per-job-type concurrency limits; queue metrics in SuperAdmin
+- [ ] DLQ requeue + sweep actions in SuperAdmin UI (engine `dlq_replay`/
+      `sweep` APIs shipped in 0.1.x)
+- [ ] Per-job-type concurrency limits (`ConcurrencySpec.max_workers` is
+      declared but not yet enforced); queue metrics in SuperAdmin
+- [x] External wait/signal steps (`wait.*` job type + `signal` API):
+      a DAG step that parks the run until an external system resolves
+      it — vendor callbacks, webhooks, async integrations; the app owns
+      the call out, the engine owns the durable wait — **shipped**
+- [ ] Run idempotency key — `wf.start(name, inputs, idem_key=...)`
+      dedups `workflow.start` like `unique_key` does for jobs
+- [ ] Declared-schema enforcement — optional `inputs_schema`/
+      `output_schema` validated strict when present
+- [ ] `cancel_run` API + run deadline — cancel a live DAG; parent
+      propagation exists, run-level wrapper + timeout remain
+- [ ] OpenTelemetry instrumentation (optional `keelflow[otel]` extra):
+      W3C `traceparent` propagation through `jobs.context`, spans for
+      enqueue/dispatch/handler/workflow-advance/fan-in/human-complete,
+      attempt links across retries, job counters + duration histograms
+      + queue-depth gauges — zero overhead when not enabled
 
 **0.3** — growth & interop
+- [ ] Durable timer step — `wait.until`/`sleep` inside a DAG
+      (remind-after-3-days, escalation windows); builds on the `wait.*`
+      step primitive from 0.2
+- [ ] Child workflows — run-as-a-step (`subflow.*`), link run↔run;
+      reuse the `blocked`/parent model proven by `human.*` and bulk
 - [ ] Second-language conformance harness (spec test suite as JSON cases)
 - [ ] LISTEN/NOTIFY wakeups for lower claim latency
 - [ ] Cron timezone DST audit + per-type rate limits

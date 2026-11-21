@@ -8,6 +8,7 @@ Demo only: no auth, binds localhost. Refresh manually (no live updates).
 """
 from __future__ import annotations
 
+import json
 import os
 from contextlib import asynccontextmanager
 
@@ -71,6 +72,7 @@ async def _lifespan(app: FastAPI):
     )
     jobs = JobService(registry, kernel)
     app.state.registry = registry
+    app.state.jobs = jobs
     app.state.wf = WorkflowService(registry, jobs)
     app.state.human = HumanTaskService(registry, kernel)
     async with kernel:
@@ -137,12 +139,16 @@ async def supplier(request: Request, sid: int):
             (sid,))).fetchone()
         wf_diagram = None
         blocked = []
+        waiting = []
         latest = runs[0] if runs else None
         if latest:
             detail = await app.state.wf.get_run(conn, str(latest["id"]))
             blocked = [st for st in detail["steps"]
                        if st["status"] in ("blocked", "claimed")
                        and st["type"].startswith("human.")]
+            waiting = [st for st in detail["steps"]
+                       if st["status"] == "blocked"
+                       and st["type"].startswith("wait.")]
             meta = {}
             for st in detail["steps"]:
                 if st["type"].startswith("human."):
@@ -155,10 +161,14 @@ async def supplier(request: Request, sid: int):
                 step_status={st["step_id"]: st["status"]
                              for st in detail["steps"]},
                 job_type_meta=meta)
+        # app-owned mapping for the pending provider request (if any)
+        bank_req = await (await conn.execute(
+            "SELECT * FROM demo_bank_requests WHERE supplier_id=%s"
+            " AND status='sent'", (sid,))).fetchone()
         return i18n.render(templates, request, "supplier.html", {
             "nav": _nav(request), "s": s, "checks": checks,
             "runs": runs, "vendor": vendor, "wf_diagram": wf_diagram,
-            "blocked": blocked,
+            "blocked": blocked, "waiting": waiting, "bank_req": bank_req,
         })
 
 
@@ -194,6 +204,107 @@ async def resume(request: Request, sid: int, run_id: str):
         await conn.commit()
     return RedirectResponse(f"/suppliers/{sid}?as={ctx.actor.id}",
                             status_code=303)
+
+
+# ── mock bank provider integration (app-owned boundary) ─────────────────
+# The external provider talks ONLY to these app routes; the app does the
+# correlation + translation and calls jobs.signal().
+
+
+@app.post("/suppliers/{sid}/send-bank-request")
+async def send_bank_request(request: Request, sid: int):
+    """App action: read the open wait job, register the provider request
+    in the app's own correlation table, and 'call' the mock provider."""
+    ctx = _ctx(request)
+    async with await _conn() as conn:
+        row = await (await conn.execute(
+            """
+            SELECT j.id, j.type FROM keelflow_jobs j
+            JOIN keelflow_step_runs sr ON sr.job_id = j.id
+            JOIN keelflow_workflow_runs r ON r.id = sr.run_id
+            WHERE r.status='running'
+              AND j.type = 'wait.bank_verify@v1'
+              AND j.status IN ('pending','claimed')
+              AND (sr.job_id) IS NOT NULL
+              AND j.payload->>'supplier_id' = %s
+            ORDER BY j.created_at DESC LIMIT 1
+            """, (str(sid),))).fetchone()
+        if row is None:
+            return RedirectResponse(
+                f"/suppliers/{sid}?as={ctx.actor.id}"
+                "&bank_err=no+open+bank+wait", status_code=303)
+        provider_ref = f"bk-{row['id'].hex[:12]}"
+        await conn.execute(
+            "INSERT INTO demo_bank_requests (provider_ref, supplier_id,"
+            " job_id) VALUES (%s, %s, %s) ON CONFLICT DO NOTHING",
+            (provider_ref, sid, str(row["id"])))
+        await conn.commit()
+    # A real integration would POST to the provider API here; the
+    # provider answers later via /integrations/bank/callback — never
+    # into keelflow directly. The demo simulates that callback with the
+    # buttons rendered on the supplier page.
+    return RedirectResponse(f"/suppliers/{sid}?as={ctx.actor.id}",
+                            status_code=303)
+
+
+async def handle_bank_callback(conn, jobs, provider_ref: str,
+                               outcome: str) -> int:
+    """App-owned provider callback, shared by the route and tests.
+
+    Correlates provider_ref → wait job via the app's own table, writes
+    the check result row, and resolves the wait in ONE transaction
+    (caller commits). Returns the supplier id."""
+    req = await (await conn.execute(
+        "SELECT supplier_id, job_id, status FROM demo_bank_requests"
+        " WHERE provider_ref=%s", (provider_ref,))).fetchone()
+    if req is None:
+        raise KeyError(f"unknown provider_ref {provider_ref!r}")
+    sid = req["supplier_id"]
+    ctx = JobContext(
+        actor=Actor.service("bank-webhook"),
+        permissions=frozenset({"job.signal"}))
+    verified = outcome == "verified"
+    result = ({"verified": True,
+               "method": "penny-deposit (provider callback)"}
+              if verified else
+              {"verified": False, "reason": "account mismatch"})
+    await conn.execute(
+        "INSERT INTO demo_check_results"
+        " (supplier_id, check_type, result)"
+        " VALUES (%s, 'bank_verify', %s)"
+        " ON CONFLICT (supplier_id, check_type) DO UPDATE"
+        " SET result=EXCLUDED.result",
+        (sid, json.dumps(result)),
+    )
+    await conn.execute(
+        "UPDATE demo_bank_requests SET status=%s WHERE provider_ref=%s",
+        ("verified" if verified else "failed", provider_ref))
+    await jobs.signal(conn, str(req["job_id"]), result, ctx)
+    return sid
+
+
+@app.post("/integrations/bank/callback")
+async def bank_callback(request: Request,
+                        provider_ref: str = Form(...),
+                        outcome: str = Form("verified")):
+    """Provider webhook endpoint (app-owned). The mock provider posts
+    here; the app correlates the ref to the wait job, writes the check
+    result row, and resolves the wait in ONE transaction."""
+    sid = "suppliers"
+    try:
+        async with await _conn() as conn:
+            sid = await handle_bank_callback(
+                conn, app.state.jobs, provider_ref, outcome)
+            await conn.commit()
+    except KeyError:
+        return RedirectResponse(
+            "/suppliers?as=u-proc1&bank_err=unknown+provider_ref",
+            status_code=303)
+    except (ValueError, PermissionError) as e:
+        return RedirectResponse(
+            f"/suppliers?as=u-proc1&bank_err={e}", status_code=303)
+    return RedirectResponse(
+        f"/suppliers/{sid}?as=u-proc1", status_code=303)
 
 
 # ── inbox ───────────────────────────────────────────────────────────────────

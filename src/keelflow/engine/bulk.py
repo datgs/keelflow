@@ -40,9 +40,9 @@ import psycopg
 from psycopg.rows import dict_row
 from pydantic import BaseModel
 
-from ..sdk import JobContext, JobResult
+from ..sdk import BatchRowResult, JobCancelled, JobContext, JobResult
 from ..sdk.handler import JobHandler
-from ..sdk.specs import JobStatus
+from ..sdk.specs import JobStatus, RetryPolicy
 from . import worker as _worker
 from .worker import DSN_ENV, _get_registry
 
@@ -74,11 +74,19 @@ class ChunkPayload(BaseModel):
 
 
 class BulkJobHandler(JobHandler):
-    """App's bulk/import handler. Override `process_row`.
+    """App's bulk/import handler. Override `process_row` or `process_batch`.
 
     `run` partitions this job's pending `row_status` rows into chunks and
     enqueues one `bulk.chunk@v1` job per chunk. The parent stays `running`
     until the last chunk settles (fan-in).
+
+    `process_batch` is the optional set-based fast path: it receives ALL
+    rows of one chunk (bounded by `chunk_size`) plus the chunk transaction
+    cursor, and returns one `BatchRowResult` per engine row id. The whole
+    callback and every row-state update commit/roll back together — so it
+    must not perform external I/O (a retry would repeat the side effect);
+    stage remote calls through durable jobs/outbox instead. Requires
+    `atomic='chunk'`; `atomic='row'` keeps using `process_row`.
     """
 
     async def process_row(
@@ -86,6 +94,25 @@ class BulkJobHandler(JobHandler):
     ) -> dict[str, Any] | None:
         """Apply one staged row inside the chunk transaction."""
         raise NotImplementedError
+
+    async def process_batch(
+        self, ctx: JobContext, rows: list[dict[str, Any]], tx
+    ) -> list[BatchRowResult]:
+        """Apply one whole chunk set-based inside the chunk transaction.
+
+        Rows carry engine `id`, `row_key`, and `data`. The returned list
+        must contain exactly one `BatchRowResult` per input row id (order
+        irrelevant; matching by `row_id`). `error=None` → done; a
+        non-empty error → that row failed into the error queue while
+        siblings commit. Raising or returning a malformed list rolls back
+        the whole chunk and retries it under the chunk retry policy.
+        """
+        raise NotImplementedError
+
+    async def _own_type(self, cur, job_id) -> str:
+        """Resolve this handler's own registered job type from its job row."""
+        await cur.execute("SELECT type FROM keelflow_jobs WHERE id=%s", (job_id,))
+        return (await cur.fetchone())["type"]
 
     async def run(self, ctx: JobContext, payload: BaseModel) -> JobResult:
         """Partition pending rows into chunks + enqueue chunk jobs.
@@ -135,19 +162,38 @@ class BulkJobHandler(JobHandler):
             child_payload = ChunkPayload(
                 parent_job_id=job_id, chunk_id=str(chunk_id)
             ).model_dump(mode="json")
+            # Children inherit a cancel request already committed on the
+            # parent — they will be cancelled at claim instead of
+            # starting work for a cancelled parent. Retry budget comes
+            # from the parent job type's registered RetryPolicy — the
+            # app tunes chunk retry behavior on its own bulk type.
+            await cur.execute(
+                "SELECT cancel_requested FROM keelflow_jobs WHERE id=%s",
+                (job_id,),
+            )
+            parent_cancel = (await cur.fetchone())["cancel_requested"]
+            try:
+                parent_spec = _get_registry().job_type(
+                    await self._own_type(cur, job_id))
+                chunk_max_attempts = (
+                    parent_spec.retry.max_attempts
+                    if parent_spec.retry else 3)
+            except KeyError:
+                chunk_max_attempts = 3
             await cur.execute(
                 """
                 INSERT INTO keelflow_jobs
                     (id, type, status, payload, context, attempts,
                      max_attempts, run_at, parent_job_id,
-                     created_at, updated_at)
-                VALUES (%s,%s,'pending',%s,%s,0,3,%s,%s,%s,%s)
+                     cancel_requested, created_at, updated_at)
+                VALUES (%s,%s,'pending',%s,%s,0,%s,%s,%s,%s,%s,%s)
                 """,
                 (
                     child_id, CHUNK_TYPE,
                     json.dumps(child_payload),
                     json.dumps(_ctx_d(child_ctx)),
-                    now, job_id, now, now,
+                    chunk_max_attempts, now, job_id, parent_cancel,
+                    now, now,
                 ),
             )
             await kernel.push_ex(
@@ -194,17 +240,47 @@ class ChunkJobHandler(JobHandler):
             spec = registry.job_type(parent_type)
             parent_handler: BulkJobHandler = spec.handler()  # type: ignore[misc]
 
+            # Handler selection (spec/04): atomic='chunk' uses the
+            # set-based process_batch when the handler overrides it;
+            # atomic='row' always uses process_row. A batch-only handler
+            # (no process_row override) with atomic='row' is a config
+            # error — the whole-batch commit semantics cannot hold.
+            has_batch = (type(parent_handler).process_batch
+                         is not BulkJobHandler.process_batch)
+            has_row = (type(parent_handler).process_row
+                       is not BulkJobHandler.process_row)
+            if atomic == "row" and has_batch and not has_row:
+                raise ValueError(
+                    f"bulk handler {type(parent_handler).__name__} only"
+                    " implements process_batch, which requires"
+                    " atomic='chunk' (the batch commits per chunk);"
+                    " either implement process_row or set atomic='chunk'")
+            use_batch = atomic == "chunk" and has_batch
+
             while True:
                 rows = await self._fetch_rows(conn, payload.chunk_id)
                 if not rows:
                     break
-                if atomic == "chunk":
+                if use_batch:
+                    done_n, failed_n = await self._process_batch_atomic(
+                        conn, ctx, parent_handler, rows, payload.chunk_id
+                    )
+                    processed += done_n
+                    failed_rows += failed_n
+                    break  # whole chunk in one tx
+                elif atomic == "chunk":
                     await self._process_chunk_atomic(
                         conn, ctx, parent_handler, rows, payload.chunk_id
                     )
                     break  # whole batch in one tx
                 else:
                     for row in rows:
+                        # Cooperative cancel checkpoint — direct
+                        # handler.run calls (unit tests) have no
+                        # ctx.execution injected; only dispatched jobs
+                        # of an opted-in spec observe the flag.
+                        if ctx.execution is not None:
+                            await ctx.execution.checkpoint()
                         ok = await self._process_one_row(
                             conn, ctx, parent_handler, row
                         )
@@ -216,10 +292,48 @@ class ChunkJobHandler(JobHandler):
             await self._fan_in(conn, payload.parent_job_id)
             return JobResult(status="done", outputs={
                 "processed": processed, "failed_rows": failed_rows})
+        except JobCancelled:
+            # Settle bookkeeping outside the rolled-back handler TX so
+            # fan-in can terminalize the parent; dispatch then records
+            # the job itself as cancelled.
+            log.info("chunk %s cancelled at checkpoint", payload.chunk_id)
+            await conn.rollback()
+            await conn.execute(
+                "UPDATE keelflow_chunks SET status='cancelled',"
+                " result=%s, updated_at=now() WHERE id=%s",
+                (json.dumps({"processed": processed,
+                             "failed": failed_rows}),
+                 payload.chunk_id),
+            )
+            await conn.commit()
+            await self._fan_in(conn, payload.parent_job_id)
+            raise
         except Exception as exc:
             log.exception("chunk %s failed", payload.chunk_id)
-            await self._safe_mark_failed(conn, payload.chunk_id,
-                                         payload.parent_job_id, str(exc))
+            await conn.rollback()
+            # Defer chunk-failure + fan-in to retry exhaustion: a
+            # transient callback/database failure rolls back and is
+            # retried via the kernel redelivery (the engine job stays
+            # 'running'); only the last allowed attempt terminalizes the
+            # chunk and seals the parent. Direct handler.run calls
+            # without dispatch (no own job id) keep the old
+            # fail-immediately behavior.
+            own_job_id = ctx.extra.get("job_id")
+            exhausted = True
+            if own_job_id:
+                async with conn.cursor(row_factory=dict_row) as xcur:
+                    await xcur.execute(
+                        "SELECT attempts >= max_attempts AS done_att"
+                        " FROM keelflow_jobs WHERE id=%s", (own_job_id,))
+                    xrow = await xcur.fetchone()
+                    exhausted = bool(xrow and xrow["done_att"])
+            if exhausted:
+                await self._safe_mark_failed(conn, payload.chunk_id,
+                                             payload.parent_job_id, str(exc))
+            else:
+                log.info(
+                    "chunk %s failed transiently (attempt %s); retry"
+                    " scheduled by kernel", payload.chunk_id, exc)
             raise
         finally:
             await conn.close()
@@ -245,6 +359,61 @@ class ChunkJobHandler(JobHandler):
                 (chunk_id,),
             )
             return await cur.fetchall()
+
+    async def _process_batch_atomic(
+        self, conn, ctx, handler, rows, chunk_id
+    ) -> tuple[int, int]:
+        """Set-based path: one callback + all row-state flips in ONE tx.
+
+        The callback receives the whole chunk (bounded by chunk_size) and
+        must return exactly one BatchRowResult per engine row id. A raised
+        exception or malformed result list rolls the transaction back;
+        the chunk job then retries under its retry policy (run()'s except
+        path). Explicit per-row errors commit alongside sibling successes.
+        Cancellation is observed at the checkpoint before the transaction
+        starts — a committed TX cannot be interrupted mid-flight.
+        """
+        if ctx.execution is not None:
+            await ctx.execution.checkpoint()
+        async with conn.transaction(), conn.cursor(row_factory=dict_row) as cur:
+            results = await handler.process_batch(ctx, rows, cur)
+            if not isinstance(results, list) or not all(
+                isinstance(r, BatchRowResult) for r in results
+            ):
+                raise TypeError(
+                    "process_batch must return list[BatchRowResult]")
+            want = {r["id"] for r in rows}
+            if len(results) != len(want):
+                raise ValueError(
+                    f"process_batch returned {len(results)} results"
+                    f" for {len(want)} rows")
+            seen: set[int] = set()
+            for r in results:
+                if r.row_id in seen:
+                    raise ValueError(
+                        f"process_batch returned duplicate row_id {r.row_id}")
+                seen.add(r.row_id)
+            unknown = seen - want
+            if unknown:
+                raise ValueError(
+                    "process_batch returned unknown row_ids"
+                    f" {sorted(unknown)[:5]}")
+            done_ids = [r.row_id for r in results if r.error is None]
+            err_rows = [(r.row_id, r.error or "unknown error")
+                        for r in results if r.error is not None]
+            if done_ids:
+                await cur.execute(
+                    "UPDATE keelflow_row_status SET status='done',"
+                    " updated_at=now() WHERE id = ANY(%s)",
+                    (done_ids,),
+                )
+            for rid, err in err_rows:
+                await cur.execute(
+                    "UPDATE keelflow_row_status SET status='failed',"
+                    " error=%s, updated_at=now() WHERE id=%s",
+                    (err, rid),
+                )
+        return len(done_ids), len(err_rows)
 
     async def _process_chunk_atomic(
         self, conn, ctx, handler, rows, chunk_id
@@ -330,18 +499,24 @@ class ChunkJobHandler(JobHandler):
             counts = {r["status"]: r["count"] for r in await cur.fetchall()}
             if counts.get("pending") or counts.get("claimed") or counts.get("running"):
                 return  # still in flight
-            final = "failed" if counts.get("failed") else "done"
 
             # Two chunks can settle near-simultaneously; serialize on the
             # parent row so only the first fan-in computes the summary and
             # moves rows — later ones see the terminal status and return.
             await cur.execute(
-                "SELECT status FROM keelflow_jobs WHERE id=%s FOR UPDATE",
+                "SELECT status, cancel_requested FROM keelflow_jobs"
+                " WHERE id=%s FOR UPDATE",
                 (parent_job_id,),
             )
             pj = await cur.fetchone()
             if pj is None or pj["status"] in ("done", "failed", "cancelled"):
                 return
+            if pj["cancel_requested"]:
+                final = "cancelled"
+            elif counts.get("failed"):
+                final = "failed"
+            else:
+                final = "done"
 
             await cur.execute(
                 "SELECT status, count(*) FROM keelflow_row_status"
@@ -503,16 +678,26 @@ async def progress(conn, job_id) -> dict[str, Any]:
     }
 
 
-def register(registry, dsn: str | None = None) -> None:
-    """Register the internal chunk job type on an InMemoryRegistry."""
-    from ..sdk.specs import JobTypeSpec, RetryPolicy
+def register(registry, dsn: str | None = None,
+             retry: RetryPolicy | None = None) -> None:
+    """Register the internal chunk job type on an InMemoryRegistry.
+
+    `retry` overrides the chunk retry policy (default 3 attempts,
+    30s exponential base). Per-chunk-job attempt budgets are copied
+    from the parent bulk job type's registered RetryPolicy.
+    """
+    from ..sdk.specs import JobTypeSpec
 
     registry.register_job_type(
         JobTypeSpec(
             type=CHUNK_TYPE,
             input_schema=ChunkPayload,
             handler=ChunkJobHandler,
-            retry=RetryPolicy(max_attempts=3),
+            retry=retry or RetryPolicy(max_attempts=3),
+            # Chunks checkpoint between rows so a cancelled import
+            # stops promptly at a row boundary; uncommitted row work
+            # rolls back and remains 'pending' for a future resume.
+            cooperative_cancel=True,
         )
     )
 

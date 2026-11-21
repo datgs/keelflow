@@ -24,6 +24,7 @@ from keelflow.sdk import (
     JobHandler,
     JobResult,
     JobTypeSpec,
+    RetryPolicy,
     StepSpec,
     WorkflowDefinition,
 )
@@ -91,7 +92,9 @@ async def env(db):
         )
         reg = InMemoryRegistry()
         reg.register_job_type(JobTypeSpec(type="t.ok@v1", input_schema=In, handler=OkH))
-        reg.register_job_type(JobTypeSpec(type="t.flaky@v1", input_schema=In, handler=FailOnceH))
+        reg.register_job_type(JobTypeSpec(
+            type="t.flaky@v1", input_schema=In, handler=FailOnceH,
+            retry=RetryPolicy(max_attempts=3, base_seconds=1)))
         reg.register_job_type(JobTypeSpec(type="human.review@v1", input_schema=In, handler=OkH, is_human=True))
         jobs = JobService(reg, kernel)
         worker_mod.configure(registry=reg, dsn=DSN, kernel=kernel)

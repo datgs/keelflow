@@ -28,7 +28,7 @@ import chancy
 import psycopg
 from pydantic import ValidationError
 
-from ..sdk import JobResult, JobStatus, Registry
+from ..sdk import ExecutionContext, JobCancelled, JobResult, JobStatus, Registry
 from .context import ctx_from_dict
 
 log = logging.getLogger("keelflow.worker")
@@ -111,20 +111,20 @@ async def dispatch(job_id: str, step_run_id: str | None = None) -> None:
                         (sr_row[0] or {}) if sr_row else {},
                     )
                 await conn.commit()
+            if status == JobStatus.CANCELLED.value:
+                # A pre-cancelled bulk chunk still has to settle its
+                # chunk row + run fan-in or the parent never finishes.
+                await _settle_cancelled_chunk(
+                    conn, type_name, payload_json)
             return
-        # Cooperative cancel (scheduler kill_previous, cancel_requested):
-        # honored at claim time — an in-flight job runs to completion.
+        # Cooperative cancel (JobService.cancel, kill_previous):
+        # honored at claim time — an in-flight job drains to completion
+        # unless it checkpoints (cooperative_cancel opt-in).
         if cancel_req:
-            await _finish(conn, job_id, JobStatus.CANCELLED)
-            if step_run_id and _kernel_client is not None:
-                async with conn.transaction():
-                    from .workflow import on_job_finished
-
-                    await on_job_finished(
-                        conn, _kernel_client, registry, job_id, step_run_id,
-                        JobStatus.CANCELLED, {},
-                    )
-                await conn.commit()
+            await _cancel_terminalize(
+                conn, registry, job_id, step_run_id,
+                _job_logger(job_id, type_name, ""),
+                type_name, payload_json)
             return
         try:
             spec = registry.job_type(type_name)
@@ -138,6 +138,13 @@ async def dispatch(job_id: str, step_run_id: str | None = None) -> None:
         ctx = ctx_from_dict(ctx_json)
         # Handlers get job_id via extra (context stays read-only elsewhere).
         ctx.extra["job_id"] = job_id
+        object.__setattr__(
+            ctx, "execution",
+            ExecutionContext(
+                job_id=job_id,
+                cooperative_cancel=bool(getattr(spec, "cooperative_cancel", False)),
+            ),
+        )
         jlog = _job_logger(job_id, type_name, ctx.correlation_id)
         jlog.info("claimed")
 
@@ -149,7 +156,20 @@ async def dispatch(job_id: str, step_run_id: str | None = None) -> None:
             jlog.error("payload invalid: %s", exc)
             return
 
-        await _set_status(conn, job_id, JobStatus.RUNNING, increment_attempts=True)
+        # Atomic start/cancel decision (T-cancel): the transition into
+        # `running` is conditioned on cancel_requested=false, so a
+        # cancellation committed between the load above and this update
+        # wins — a separate check + unconditional write would lose the
+        # race and run a cancelled job.
+        if not await _transition_to_running(conn, job_id):
+            if await _cancel_requested(conn, job_id):
+                await _cancel_terminalize(
+                    conn, registry, job_id, step_run_id, jlog,
+                    type_name, payload_json)
+            else:
+                log.warning(
+                    "job %s not startable (status changed); skipping", job_id)
+            return
 
         # Key-serialized execution (T10): jobs sharing a resolved
         # concurrency_key never run in parallel. SKIP LOCKED in the claim
@@ -165,6 +185,7 @@ async def dispatch(job_id: str, step_run_id: str | None = None) -> None:
         try:
             async with conn.transaction(), conn.cursor() as tx_cur:
                 object.__setattr__(ctx, "tx", tx_cur)
+                ctx.execution.tx = tx_cur
                 run = handler.run(ctx, payload)
                 if spec.timeout_seconds:
                     result = await asyncio.wait_for(
@@ -172,6 +193,7 @@ async def dispatch(job_id: str, step_run_id: str | None = None) -> None:
                 else:
                     result = await run
                 object.__setattr__(ctx, "tx", None)
+                ctx.execution.tx = None
                 status = JobStatus.DONE if result.status == "done" else JobStatus.FAILED
                 bulk_hold = bool(result.outputs.get("_bulk_parent"))
                 if bulk_hold:
@@ -219,6 +241,16 @@ async def dispatch(job_id: str, step_run_id: str | None = None) -> None:
             # is already open (the advisory-lock SELECT opened one) —
             # explicit commit is required or close() rolls everything back.
             await conn.commit()
+        except JobCancelled:
+            # A checkpoint observed a committed cancel_requested: the
+            # handler TX (savepoint) already rolled back its domain
+            # writes. Terminalize as cancelled in a NEW transaction —
+            # never through the retry/DLQ path.
+            jlog.info("cancelled at checkpoint")
+            await _cancel_terminalize(conn, registry, job_id, step_run_id,
+                                      jlog, type_name, payload_json)
+            await lock.release()
+            return
         except Exception as exc:
             tb = traceback.format_exc(limit=10)
             exc_text = str(exc) or type(exc).__name__  # TimeoutError → ''
@@ -427,15 +459,74 @@ async def _load_job(conn, job_id: str):
     return (row[0], row[1], row[2], payload, context, row[5], row[6])
 
 
-async def _set_status(
-    conn, job_id: str, status: JobStatus, *, increment_attempts: bool = False
-) -> None:
+async def _transition_to_running(conn, job_id) -> bool:
+    """Atomic pending/claimed/running → running + attempts increment.
+
+    Conditioned on `cancel_requested=false`: a cancel request that
+    commits first makes this a no-op (returns False) and the job is
+    never started. `running` stays eligible so engine-scheduled retries
+    (status kept 'running') can re-enter dispatch.
+    """
+    cur = await conn.execute(
+        "UPDATE keelflow_jobs SET status=%s, attempts = attempts + 1,"
+        " updated_at=now()"
+        " WHERE id=%s"
+        "   AND status IN ('pending','claimed','running')"
+        "   AND cancel_requested = false",
+        (JobStatus.RUNNING.value, job_id),
+    )
+    if cur.rowcount:
+        await conn.commit()
+        return True
+    return False
+
+
+async def _cancel_requested(conn, job_id) -> bool:
+    cur = await conn.execute(
+        "SELECT cancel_requested FROM keelflow_jobs WHERE id=%s", (job_id,))
+    row = await cur.fetchone()
+    return bool(row and row[0])
+
+
+async def _cancel_terminalize(conn, registry, job_id, step_run_id, jlog,
+                              type_name=None, payload_json=None) -> None:
+    """Terminalize a job as cancelled and advance its owning step — the
+    same path the claim-time cancel check uses."""
+    await _finish(conn, job_id, JobStatus.CANCELLED)
+    if step_run_id and _kernel_client is not None:
+        async with conn.transaction():
+            from .workflow import on_job_finished
+
+            await on_job_finished(
+                conn, _kernel_client, registry, job_id, step_run_id,
+                JobStatus.CANCELLED, {},
+            )
+        await conn.commit()
+    await _settle_cancelled_chunk(conn, type_name, payload_json)
+
+
+async def _settle_cancelled_chunk(conn, type_name, payload_json) -> None:
+    """A cancelled `bulk.chunk@v1` job must still settle bookkeeping:
+    mark its chunk cancelled (if not already terminal) and run fan-in
+    so the parent bulk job can terminalize. Idempotent."""
+    if type_name != "bulk.chunk@v1" or not isinstance(payload_json, dict):
+        return
+    from . import bulk as _bulk
+
+    chunk_id = payload_json.get("chunk_id")
+    parent_id = payload_json.get("parent_job_id")
+    if not chunk_id or not parent_id:
+        return
     await conn.execute(
-        "UPDATE keelflow_jobs SET status=%s, attempts = attempts + %s,"
-        " updated_at=now() WHERE id=%s",
-        (status.value, 1 if increment_attempts else 0, job_id),
+        "UPDATE keelflow_chunks SET status='cancelled', updated_at=now()"
+        " WHERE id=%s AND status NOT IN ('done','failed','cancelled')",
+        (chunk_id,),
     )
     await conn.commit()
+    await _bulk.ChunkJobHandler()._fan_in(conn, parent_id)
+
+
+
 
 
 async def _write_finish(

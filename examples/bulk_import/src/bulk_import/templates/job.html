@@ -1,9 +1,20 @@
 {% extends "base.html" %}
 {% block content %}
 <div class="card">
+  {% if request.query_params.get('err') %}
+    <p><span style="color:#8a2020">{{ request.query_params['err'] }}</span></p>
+  {% endif %}
   <h2>{{ t('job.title', id=(job.id|string)[:8] + '…') }}
     <span class="status st-{{ job.status }}">{{ job.status }}</span>
   </h2>
+  {% if job.cancel_requested %}
+    <p class="muted">{{ t('job.cancel_requested') }}</p>
+  {% endif %}
+  {% if can_cancel %}
+    <form method="post" action="/jobs/{{ job.id }}/cancel?as={{ nav['as'] }}">
+      <button class="btn" type="submit">{{ t('job.cancel') }}</button>
+    </form>
+  {% endif %}
   <table>
     <tr><td>{{ t('job.type') }}</td><td>{{ job.type }}</td></tr>
     <tr><td>{{ t('job.attempts') }}</td><td>{{ job.attempts }}</td></tr>

@@ -62,6 +62,25 @@ class JobResult:
 
 
 @dataclass(frozen=True)
+class BatchRowResult:
+    """Outcome for one row inside a `process_batch` callback.
+
+    `row_id` is the engine-owned `keelflow_row_status.id` handed to the
+    callback — NOT the application `row_key` (which carries business
+    meaning but is not unique). A result list must contain exactly one
+    entry per input row; missing/duplicate/unknown row_ids are a
+    malformed batch and roll the whole chunk back for retry.
+
+    `error=None` → row done; non-empty error → row failed into the
+    error queue while sibling rows still commit.
+    """
+
+    row_id: int
+    outputs: dict[str, Any] | None = None   # not persisted; for handler use
+    error: str | None = None
+
+
+@dataclass(frozen=True)
 class JobTypeSpec:
     """Registered contract for one job type."""
 
@@ -74,6 +93,12 @@ class JobTypeSpec:
     schedule: CronSpec | None = None
     ui: TaskUiSpec | None = None
     is_human: bool = False                       # human.* vs machine
+    # External-wait job: workflow materialization creates a durable
+    # blocked job row with NO kernel claim; the application resolves it
+    # later via `signal`/`signal_failure` (e.g. a vendor callback after
+    # its own auth + correlation). Requires a `wait.*` type name and is
+    # mutually exclusive with `is_human`.
+    is_wait: bool = False
     payload_max_bytes: int = 8192
     # Size visibility on handler outputs (two-tier):
     #   result_max_bytes — hard cap; None = unlimited (default, opt-in).
@@ -85,6 +110,13 @@ class JobTypeSpec:
     # kill the handler coroutine after N seconds; counts as a failed
     # attempt (retryable until max_attempts).
     timeout_seconds: float | None = None
+    # Opt in to cooperative mid-run cancellation: the handler may call
+    # `await ctx.execution.checkpoint()` at safe points; a committed
+    # `cancel_requested` flag observed there raises JobCancelled → the
+    # handler transaction rolls back and the job terminalizes as
+    # 'cancelled' (no retry, no DLQ). Without opt-in, checkpoints raise
+    # RuntimeError and running jobs drain to done/failed.
+    cooperative_cancel: bool = False
 
 
 @dataclass(frozen=True)

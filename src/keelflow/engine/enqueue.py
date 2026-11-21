@@ -99,6 +99,10 @@ class JobBuilder:
     async def enqueue(self, tx: Transaction, *, chancy_client: chancy.Chancy) -> JobRef:
         spec = self._registry.job_type(self._type)  # KeyError → unknown type
 
+        if spec.is_wait:
+            raise EnqueueError(
+                f"{self._type} is an external-wait type — it is materialized"
+                " by workflow steps only, not enqueued directly")
         if self._ctx is None:
             raise EnqueueError(".context(ctx) is required before enqueue()")
 
@@ -217,6 +221,132 @@ class JobService:
 
     def builder(self, type: str) -> JobBuilder:
         return _BoundJobBuilder(self._registry, type, self._chancy)
+
+    async def cancel(self, job_id: str, ctx: JobContext) -> bool:
+        """Request cooperative cancellation of a live job.
+
+        Requires the `job.cancel` permission. Pending jobs are
+        terminalized `cancelled` immediately (the worker's terminal
+        skip advances any owning workflow step on delivery). Claimed or
+        running jobs only get `cancel_requested=true` and keep their
+        status: default jobs drain; job types with
+        `cooperative_cancel=True` can stop at a checkpoint. Terminal
+        jobs and repeated requests are idempotent no-ops.
+
+        The request cascades to non-terminal children (e.g. bulk
+        chunks), which follow the same rule. For `bulk.chunk@v1` the
+        worker additionally settles the chunk row and runs fan-in so
+        the parent can terminalize even when every chunk was cancelled
+        before starting.
+
+        Returns True when the request was recorded (job was live).
+        """
+        from .permissions import DefaultPermissionService
+        from .workflow import on_job_finished
+
+        DefaultPermissionService().require(ctx, "job.cancel")
+        async with self._chancy.pool.connection() as conn, conn.transaction():
+            cur = await conn.execute(
+                "UPDATE keelflow_jobs"
+                " SET cancel_requested=true,"
+                "     status = CASE WHEN status = 'pending'"
+                "                   THEN 'cancelled' ELSE status END,"
+                "     updated_at=now()"
+                " WHERE id=%s"
+                "   AND status IN ('pending','claimed','running','blocked')"
+                " RETURNING status",
+                (job_id,),
+            )
+            landed = await cur.fetchone()
+            if landed:
+                # Cascade the request to live children (bulk chunks).
+                await conn.execute(
+                    "UPDATE keelflow_jobs"
+                    " SET cancel_requested=true,"
+                    "     status = CASE WHEN status = 'pending'"
+                    "                   THEN 'cancelled' ELSE status END,"
+                    "     updated_at=now()"
+                    " WHERE parent_job_id=%s"
+                    "   AND status IN ('pending','claimed','running','blocked')",
+                    (job_id,),
+                )
+            # Only a job that actually terminalized here (pending→cancelled)
+            # may advance its owning step — flagged-but-live jobs must not.
+            # Non-kernel lifecycles (wait.*, human.*) have no dispatch
+            # delivery to do this later; for machine jobs the worker's
+            # terminal skip performs the same idempotent write.
+            if landed and landed[0] == "cancelled":
+                step = await (await conn.execute(
+                    "SELECT id FROM keelflow_step_runs WHERE job_id=%s",
+                    (job_id,))).fetchone()
+                if step:
+                    await on_job_finished(
+                        conn, self._chancy, self._registry, job_id,
+                        str(step[0]), JobStatus.CANCELLED, {})
+        return bool(landed)
+
+    async def signal(self, conn, job_id: str, result: dict[str, Any],
+                     ctx: JobContext) -> None:
+        """Resolve an open `wait.*` job with a success result.
+
+        This is the durable callback primitive: the application receives
+        an external callback (its own auth, signature checks and
+        correlation), then calls this inside a caller-owned transaction.
+        The wait resolution, owning step update and run advance commit
+        together. Requires `job.signal`; first signal wins — a later
+        signal on a terminal wait raises.
+        """
+        await self._signal(conn, job_id, ctx,
+                           status=JobStatus.DONE, result=result or {})
+
+    async def signal_failure(self, conn, job_id: str, error: str,
+                             ctx: JobContext,
+                             result: dict[str, Any] | None = None) -> None:
+        """Resolve an open `wait.*` job as failed (external system
+        reported a terminal error). The step fails and the run follows
+        the normal `on_failed` path."""
+        await self._signal(conn, job_id, ctx,
+                           status=JobStatus.FAILED, result=result or {},
+                           error=error)
+
+    async def _signal(self, conn, job_id: str, ctx: JobContext, *,
+                      status: JobStatus, result: dict[str, Any],
+                      error: str | None = None) -> None:
+        from psycopg.rows import dict_row
+
+        from .permissions import DefaultPermissionService
+        from .workflow import on_job_finished
+
+        DefaultPermissionService().require(ctx, "job.signal")
+        async with conn.transaction(), conn.cursor(row_factory=dict_row) as cur:
+            await cur.execute(
+                "SELECT type, status FROM keelflow_jobs WHERE id=%s"
+                " FOR UPDATE",
+                (job_id,),
+            )
+            row = await cur.fetchone()
+            if row is None:
+                raise KeyError(f"job {job_id} not found")
+            spec = self._registry.job_type(row["type"])
+            if not spec.is_wait:
+                raise ValueError(
+                    f"job {job_id} is {row['type']}, not a wait.* type")
+            if row["status"] not in ("pending", "claimed"):
+                raise ValueError(
+                    f"wait {job_id} is not open (status={row['status']})")
+            await cur.execute(
+                "UPDATE keelflow_jobs SET status=%s, result=%s, error=%s,"
+                " updated_at=now() WHERE id=%s",
+                (status.value, json.dumps(result), error, job_id),
+            )
+            await cur.execute(
+                "SELECT id FROM keelflow_step_runs WHERE job_id=%s", (job_id,)
+            )
+            step = await cur.fetchone()
+            if step:
+                await on_job_finished(
+                    conn, self._chancy, self._registry, str(job_id),
+                    str(step["id"]), status, result)
 
 
 class _BoundJobBuilder(JobBuilder):

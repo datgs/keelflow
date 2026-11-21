@@ -269,6 +269,48 @@ JobTypeSpec(type="human.gl_check@v1", input_schema=ReviewPayload,
 `{"decision": "reject"}` makes the run's terminal outcome `rejected`
 (business rejection, see §8); anything else counts as success.
 
+### External-wait steps in a DAG
+
+A step whose type is registered with `is_wait=True` (`wait.*` namespace)
+parks the run `blocked` the same way — but it is resolved by your
+application, not by a person and not by a worker. There is no kernel
+job: a wait step consumes zero worker capacity for as long as it waits.
+
+```python
+JobTypeSpec(type="wait.bank_verify@v1", input_schema=Sup,
+            is_wait=True)                      # no handler
+StepSpec("bank", "wait.bank_verify@v1", input=i, needs=("validate",))
+```
+
+The boundary: the external system calls **your** application — your
+route verifies it, correlates the provider reference to the wait
+`job_id` (your table, your rules), translates the payload, and calls
+`signal` inside a transaction you own. Domain writes (e.g. a check
+result row) and the resolution commit together:
+
+```python
+await conn.execute("INSERT INTO check_results …", (…))
+await jobs.signal(conn, wait_job_id,
+                  {"verified": True}, svc_ctx)   # job.signal perm
+await conn.commit()                              # all-or-nothing
+```
+
+- `signal` → job/step `done`, run advances. `signal_failure` → step
+  `failed` → run `failed` (`on_failed` path). A domain "declined" is
+  data in `result`, driven by `if:` guards — the engine never
+  interprets it.
+- First signal wins (row locked `FOR UPDATE`); duplicate or late
+  callbacks on a terminal wait raise — safe for at-least-once
+  webhooks.
+- No engine buffer: a signal for a wait that doesn't exist yet fails
+  fast. Call the provider *after* the wait commits (the `wait.opened`
+  outbox event marks that point) — providers retry, or your adapter
+  does.
+- `jobs.cancel` on an open wait terminalizes the step `cancelled` —
+  which cancels the run. Long waits never burn a worker.
+- Direct `builder().enqueue()` of a `wait.*` type is rejected; waits
+  only exist as DAG steps in v1.
+
 ---
 
 ## 7. Entity state machines
@@ -554,7 +596,45 @@ never touched; `None` disables a category.
   every transition (including workflow-trigger callbacks) lands in
   `keelflow_audit`. `audit.trace(conn, entity)` returns the chain.
 
-## 15. Environment variables
+## 15. Cooperative cancellation
+
+Cancellation is **pre-start by default**. `JobService.cancel(job_id, ctx)`
+(requires the `job.cancel` permission) records a durable request:
+
+- `pending` → `cancelled` immediately (the worker's terminal skip advances
+  any owning workflow step when the kernel job is delivered).
+- `claimed`/`running`/`blocked` → `cancel_requested=true`, status kept —
+  the job drains to `done`/`failed` unless it opted into checkpoints.
+- Terminal jobs and repeated requests are idempotent no-ops.
+
+Long-running job types may opt in to **cooperative checkpoints**:
+
+```python
+JobTypeSpec(type="etl.load@v1", input_schema=In, handler=LoadH,
+            cooperative_cancel=True)
+
+class LoadH(JobHandler):
+    async def run(self, ctx, payload):
+        for batch in batches:
+            await ctx.execution.checkpoint()   # raises JobCancelled
+            await ctx.tx.execute("INSERT ... ", (batch,))
+```
+
+- `checkpoint()` reads the durable flag inside the handler transaction
+  (READ COMMITTED) — a request committed after the last checkpoint can
+  still lose to normal completion; place checkpoints between units of
+  work.
+- `JobCancelled` is a `BaseException` subclass: `except Exception`
+  cannot swallow it; if you catch `BaseException`, re-raise it.
+- When observed, the handler transaction rolls back and the job is
+  terminalized `cancelled` in a new transaction — never retried, never
+  DLQ'd.
+- External side effects (HTTP, email, filesystem) are **not** rolled
+  back — make them idempotent or checkpoint before issuing them.
+- `JobHandler.on_cancel` is an unused experimental placeholder. Worker
+  liveness/recovery is kernel-owned (chancy), not heartbeat-per-job.
+
+## 16. Environment variables
 
 | Var | Default | Purpose |
 |---|---|---|
@@ -562,7 +642,7 @@ never touched; `None` disables a category.
 | `KEELFLOW_REGISTRY` | — | dotted path `pkg.mod:registry` for dispatch |
 | `KEELFLOW_TEST_DSN` | `...:5544/keelflow` | test DB |
 
-## 16. Production checklist
+## 17. Production checklist
 
 - [ ] Handlers idempotent (upserts / natural keys / dedupe).
 - [ ] Workers under a restart supervisor.

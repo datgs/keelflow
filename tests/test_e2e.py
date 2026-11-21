@@ -314,13 +314,38 @@ async def test_e2e_scenario(env, db):
         ):
             sref = await env["jobs"].builder("slow@v1").context(ctx)\
                 .payload({"sleep": 0.4}).enqueue(cur)
+        # The job must actually be claimed before the kill — otherwise
+        # the scenario degenerates to plain enqueue→run and never
+        # exercises recovery. ('done' is possible if the executor let
+        # the task finish; the assert below still passes.)
+        for _ in range(200):
+            row = await (await db.execute(
+                "SELECT status FROM keelflow_jobs WHERE id=%s",
+                (sref.id,))).fetchone()
+            if row[0] in ("running", "done"):
+                break
+            await asyncio.sleep(0.05)
+        assert row[0] in ("running", "done")
         await w.stop(timeout=0.1)   # hard-ish stop
-        # start a fresh worker; chancy recovery reclaims the abandoned job
-        # once the dead worker's heartbeat_timeout (3s) lapses
+        # A fresh worker takes over. Chancy's Recovery plugin reclaims
+        # the abandoned kernel job, but only polls every 60s and only
+        # after the dead worker's heartbeat (3s) goes stale — waiting on
+        # the poll makes the test a timing coin flip. Wait out the
+        # heartbeat then force the reclaim directly.
         w2 = Worker(env["kernel"], shutdown_timeout=5, heartbeat_poll_interval=1,
                     heartbeat_timeout=3)
         await w2.start()
         try:
+            await asyncio.sleep(3.5)   # dead worker's heartbeat lapses
+            from chancy.plugins.recovery import Recovery
+            from psycopg.rows import dict_row
+
+            async with (
+                env["kernel"].pool.connection() as rconn,
+                rconn.transaction(),
+                rconn.cursor(row_factory=dict_row) as rcur,
+            ):
+                await Recovery.recover(w2, env["kernel"], rcur)
             for _ in range(300):
                 row = await (await db.execute(
                     "SELECT status, result FROM keelflow_jobs WHERE id=%s",

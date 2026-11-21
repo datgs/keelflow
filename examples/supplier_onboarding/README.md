@@ -9,7 +9,8 @@ adapters** (deterministic, synthetic data only — no real integrations).
 
 | Feature | Where |
 |---|---|
-| 4 parallel machine steps in one DAG layer | `sanction`, `media`, `credit`, `bank` in `sup.onboard@v1` |
+| 3 parallel machine steps + 1 external wait | `sanction`, `media`, `credit` are adapters; `bank` is `wait.bank_verify@v1` — parks the run, no worker |
+| External-wait step (app-owned callback) | UI sends request → mock provider → `/integrations/bank/callback` → `jobs.signal(job_id, …)`; result row + resolution + fan-in commit in one TX |
 | Fan-in step joining parallel results | `risk_score` reads all `demo_check_results` |
 | Conditional HITL via `if:` guards | `comp_review` (risk≠low), `credit_signoff` (risk=high), `bank_conf` (risk=low) — others become `skipped` |
 | Skipped steps satisfy `needs` | `erp` needs `comp_review`+`credit_signoff`; provision needs `bank_conf` — skip or block both work |
@@ -25,8 +26,9 @@ flowchart TD
     validate --> sanction
     validate --> media
     validate --> credit
-    validate --> bank
-    sanction & media & credit & bank --> risk_score
+    validate --> bank[[bank · wait.bank_verify]]
+    bank -.->|provider callback → app → signal| risk_score
+    sanction & media & credit --> risk_score
     risk_score -->|risk != low| comp_review[[comp_review · human]]
     risk_score -->|risk == high| credit_signoff[[credit_signoff · human]]
     risk_score -->|risk == low| bank_conf[[bank_conf · human]]
@@ -36,7 +38,16 @@ flowchart TD
     terms & provision --> activate
 ```
 
-Four parallel checks fan out after `validate` and join at `risk_score`.
+Four branches fan out after `validate` and join at `risk_score` — but
+`bank` is an **external wait**: the step parks `blocked` with no worker
+while the app sends a request to the mock bank provider. On the supplier
+page, **send bank verification request** registers the app-owned
+`demo_bank_requests` correlation, then **simulate provider callback**
+posts to `/integrations/bank/callback` — the app route verifies the ref,
+writes `demo_check_results.bank_verify`, and calls `jobs.signal` in one
+transaction, which unblocks `risk_score`. The provider never touches
+keelflow directly.
+
 The risk tier picks the human gates (`if:` guards — non-selected ones show
 as `skipped` but still satisfy `needs`). `erp`/`terms`/`provision` then
 provision the supplier; `activate` flips it to `active`.
@@ -87,10 +98,13 @@ Identifiers, actor ids, and fixture values stay untranslated.
 ## Try the paths
 
 1. **Happy path** — start onboarding on any supplier → watch the DAG page
-   (`/runs/<id>`): 4 checks light up in parallel → `risk_score` →
-   exactly the human steps for that risk level `blocked`, the rest
-   `skipped` → complete them in the inbox → `erp`/`terms`/`provision`
-  /`activate` converge → supplier `active` with a vendor account.
+   (`/runs/<id>`): 3 checks light up in parallel while `bank` stays
+   `blocked` (no worker) → on the supplier page, **send bank
+   verification request** then **simulate provider callback** →
+   `bank` resolves → `risk_score` → exactly the human steps for that
+   risk level `blocked`, the rest `skipped` → complete them in the
+   inbox → `erp`/`terms`/`provision`/`activate` converge → supplier
+   `active` with a vendor account.
 2. **Technical failure** — toggle `fail_sanction` on the supplier page →
    start a run → `sanction` retries then fails → run `failed` → toggle
    off → `resume run` → completes in place.
@@ -126,6 +140,9 @@ Same seams as `invoice_flow`, plus the parts it adds — all in
 | **Business reject via human decision** — completes the run with `terminal_outcome='rejected'` (not a job failure) | `human.*` step completed with `decision="reject"` |
 | **Actor roles for claim/completion** — app passes roles from its trusted actor map | `roles=_ACTOR_ROLES[ctx.actor.id]` — no user-supplied roles |
 | **`resume_run`** — restart a `failed` run from the point of failure | `WorkflowService.resume_run(…)` on `/resume/{run_id}` |
+| **`is_wait` wait step** — step parks `blocked`, no kernel claim, resolved by the app's own callback | `StepSpec("bank", "wait.bank_verify@v1", …)` + `JobTypeSpec(…, is_wait=True)` |
+| **App-owned correlation** — engine signal uses `job_id`; the app keeps `provider_ref → job_id` in its own table | `demo_bank_requests` in `schema.sql`; `send_bank_request`/`handle_bank_callback` in `app.py` |
+| **`jobs.signal` in caller TX** — domain row + wait resolution + DAG advance = one commit | `await jobs.signal(conn, job_id, result, svc_ctx)` in `handle_bank_callback` |
 
 ## SDK extension points it uses — code
 

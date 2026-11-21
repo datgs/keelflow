@@ -330,7 +330,11 @@ async def advance_run(
                     skipped_ids.add(sr["id"])
                     continue
                 spec = registry.job_type(spec_step.type)
-                if spec_step.type.startswith("human."):
+                if spec.is_wait:
+                    await _enqueue_wait_step(
+                        cursor, sr, spec_step, spec, run_row, step_runs,
+                        parent_ctx)
+                elif spec_step.type.startswith("human."):
                     await _enqueue_human_step(
                         cursor, sr, spec_step, spec, run_row, step_runs,
                         parent_ctx, kernel)
@@ -593,6 +597,51 @@ async def _enqueue_human_step(
         "UPDATE keelflow_step_runs SET job_id=%s, status=%s, updated_at=now()"
         " WHERE id=%s",
         (job_id, JobStatus.BLOCKED.value, sr["id"]),
+    )
+
+
+async def _enqueue_wait_step(
+    cursor, sr, spec_step, spec, run_row, step_runs, parent_ctx
+) -> None:
+    """External-wait step: durable job row, no kernel claim — the
+    application resolves it via JobService.signal after its own
+    provider callback (auth + correlation are app-owned). Emits a
+    metadata-only `wait.opened` outbox event in the same TX so an app
+    can trigger its external call after commit."""
+    inputs = resolve_inputs(spec_step.input, run_row["inputs"], step_runs)
+    job_id = uuid.uuid4()
+    child_ctx = _child_ctx(parent_ctx, job_id)
+    now = datetime.now(UTC)
+
+    await cursor.execute(
+        """
+        INSERT INTO keelflow_jobs
+            (id, type, status, payload, context, attempts, max_attempts,
+             run_at, claimed_by, lease_until, concurrency_key, assignee,
+             due_at, parent_job_id, result, created_at, updated_at)
+        VALUES (%s,%s,%s,%s,%s,0,%s,%s,NULL,NULL,NULL,NULL,NULL,NULL,NULL,%s,%s)
+        """,
+        (
+            job_id, spec_step.type, JobStatus.PENDING.value,
+            json.dumps(inputs), json.dumps(ctx_to_dict(child_ctx)),
+            spec.retry.max_attempts if spec.retry else 3,
+            now, now, now,
+        ),
+    )
+    await cursor.execute(
+        "UPDATE keelflow_step_runs SET job_id=%s, status=%s, updated_at=now()"
+        " WHERE id=%s",
+        (job_id, JobStatus.BLOCKED.value, sr["id"]),
+    )
+    await cursor.execute(
+        "INSERT INTO keelflow_outbox (event_type, payload)"
+        " VALUES ('wait.opened', %s)",
+        (json.dumps({
+            "job_id": str(job_id),
+            "type": spec_step.type,
+            "step_id": spec_step.id,
+            "run_id": str(run_row["id"]),
+        }),),
     )
 
 

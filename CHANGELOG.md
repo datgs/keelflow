@@ -7,6 +7,33 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Added (next release)
 
+- Chunk-level batch callback `BulkJobHandler.process_batch(ctx, rows, tx)`
+  returning `list[BatchRowResult]` — an optional set-based fast path for
+  write-heavy bulk imports: one callback per engine chunk (bounded by
+  `chunk_size`), one outcome per ENGINE row id (`row_key` stays business
+  identity, not a correlation key), whole callback + row-state flips in
+  one transaction. Requires `atomic='chunk'`; `process_row` unchanged and
+  still the row-atomic path. Callback exception or malformed result
+  (missing/duplicate/unknown row ids) rolls back and retries the chunk —
+  attempt budget inherited from the parent bulk type's `RetryPolicy`; only
+  the last attempt terminalizes the chunk/parent. Per-row business errors
+  commit siblings to `done` while failed rows enter the error queue.
+  Batch callbacks must not perform external I/O (retry would repeat the
+  side effect) — stage remote calls via durable jobs/outbox. ERP benchmark
+  (`examples/bulk_import` bench): batch ≈ 4–5× the per-row path at equal
+  worker counts (≈14.5k vs ≈3.3k rows/s at 8 workers on 500k rows).
+- External-wait steps (`wait.*` + `JobTypeSpec.is_wait`): a DAG step
+  that parks the run `blocked` with a durable job row and **no kernel
+  claim** — zero worker capacity while waiting. The application
+  resolves it via `JobService.signal(job_id, result, ctx)` /
+  `signal_failure` after its own external callback (provider auth,
+  correlation and translation stay app-owned); resolution + step update
+  + run advance commit in the caller's transaction. First signal wins
+  (`FOR UPDATE`); cancelled/terminal waits reject later signals; direct
+  enqueue of wait types is rejected. A `wait.opened` outbox event marks
+  the committed point where the app may start its external call.
+  `supplier_onboarding` demos it: `wait.bank_verify@v1` resolved by an
+  app-owned mock provider callback route.
 - Engine hardening: `cancelled` as a distinct terminal outcome, a
   definition-drift guard in `advance_run`, a per-step savepoint, claim-time
   `cancel_requested`, real `RetryPolicy` backoff scheduling,
@@ -25,9 +52,38 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   columns, and `results_oversized`.
 - `JobBuilder.unique_key` — idempotent enqueue dedup on
   `(type, unique_key)` for non-terminal jobs.
+- Cooperative checkpoint cancellation — `JobService.cancel(job_id, ctx)`
+  (requires `job.cancel`) records a durable request: pending jobs
+  terminalize `cancelled`; running jobs keep status and drain unless
+  the type opted into `cooperative_cancel=True`, in which case
+  `await ctx.execution.checkpoint()` observes the flag, raises
+  `JobCancelled` (BaseException — cannot be swallowed by `except
+  Exception`), rolls back the handler transaction, and terminalizes
+  `cancelled` without retry or DLQ. The pending→running transition is
+  an atomic conditional update so a cancel committed before start
+  always wins.
+- `kill_previous` cron overlap now drains running jobs (flag only)
+  instead of flipping them to `cancelled` mid-run.
+- `JobService.cancel` on a `pending` job now advances its owning
+  workflow step in the same transaction — previously a cancelled
+  `wait.*`/`human.*` step stayed `blocked` and hung the run (found by
+  randomized event-sequence tests).
+- Bulk-aware cancellation: `JobService.cancel` cascades the request to
+  non-terminal children; `bulk.chunk@v1` checkpoints between rows
+  (`cooperative_cancel=True`); a cancelled chunk settles its chunk row
+  and runs fan-in — including when cancelled before dispatch — so the
+  parent terminalizes `cancelled` instead of hanging `running`;
+  children spawned after a request inherit the flag. `bulk_import`
+  demo gained a **Cancel job** button wired to `jobs.cancel`.
 - `examples/rag_demo` — employee-helpdesk RAG demo; i18n (5 locales)
   across the demo UIs; Mermaid workflow diagrams + roles in demo READMEs.
 - Alembic 0003–0007.
+
+### Removed (next release)
+
+- `JobHandler.heartbeat()` — was never invoked; worker liveness is
+  kernel-owned (chancy heartbeat + Recovery). `JobHandler.on_cancel`
+  remains an experimental placeholder the worker does not invoke.
 
 ## [0.1.0a1] — 2026-11-19
 

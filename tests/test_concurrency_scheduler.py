@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import uuid
 from datetime import UTC, datetime
 
 import psycopg
@@ -172,3 +173,54 @@ async def test_scheduler_tick_enqueues_once(env, db):
         "SELECT count(*) FROM keelflow_jobs WHERE type='nightly@v1'"
     )).fetchone()
     assert row2[0] == 1
+
+
+@pytest.mark.asyncio
+async def test_kill_previous_cancel_pending_but_lets_running_drain(env, db):
+    """overlap=kill_previous is cooperative: a pending previous job is
+    cancelled; a running one is only flagged and drains to completion."""
+    env["reg"].register_job_type(JobTypeSpec(
+        type="nightly.kp@v1", input_schema=In, handler=SlowH,
+        schedule=CronSpec(cron="* * * * *", timezone="UTC",
+                          overlap="kill_previous"),
+    ))
+
+    async def _insert_live(status: str) -> str:
+        jid = uuid.uuid4()
+        await db.execute(
+            "INSERT INTO keelflow_jobs (id, type, status, payload, context)"
+            " VALUES (%s,'nightly.kp@v1',%s,'{}','{}')",
+            (jid, status))
+        return str(jid)
+
+    # case 1: running previous → flagged, status unchanged, new job enqueued
+    running_id = await _insert_live("running")
+    n = await tick(db, env["reg"], env["kernel"])
+    assert n >= 1  # 'nightly@v1' may enqueue its own slot too
+    row = await (await db.execute(
+        "SELECT status, cancel_requested FROM keelflow_jobs WHERE id=%s",
+        (running_id,))).fetchone()
+    assert row == ("running", True)
+    cnt = await (await db.execute(
+        "SELECT count(*) FROM keelflow_jobs"
+        " WHERE type='nightly.kp@v1' AND status='pending'"
+    )).fetchone()
+    assert cnt[0] == 1
+
+    # case 2: pending previous (the freshly-enqueued slot job) → cancelled
+    pend = await (await db.execute(
+        "SELECT id FROM keelflow_jobs"
+        " WHERE type='nightly.kp@v1' AND status='pending'"
+    )).fetchone()
+    pending_id = str(pend[0])
+    await tick(db, env["reg"], env["kernel"])
+    row = await (await db.execute(
+        "SELECT status, cancel_requested FROM keelflow_jobs WHERE id=%s",
+        (pending_id,))).fetchone()
+    assert row == ("cancelled", True)
+    # the tick enqueued a replacement for the next slot
+    cnt = await (await db.execute(
+        "SELECT count(*) FROM keelflow_jobs"
+        " WHERE type='nightly.kp@v1' AND status='pending'"
+    )).fetchone()
+    assert cnt[0] == 1

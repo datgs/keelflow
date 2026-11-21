@@ -3,7 +3,7 @@
 Only this package is imported by applications. Engine internals are private.
 """
 from .actor import Actor, ActorType
-from .context import JobContext
+from .context import ExecutionContext, JobCancelled, JobContext
 from .handler import JobHandler
 from .registry import Registry
 from .services import (
@@ -31,6 +31,7 @@ from .services import (
     WorkflowService,
 )
 from .specs import (
+    BatchRowResult,
     ConcurrencySpec,
     CronSpec,
     JobResult,
@@ -50,14 +51,17 @@ __all__ = [
     "ActorType",
     "AuditEvent",
     "AuditService",
+    "BatchRowResult",
     "ConcurrencySpec",
     "CronSpec",
     "DomainEvent",
     "EntityRef",
     "EventBus",
     "EventHandler",
+    "ExecutionContext",
     "Job",
     "JobBuilder",
+    "JobCancelled",
     "JobContext",
     "JobFilter",
     "JobHandler",

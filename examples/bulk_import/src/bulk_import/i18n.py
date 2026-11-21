@@ -84,6 +84,8 @@ _EN = {
     "job.col.status": "status",
     "job.col.result": "result",
     "job.result": "result",
+    "job.cancel": "Cancel job",
+    "job.cancel_requested": "cancel requested — running work drains at the next checkpoint",
 }
 
 _VI = {
@@ -156,6 +158,8 @@ _VI = {
     "job.col.status": "trạng thái",
     "job.col.result": "kết quả",
     "job.result": "kết quả",
+    "job.cancel": "Hủy job",
+    "job.cancel_requested": "đã yêu cầu hủy — phần việc đang chạy dừng ở checkpoint kế tiếp",
 }
 
 _ES = {
@@ -228,6 +232,8 @@ _ES = {
     "job.col.status": "estado",
     "job.col.result": "resultado",
     "job.result": "resultado",
+    "job.cancel": "Cancelar trabajo",
+    "job.cancel_requested": "cancelación solicitada — el trabajo en curso se detiene en el próximo punto de control",
 }
 
 _ZH = {
@@ -299,6 +305,8 @@ _ZH = {
     "job.col.status": "状态",
     "job.col.result": "结果",
     "job.result": "结果",
+    "job.cancel": "取消任务",
+    "job.cancel_requested": "已请求取消——正在执行的工作将在下一个检查点停止",
 }
 
 _HI = {
@@ -371,6 +379,8 @@ _HI = {
     "job.col.status": "स्थिति",
     "job.col.result": "परिणाम",
     "job.result": "परिणाम",
+    "job.cancel": "जॉब रद्द करें",
+    "job.cancel_requested": "रद्द करने का अनुरोध दर्ज — चल रहा कार्य अगले चेकपॉइंट पर रुकेगा",
 }
 
 _STRINGS: dict[str, dict[str, str]] = {

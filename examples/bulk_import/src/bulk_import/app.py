@@ -71,6 +71,7 @@ async def _lifespan(app: FastAPI):
         upsert=True,
     )
     jobs = JobService(registry, kernel)
+    app.state.jobs = jobs
     app.state.registry = registry
     app.state.wf = WorkflowService(registry, jobs)
     app.state.human = HumanTaskService(registry, kernel)
@@ -392,4 +393,20 @@ async def job(request: Request, job_id: str):
     return i18n.render(templates, request, "job.html", {
         "nav": _nav(request), "job": r,
         "stats": stats,
-        "chunks": chunks})
+        "chunks": chunks,
+        "can_cancel": r and r["status"] in ("pending", "claimed", "running"),
+    })
+
+
+@app.post("/jobs/{job_id}/cancel")
+async def job_cancel(request: Request, job_id: str):
+    """Cooperative cancel — records a durable request; pending jobs
+    cancel outright, running chunks stop at the next row checkpoint."""
+    ctx = _ctx(request)
+    try:
+        await request.app.state.jobs.cancel(job_id, ctx)
+    except PermissionError as e:
+        return RedirectResponse(
+            f"/jobs/{job_id}?as={ctx.actor.id}&err={e}", status_code=303)
+    return RedirectResponse(f"/jobs/{job_id}?as={ctx.actor.id}",
+                            status_code=303)

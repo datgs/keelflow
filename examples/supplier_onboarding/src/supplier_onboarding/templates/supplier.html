@@ -1,5 +1,33 @@
 {% extends "base.html" %}
 {% block content %}
+{% if request.query_params.get('bank_err') %}
+<div class="card" style="border-left:4px solid #a33;background:#fdecec">
+  <strong style="color:#8a2020">{{ t('bank.err') }} {{ request.query_params.get('bank_err') }}</strong>
+</div>
+{% endif %}
+{% if waiting %}
+<div class="card" style="border-left:4px solid #2a6fb8;background:#eef5fd">
+  <strong style="color:#1d4f84">◌ {{ t('bank.waiting') }}</strong>
+  {% for w in waiting %}
+    <div style="margin-top:4px">
+      <code>{{ w.step_id }}</code> — {{ w.type }}
+      {% if w.step_id == 'bank' and not bank_req %}
+        <form method="post" action="/suppliers/{{ s.id }}/send-bank-request?as={{ nav['as'] }}" style="display:inline">
+          <button>{{ t('bank.send') }}</button>
+        </form>
+      {% endif %}
+      {% if bank_req %}
+        <span class="muted">provider_ref={{ bank_req.provider_ref }}</span>
+        <form method="post" action="/integrations/bank/callback?as={{ nav['as'] }}" style="display:inline">
+          <input type="hidden" name="provider_ref" value="{{ bank_req.provider_ref }}">
+          <button name="outcome" value="verified">{{ t('bank.cb_ok') }}</button>
+          <button name="outcome" value="failed" class="warn">{{ t('bank.cb_fail') }}</button>
+        </form>
+      {% endif %}
+    </div>
+  {% endfor %}
+</div>
+{% endif %}
 {% if blocked %}
 <div class="card" style="border-left:4px solid #c98f1a;background:#fdf6e3">
   <strong style="color:#8a6410">● {{ t('banner.waiting_human') }}</strong>

@@ -10,7 +10,10 @@ Overlap policies (design decision #10):
 - `skip` (default): do nothing if the type's previous job is still
   pending/running.
 - `queue`: always enqueue (unique_key still prevents same-slot dupes).
-- `kill_previous`: cancel the previous job, then enqueue.
+- `kill_previous`: cooperative cancellation of the previous job, then
+  enqueue. A pending job is cancelled outright; a claimed/running job
+  is flagged `cancel_requested` and runs to completion — this is a
+  drain, not a force-kill.
 """
 from __future__ import annotations
 
@@ -92,8 +95,14 @@ async def tick(conn, registry: Registry, kernel, *, now: datetime | None = None)
             if live and cron.overlap == "skip":
                 continue
             if live and cron.overlap == "kill_previous":
+                # Cooperative cancel: pending jobs are cancelled before
+                # dispatch can run them; claimed/running jobs only get
+                # the flag and run to completion (cancel does not
+                # interrupt an in-flight handler).
                 await conn.execute(
-                    "UPDATE keelflow_jobs SET status='cancelled',"
+                    "UPDATE keelflow_jobs SET"
+                    " status = CASE WHEN status = 'pending'"
+                    "               THEN 'cancelled' ELSE status END,"
                     " cancel_requested=true, updated_at=now() WHERE id=%s",
                     (live[0],),
                 )

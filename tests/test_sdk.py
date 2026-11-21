@@ -5,6 +5,8 @@ from keelflow.sdk import (
     Actor,
     ActorType,
     ConcurrencySpec,
+    ExecutionContext,
+    JobCancelled,
     JobContext,
     JobHandler,
     JobResult,
@@ -82,3 +84,39 @@ def test_handler_is_abstract():
     import asyncio
     r = asyncio.run(H().run(JobContext(actor=Actor.system()), Pay(invoice_id="i1")))
     assert r.status == "done"
+
+
+def test_job_cancelled_is_not_exception_subclass():
+    """BaseException subclass: ordinary `except Exception` in a handler
+    cannot swallow a checkpoint cancellation."""
+    assert issubclass(JobCancelled, BaseException)
+    assert not issubclass(JobCancelled, Exception)
+
+
+def test_cooperative_cancel_spec_default():
+    assert JobTypeSpec(type="t@v1", input_schema=Pay,
+                       handler=JobHandler).cooperative_cancel is False
+    spec = JobTypeSpec(type="t2@v1", input_schema=Pay, handler=JobHandler,
+                       cooperative_cancel=True)
+    assert spec.cooperative_cancel is True
+
+
+def test_checkpoint_requires_opt_in_and_tx():
+    import asyncio
+
+    async def main():
+        exc = ExecutionContext(job_id="j1", cooperative_cancel=False)
+        with pytest.raises(RuntimeError, match="cooperative_cancel"):
+            await exc.checkpoint()
+        exc2 = ExecutionContext(job_id="j1", cooperative_cancel=True, tx=None)
+        with pytest.raises(RuntimeError, match="handler transaction"):
+            await exc2.checkpoint()
+
+    asyncio.run(main())
+
+
+def test_handler_has_no_heartbeat_hook():
+    """Heartbeat is kernel-owned (chancy worker liveness); the unused
+    handler hook was removed — only the experimental on_cancel remains."""
+    assert not hasattr(JobHandler, "heartbeat")
+    assert hasattr(JobHandler, "on_cancel")

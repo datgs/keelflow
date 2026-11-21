@@ -27,7 +27,10 @@ Anything else → `DefinitionError` at load.
   in `tx`.
 - `advance_run` (called on each step completion): for every `pending`
   step whose `needs` are all `done` and whose `if:` is true, enqueue its
-  job — for human types, insert job row only and mark step `blocked`.
+  job — for human and `is_wait` types, insert job row only (no kernel
+  claim) and mark step `blocked`; wait steps additionally emit a
+  metadata-only `wait.opened` outbox event (`job_id`, `type`, `step_id`,
+  `run_id`).
 - A step whose `if:` is false → `done` with skipped marker.
 - Child job context: `actor = job:<job_id> via <parent ctx actor>`;
   `correlation_id` inherited.
@@ -103,8 +106,10 @@ remain the job stays `running`; at exhaustion it is terminalized
 
 - Retry policy is per job type (`max_attempts`, backoff+jitter); kernel
   owns attempt counter.
-- `cancel_requested` is cooperative: worker checks/sets flag; handler
-  `on_cancel` may clean up; kernel must not force-kill mid-transaction.
+- `cancel_requested` is cooperative and pre-start by default: pending
+  jobs finish `cancelled`, running jobs drain unless their type opted
+  into `cooperative_cancel` checkpoints (`spec/02`). The worker never
+  invokes `on_cancel`; kernel must not force-kill mid-transaction.
 
 ## Resume-from-failed-step
 

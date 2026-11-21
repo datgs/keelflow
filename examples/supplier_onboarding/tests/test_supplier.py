@@ -66,8 +66,8 @@ async def db():
             "TRUNCATE keelflow_jobs, keelflow_outbox, keelflow_audit,"
             " keelflow_step_runs, keelflow_workflow_runs, keelflow_chunks,"
             " keelflow_row_status, keelflow_row_archive, keelflow_dlq, keelflow_entity_state,"
-            " demo_suppliers, demo_vendor_accounts, demo_check_results"
-            " CASCADE")
+            " demo_suppliers, demo_vendor_accounts, demo_check_results,"
+            " demo_bank_requests CASCADE")
         await conn.execute(
             f"TRUNCATE {KERNEL_PREFIX}jobs, {KERNEL_PREFIX}workers,"
             f" {KERNEL_PREFIX}queues CASCADE")
@@ -86,8 +86,8 @@ async def env(db):
         worker_mod.configure(registry=reg, dsn=DSN, kernel=kernel)
         jobs = JobService(reg, kernel)
         human = HumanTaskService(reg, kernel)
-        yield {"wf": WorkflowService(reg, jobs), "human": human,
-               "kernel": kernel}
+        yield {"wf": WorkflowService(reg, jobs), "jobs": jobs,
+               "human": human, "kernel": kernel}
 
 
 async def _mk_supplier(db, name, bank="OK001", fail=False) -> int:
@@ -124,6 +124,34 @@ async def _wait_step(db, run_id, step_id, status, timeout=60.0):
     raise AssertionError(f"step {step_id} not {status} after {timeout}s")
 
 
+async def _resolve_bank_wait(db, env, sid):
+    """Simulate the app-owned integration: register the provider request
+    in the app's correlation table, then run the same handler the
+    /integrations/bank/callback route executes — in one transaction."""
+    from supplier_onboarding.app import handle_bank_callback
+
+    job = None
+    for _ in range(150):
+        job = await (await db.execute(
+            "SELECT j.id FROM keelflow_jobs j"
+            " JOIN keelflow_step_runs sr ON sr.job_id = j.id"
+            " WHERE j.type='wait.bank_verify@v1'"
+            "   AND j.status IN ('pending','claimed')"
+            "   AND j.payload->>'supplier_id' = %s", (str(sid),)
+        )).fetchone()
+        if job:
+            break
+        await asyncio.sleep(0.2)
+    assert job, "bank wait job never appeared"
+    ref = f"bk-test-{sid}"
+    await db.execute(
+        "INSERT INTO demo_bank_requests (provider_ref, supplier_id, job_id)"
+        " VALUES (%s, %s, %s)", (ref, sid, str(job["id"])))
+    async with (await _conn(False)) as c:
+        await handle_bank_callback(c, env["jobs"], ref, "verified")
+        await c.commit()
+
+
 async def _blocked_human_tasks(db, run_id):
     return await (await db.execute(
         "SELECT step_id, job_id FROM keelflow_step_runs"
@@ -152,9 +180,15 @@ async def test_parallel_checks_and_conditional_hitl(env, db):
             ref = await env["wf"].start(
                 "sup.onboard@v1", {"supplier_id": sid}, _ctx(), cur)
 
-        # parallel checks complete concurrently
-        for s in ("sanction", "media", "credit", "bank", "risk_score"):
+        # machine checks finish; bank parks 'blocked' — no worker
+        # owns it until the app-owned provider callback signals it
+        for s in ("sanction", "media", "credit"):
             await _wait_step(db, ref.id, s, "done")
+        await _wait_step(db, ref.id, "bank", "blocked")
+        await _wait_step(db, ref.id, "risk_score", "pending")
+        await _resolve_bank_wait(db, env, sid)
+        await _wait_step(db, ref.id, "bank", "done")
+        await _wait_step(db, ref.id, "risk_score", "done")
 
         checks = await (await db.execute(
             "SELECT count(*) AS n FROM demo_check_results WHERE supplier_id=%s",
@@ -222,6 +256,9 @@ async def test_technical_failure_and_resume(env, db):
         await env["wf"].resume_run(db, ref.id, _ctx())
 
         await _wait_step(db, ref.id, "sanction", "done")
+        # bank wait is still blocked — resolve it through the app
+        # boundary, then fan-in can proceed
+        await _resolve_bank_wait(db, env, sid)
         await _wait_step(db, ref.id, "risk_score", "done")
         await _complete_humans(db, env, ref.id)
         r2 = await _wait_run(db, ref.id)

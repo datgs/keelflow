@@ -80,6 +80,50 @@ class BigOutH(JobHandler):
                          outputs={"blob": "x" * 40000})
 
 
+class CancelDrainH(JobHandler):
+    """Sleeps so a cancel request can land mid-run — the job must
+    still drain to `done` (cooperative, pre-start-only cancel)."""
+
+    async def run(self, ctx, payload: In):
+        await asyncio.sleep(0.4)
+        return JobResult(status="done", outputs={"n": 1})
+
+
+class CheckpointH(JobHandler):
+    """Opted-in cooperative cancel: writes a probe row inside the
+    handler TX, requests cancellation from a separate connection at a
+    controlled point, then checkpoints. JobCancelled must propagate,
+    rolling back the probe row.
+
+    Events live on the instance — a new handler is instantiated per
+    dispatch and class-level asyncio primitives bind to the first
+    event loop they touch (cross-loop breakage between tests).
+    """
+
+    last: CheckpointH | None = None
+
+    def __init__(self) -> None:
+        self.flag_set = asyncio.Event()
+        self.resume = asyncio.Event()
+        type(self).last = self
+
+    async def run(self, ctx, payload: In):
+        await ctx.tx.execute(
+            "INSERT INTO keelflow_outbox (event_type, payload)"
+            " VALUES ('probe.cancel', '{}')")
+        async with await psycopg.AsyncConnection.connect(
+                DSN, autocommit=True) as c2:
+            await c2.execute(
+                "UPDATE keelflow_jobs SET cancel_requested=true WHERE id=%s",
+                (ctx.execution.job_id,))
+        self.flag_set.set()
+        # Wait for the test to confirm the flag committed, then hit the
+        # checkpoint — deterministic mid-run cancel (no sleeps).
+        await self.resume.wait()
+        await ctx.execution.checkpoint()
+        raise AssertionError("checkpoint did not raise JobCancelled")
+
+
 class BoomThenOkH(JobHandler):
     """Fails while `armed`, succeeds once disarmed — simulates an ops fix
     between DLQ write and replay."""
@@ -138,6 +182,13 @@ async def env(db):
             timeout_seconds=0.2))
         reg.register_job_type(JobTypeSpec(
             type="t.boom@v1", input_schema=In, handler=BoomH,
+            retry=RetryPolicy(max_attempts=2, base_seconds=0.05,
+                              jitter=False)))
+        reg.register_job_type(JobTypeSpec(
+            type="t.drain@v1", input_schema=In, handler=CancelDrainH))
+        reg.register_job_type(JobTypeSpec(
+            type="t.checkpoint@v1", input_schema=In, handler=CheckpointH,
+            cooperative_cancel=True,
             retry=RetryPolicy(max_attempts=2, base_seconds=0.05,
                               jitter=False)))
         reg.register_job_type(JobTypeSpec(
@@ -289,6 +340,185 @@ async def test_cancel_request_honored_at_claim(env, db):
     row = await (await db.execute(
         "SELECT status FROM keelflow_jobs WHERE id=%s", (ref.id,))).fetchone()
     assert row[0] == "cancelled"
+
+
+@pytest.mark.asyncio
+async def test_cancel_request_does_not_interrupt_running_job(env, db):
+    """Flagging cancel_requested while the handler runs must not stop
+    it — an in-flight job drains to `done` (cancel is pre-start only)."""
+    async with (
+        await _conn(autocommit=False) as conn,
+        conn.transaction(),
+        conn.cursor() as cur,
+    ):
+            ref = await env["jobs"].builder("t.drain@v1") \
+                .context(JobContext(actor=Actor.user("u1"))) \
+                .payload({"x": 1}) \
+                .enqueue(cur)
+    task = asyncio.create_task(worker_mod.dispatch(ref.id))
+    try:
+        # wait until the handler is actually running, then request cancel
+        for _ in range(100):
+            row = await (await db.execute(
+                "SELECT status FROM keelflow_jobs WHERE id=%s",
+                (ref.id,))).fetchone()
+            if row and row[0] == "running":
+                break
+            await asyncio.sleep(0.05)
+        assert row[0] == "running"
+        await db.execute(
+            "UPDATE keelflow_jobs SET cancel_requested=true WHERE id=%s",
+            (ref.id,))
+        await task
+    finally:
+        if not task.done():
+            task.cancel()
+    row = await (await db.execute(
+        "SELECT status, cancel_requested FROM keelflow_jobs WHERE id=%s",
+        (ref.id,))).fetchone()
+    assert row[0] == "done"          # ran to completion despite the flag
+    assert row[1] is True            # the request was recorded
+
+
+# ── cooperative checkpoints + public cancel API ───────────────────────────
+
+
+async def _enqueue_ok(env, type_name="t.ok@v1"):
+    async with (
+        await _conn(autocommit=False) as conn,
+        conn.transaction(),
+        conn.cursor() as cur,
+    ):
+            return await env["jobs"].builder(type_name) \
+                .context(JobContext(actor=Actor.user("u1"))) \
+                .payload({"x": 1}) \
+                .enqueue(cur)
+
+
+@pytest.mark.asyncio
+async def test_checkpoint_observes_flag_and_rolls_back(env, db):
+    """Opted-in handler checkpoints: committed cancel_requested raises
+    JobCancelled → handler TX rolls back → job cancelled (no retry/DLQ)."""
+    ref = await _enqueue_ok(env, "t.checkpoint@v1")
+    task = asyncio.create_task(worker_mod.dispatch(ref.id))
+    try:
+        for _ in range(100):
+            if CheckpointH.last and CheckpointH.last.flag_set.is_set():
+                break
+            await asyncio.sleep(0.05)
+        h = CheckpointH.last
+        assert h is not None and h.flag_set.is_set()
+        row = await (await db.execute(
+            "SELECT status, cancel_requested FROM keelflow_jobs WHERE id=%s",
+            (ref.id,))).fetchone()
+        assert row == ("running", True)
+        h.resume.set()
+        await asyncio.wait_for(task, timeout=10)
+    finally:
+        if CheckpointH.last:
+            CheckpointH.last.resume.set()
+        if not task.done():
+            task.cancel()
+    row = await (await db.execute(
+        "SELECT status, attempts FROM keelflow_jobs WHERE id=%s",
+        (ref.id,))).fetchone()
+    assert row[0] == "cancelled"
+    assert row[1] == 1                 # no retry attempt scheduled
+    probe = await (await db.execute(
+        "SELECT count(*) FROM keelflow_outbox WHERE event_type='probe.cancel'"
+    )).fetchone()
+    assert probe[0] == 0               # handler writes rolled back
+    dlq = await (await db.execute(
+        "SELECT count(*) FROM keelflow_dlq WHERE id=%s", (ref.id,)
+    )).fetchone()
+    assert dlq[0] == 0                 # cancellation never hits the DLQ
+
+
+@pytest.mark.asyncio
+async def test_cancel_api_pending_flags_running_and_noops_terminal(env, db):
+    perms = JobContext(actor=Actor.user("u1"),
+                       permissions=frozenset({"job.cancel"}))
+    # pending → terminalized cancelled
+    p = await _enqueue_ok(env)
+    assert await env["jobs"].cancel(p.id, perms) is True
+    row = await (await db.execute(
+        "SELECT status, cancel_requested FROM keelflow_jobs WHERE id=%s",
+        (p.id,))).fetchone()
+    assert row == ("cancelled", True)
+    # terminal → no-op
+    assert await env["jobs"].cancel(p.id, perms) is False
+    # running → flagged, status preserved (drain or checkpoint decides)
+    r = await _enqueue_ok(env)
+    await db.execute(
+        "UPDATE keelflow_jobs SET status='running' WHERE id=%s", (r.id,))
+    assert await env["jobs"].cancel(r.id, perms) is True
+    row = await (await db.execute(
+        "SELECT status, cancel_requested FROM keelflow_jobs WHERE id=%s",
+        (r.id,))).fetchone()
+    assert row == ("running", True)
+
+
+@pytest.mark.asyncio
+async def test_cancel_api_requires_permission(env, db):
+    ref = await _enqueue_ok(env)
+    with pytest.raises(PermissionError):
+        await env["jobs"].cancel(
+            ref.id, JobContext(actor=Actor.user("u1")))
+    row = await (await db.execute(
+        "SELECT status FROM keelflow_jobs WHERE id=%s", (ref.id,))).fetchone()
+    assert row[0] == "pending"
+
+
+@pytest.mark.asyncio
+async def test_cancel_wins_start_race_handler_never_runs(env, db, monkeypatch):
+    """Cancel commits between the load-time flag check and the
+    pending→running transition: the conditional UPDATE must lose to it
+    and the handler must never be invoked."""
+    CALLS.clear()
+    ref = await _enqueue_ok(env)
+    orig = worker_mod._transition_to_running
+
+    async def injected(conn, job_id):
+        await db.execute(
+            "UPDATE keelflow_jobs SET cancel_requested=true WHERE id=%s",
+            (ref.id,))
+        return await orig(conn, job_id)
+
+    monkeypatch.setattr(worker_mod, "_transition_to_running", injected)
+    await worker_mod.dispatch(ref.id)
+    row = await (await db.execute(
+        "SELECT status, cancel_requested FROM keelflow_jobs WHERE id=%s",
+        (ref.id,))).fetchone()
+    assert row == ("cancelled", True)
+    assert "ok" not in CALLS           # handler never invoked
+
+
+@pytest.mark.asyncio
+async def test_checkpoint_cancel_advances_workflow_step(env, db):
+    """A step job cancelled at a checkpoint terminalizes its step and
+    run as cancelled (not failed)."""
+    env["reg"].register_workflow(WorkflowDefinition(
+        name="wf.checkpointcancel@v1",
+        steps=(StepSpec(id="a", type="t.checkpoint@v1", input={"x": 1}),),
+    ))
+    CheckpointH.last = None
+    ref = await _start(env, "wf.checkpointcancel@v1")
+    w = Worker(env["kernel"], shutdown_timeout=5)
+    await w.start()
+    try:
+        for _ in range(100):
+            if CheckpointH.last and CheckpointH.last.flag_set.is_set():
+                break
+            await asyncio.sleep(0.05)
+        h = CheckpointH.last
+        assert h is not None and h.flag_set.is_set()
+        h.resume.set()
+        row = await _wait_run(db, ref.id, "cancelled")
+    finally:
+        if CheckpointH.last:
+            CheckpointH.last.resume.set()
+        await w.stop(timeout=5)
+    assert (row[0], row[1]) == ("cancelled", "cancelled")
 
 
 # ── timeout + engine-scheduled backoff + DLQ ──────────────────────────────

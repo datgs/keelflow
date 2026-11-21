@@ -26,6 +26,7 @@ from keelflow.engine import bulk
 from keelflow.engine.bulk import BulkJobHandler, BulkJobPayload
 from keelflow.engine.registry import InMemoryRegistry
 from keelflow.sdk import (
+    BatchRowResult,
     JobHandler,
     JobResult,
     JobTypeSpec,
@@ -39,8 +40,8 @@ DSN_ENV = "KEELFLOW_DSN"
 # ── actors / permissions ────────────────────────────────────────────────────
 # ?as=ops1 (upload + map) · ?as=rev1 (approver) · ?as=mgr (all)
 PERMISSIONS = {
-    "u-ops1": {"imp.create", "imp.map", "imp.approve"},
-    "u-rev1": {"imp.approve"},
+    "u-ops1": {"imp.create", "imp.map", "imp.approve", "job.cancel"},
+    "u-rev1": {"imp.approve", "job.cancel"},
     "u-mgr": {"*"},
 }
 ROLES = {"operations", "reviewer", "manager"}
@@ -184,6 +185,50 @@ class ProcessRowsH(_ImportBulk):
             " stock=EXCLUDED.stock, updated_at=now()",
             (sku, name, price, int(qty), payload["import_id"]))
         return {"sku": sku}
+
+
+class ProcessRowsBatchH(_ImportBulk):
+    """Set-based twin of ProcessRowsH using the chunk-level batch
+    callback: one statement classifies + upserts the whole chunk.
+    Outcomes correlate by ENGINE ROW ID (row_key is not unique).
+    Must not do external I/O — a retry would repeat the side effect."""
+
+    async def process_row(self, ctx, row, tx):  # pragma: no cover - guard
+        raise AssertionError("batch handler must run via process_batch")
+
+    async def process_batch(self, ctx, rows, tx):
+        out: list[BatchRowResult] = []
+        upserts = []
+        for r in rows:
+            d, mapping = r["data"]["cells"], r["data"]["mapping"]
+            sku = str(d.get(mapping["sku"], "")).strip()
+            name = str(d.get(mapping["name"], "")).strip()
+            price = _num(d.get(mapping["price"]))
+            qty = _num(d.get(mapping["stock"]))
+            if not sku or not name:
+                err = "missing sku/name"
+            elif price is None or price <= 0:
+                err = f"bad price: {d.get(mapping['price'])!r}"
+            elif qty is None or qty < 0:
+                err = f"bad qty: {d.get(mapping['stock'])!r}"
+            else:
+                err = None
+            if err:
+                out.append(BatchRowResult(row_id=r["id"], error=err))
+            else:
+                upserts.append((sku, name, price, int(qty),
+                                r["data"]["import_id"]))
+                out.append(BatchRowResult(row_id=r["id"],
+                                          outputs={"sku": sku}))
+        if upserts:
+            await tx.executemany(
+                "INSERT INTO demo_products (sku, name, price, stock,"
+                " imported_by) VALUES (%s,%s,%s,%s,%s)"
+                " ON CONFLICT (sku) DO UPDATE SET"
+                " name=EXCLUDED.name, price=EXCLUDED.price,"
+                " stock=EXCLUDED.stock, updated_at=now()",
+                upserts)
+        return out
 
 
 class FinalizeH(JobHandler):

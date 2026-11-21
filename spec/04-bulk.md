@@ -22,6 +22,50 @@ Three levels: parent job → chunks → rows.
      follow-up TX so the error queue remains observable.
    - `atomic='row'`: one transaction per row; failures mark only that
      row.
+
+## Set-based batch callback (`process_batch`)
+
+A `BulkJobHandler` MAY additionally implement
+`process_batch(ctx, rows, tx) -> list[BatchRowResult]` — the set-based
+fast path for write-heavy imports. Selection: `atomic='chunk'` uses
+`process_batch` when the handler overrides it; `atomic='row'` always
+uses `process_row`. A handler implementing only `process_batch` MUST
+NOT be enqueued with `atomic='row'` — the chunk fails with a config
+diagnostic.
+
+MUST, in the one chunk transaction:
+
+1. Receive ALL of the chunk's pending rows (bounded by `chunk_size`),
+   each carrying engine `id`, `row_key`, and `data`.
+2. Return exactly one `BatchRowResult` per input engine row id
+   (order irrelevant; `row_key` is NOT a correlation key — it is
+   business identity and is not unique). `error=None` → row `done`;
+   non-empty error → row `failed` into the error queue while siblings
+   still commit. `outputs` are not persisted.
+3. Apply callback domain writes and all row-state flips in that same
+   transaction — row outcomes and domain effects commit or roll back
+   together.
+
+- A raised exception or a malformed result list (missing, duplicate,
+  or unknown row ids; wrong type) rolls back the whole chunk. The
+  chunk job retries under its retry policy — attempt budget is copied
+  from the PARENT bulk type's registered `RetryPolicy`; only the last
+  allowed attempt terminalizes the chunk (`failed`) and seals the
+  parent via fan-in. A transient failure of a non-exhausted chunk
+  leaves rows `pending` for redelivery; no partial state is visible.
+- Cancellation is observed at the checkpoint BEFORE the batch
+  transaction starts; a committed batch cannot be interrupted
+  mid-flight.
+- The batch callback MUST NOT perform external I/O (HTTP, RPC, file
+  delivery): the transaction rolls back and retries on transient
+  failure, which would repeat the side effect. Stage remote calls as
+  durable jobs/outbox events committed in the callback, and reconcile
+  outcomes in a later step. Provider auth, correlation, and callback
+  handling stay application-owned (see `02-job-lifecycle.md` wait
+  jobs).
+- Explicit per-row business errors never fail the chunk or the parent;
+  they are error-queue data like row-atomic failures.
+
 4. Fan-in: last chunk to settle flips parent to `done` (or `failed` if
    any chunk failed) and merges a summary into `result`
    (`chunks` per-status counts + `rows_total`/`rows_done`/`rows_failed`).

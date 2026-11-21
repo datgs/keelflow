@@ -136,12 +136,9 @@ class CreditCheckH(_Adapter):
                          "fair" if score < 700 else "good")}
 
 
-class BankVerifyH(_Adapter):
-    check_type = "bank_verify"
-
-    async def check(self, ctx, s):
-        valid = not s["bank_ref"].startswith("XX")
-        return {"verified": valid, "method": "penny-deposit (mock)"}
+# Bank verification is NOT a synchronous adapter — the mock provider
+# calls the app back later. The workflow parks on `wait.bank_verify@v1`;
+# the app-owned callback route resolves it via jobs.signal().
 
 
 class RiskScoreH(JobHandler):
@@ -226,17 +223,18 @@ class _NoopH(JobHandler):
 def build_registry() -> InMemoryRegistry:
     r = InMemoryRegistry()
 
-    def j(type_: str, handler, *, human=False, ui=None, attempts=3):
+    def j(type_: str, handler, *, human=False, wait=False, ui=None,
+          attempts=3):
         r.register_job_type(JobTypeSpec(
             type=type_, input_schema=Sup, handler=handler,
             retry=RetryPolicy(max_attempts=attempts, base_seconds=5),
-            is_human=human, ui=ui))
+            is_human=human, is_wait=wait, ui=ui))
 
     j("sup.validate@v1", ValidateIntakeH)
     j("sup.sanction_screen@v1", SanctionScreenH, attempts=4)
     j("sup.adverse_media@v1", AdverseMediaH)
     j("sup.credit_check@v1", CreditCheckH)
-    j("sup.bank_verify@v1", BankVerifyH)
+    j("wait.bank_verify@v1", None, wait=True)   # resolved by app callback
     j("sup.risk_score@v1", RiskScoreH)
     j("sup.erp_vendor_create@v1", ErpVendorCreateH)
     j("sup.payment_terms@v1", PaymentTermsH)
@@ -263,7 +261,7 @@ def build_registry() -> InMemoryRegistry:
                      input=i, needs=("validate",)),
             StepSpec("credit", "sup.credit_check@v1",
                      input=i, needs=("validate",)),
-            StepSpec("bank", "sup.bank_verify@v1",
+            StepSpec("bank", "wait.bank_verify@v1",
                      input=i, needs=("validate",)),
             StepSpec("risk_score", "sup.risk_score@v1", input=i,
                      needs=("sanction", "media", "credit", "bank")),

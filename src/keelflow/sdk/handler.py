@@ -21,10 +21,13 @@ class JobHandler(ABC):
         """Execute the job. Raise or return failed status on error."""
         ...
 
-    async def heartbeat(self, ctx: JobContext) -> None:
-        """Long-running jobs renew their lease. Default: no-op."""
-        return
-
     async def on_cancel(self, ctx: JobContext) -> None:
-        """Cooperative cancel hook. Default: no-op."""
+        """Cooperative cancel hook. Default: no-op.
+
+        Experimental — the current worker never invokes this hook; it is
+        a placeholder for a future cleanup protocol and must not carry
+        business invariants. Actual cooperative cancellation happens
+        through `ctx.execution.checkpoint()` on job types that opt in
+        via `JobTypeSpec(cooperative_cancel=True)`.
+        """
         return

@@ -34,3 +34,14 @@ CREATE TABLE IF NOT EXISTS demo_check_results (
 );
 
 CREATE INDEX IF NOT EXISTS ix_demo_checks_sup ON demo_check_results (supplier_id);
+
+-- App-owned correlation for the external bank-verification provider.
+-- This is the application's integration table, NOT engine state: the app
+-- sends provider_ref to the mock provider and resolves it back to the
+-- keelflow wait job id when the provider calls back.
+CREATE TABLE IF NOT EXISTS demo_bank_requests (
+    provider_ref text PRIMARY KEY,
+    supplier_id  int NOT NULL REFERENCES demo_suppliers(id),
+    job_id       uuid NOT NULL,
+    status       text NOT NULL DEFAULT 'sent'      -- sent|verified|failed
+);

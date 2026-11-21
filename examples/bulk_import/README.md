@@ -14,6 +14,7 @@ validation report → HITL **approve** → bulk **process** pass → finalize
 | Row-level atomicity + error queue | `atomic='row'` — bad rows → `failed` with `error`, don't block siblings; `/imports/N/errors.csv` exports them |
 | Row retention | `row_disposition='archive'` (default) — done staging rows move to `keelflow_row_archive` at fan-in, so the live table only keeps the error queue; parent `result` keeps `rows_done`/`archived_rows` totals |
 | Chunk fan-out/fan-in | `chunk_size=50` → multiple `bulk.chunk@v1` jobs + `keelflow_chunks` bookkeeping |
+| Cooperative cancellation | **Cancel job** button on a running bulk job → `JobService.cancel` cascades the flag to chunks; `bulk.chunk@v1` checkpoints between rows → job/step terminalize `cancelled` (not `failed`) |
 | HITL in the middle of a run | `human.map` (column mapping feeds later steps via `${{ outputs.mapping }}`), `human.approve` (approve/reject gate) |
 | Conditional continuation | `process` only runs `if:` approve decision is `approve`; reject → skipped → `finalize` → `aborted` |
 | Idempotent domain writes | `demo_products` upsert on `sku` natural key |
@@ -67,8 +68,8 @@ Open http://127.0.0.1:8002/?as=u-ops1 → **generate sample.csv**
 
 | id | role | can | workflow step |
 |---|---|---|---|
-| `u-ops1` | operations | upload, start, map | `map` |
-| `u-rev1` | reviewer | approve only | `approve` |
+| `u-ops1` | operations | upload, start, map, cancel | `map` |
+| `u-rev1` | reviewer | approve, cancel | `approve` |
 | `u-mgr` | manager | all | any human step |
 
 Separation of duties is the point: `map` is assigned to `role:operations`
@@ -89,11 +90,46 @@ Identifiers, actor ids, and fixture values stay untranslated.
 3. Approve → **process** re-queues rows; valid ones upsert into
    `demo_products`, failed ones land in the error queue →
    **download errors.csv**. Reject → `process` skipped, import `aborted`.
+4. While a bulk pass runs, open the parent **job** page and hit
+   **Cancel job** — pending chunks cancel outright, the running chunk
+   stops at its next row checkpoint, and the import's step ends
+   `cancelled`. Requires the `job.cancel` permission (ops/rev/mgr).
 
 ## Demo constraints
 
 Synthetic/sample CSVs only · file size/row limits enforced · no auth ·
 binds localhost · manual refresh.
+
+## Runtime benchmark
+
+An opt-in benchmark compares three execution variants over the same
+staged catalog data: the per-row `process_row` path, the set-based
+`process_batch` chunk callback, and a direct PostgreSQL baseline
+(useful for locating the data-path ceiling). Safety contract:
+
+- explicit `KEELFLOW_BENCH_DSN` naming a dedicated database (no
+  fallback to `KEELFLOW_DSN`), plus `--allow-db`
+- an advisory lock shared with `soak.py` so a benchmark and a soak can
+  never write to one database at once
+- every output scoped by `batch_id`; nothing globally deleted or
+  truncated; engine rows cleaned by `job_id`
+- exact per-row oracle gate (full product set + full error set); a
+  failed run is excluded from summaries and exits non-zero
+
+```bash
+KEELFLOW_BENCH_DSN=... uv run --package keelflow-demo-import \
+  python -m bulk_import.bench --sizes 100000 500000 \
+  --reps 3 --workers 1 4 8 --allow-db \
+  --out .spikes/erp_bulk_bench/result.json
+```
+
+Local findings (see `.spikes/erp_bulk_bench/RESULTS.md`): per-row
+processing ≈3.3k rows/s at 8 workers; the `process_batch` chunk
+callback ≈14.5k rows/s at the same concurrency (≈4–5×, and it scales
+with worker count); direct set-based SQL ≈150k rows/s — the data-path
+floor, without any of the engine's durable row/chunk bookkeeping.
+Every timed run is gated on matching the staged data's expected
+valid/invalid split.
 
 ## SDK extension points it uses
 
@@ -108,6 +144,7 @@ a 250k-row import is just one node in a workflow.
 | **Row `data` self-contained** — chunk workers' ctx has no parent payload, so each row carries cells+mapping+import_id | `{"cells":…,"mapping":…,"import_id":…}` |
 | **`BulkJobPayload` via `${{ steps.*.outputs }}`** — feed a human step's output (mapping) into the bulk step's payload | `"mapping": "${{ steps.map.outputs.mapping }}"` |
 | **`atomic` + `chunk_size`** — engine bulk knobs on the step input | `"atomic": "row", "chunk_size": 5000` |
+| **`process_batch` (set-based chunk callback)** — one TX per chunk, one `BatchRowResult` per ENGINE row id; requires `atomic='chunk'`; no external I/O inside the callback | `class ProcessRowsBatchH(_ImportBulk)` |
 | **bulk-as-DAG-step** — `imp.validate`/`imp.process` are normal `StepSpec`s; engine links the bulk parent to the step run | `StepSpec("process", "imp.process@v1", input=b, needs=("approve",), if_expr=…)` |
 | **`if_expr` on the bulk step** — only run the process pass when approved | `if_expr="${{ steps.approve.outputs.decision }} == 'approve'"` |
 | **`bulk.progress(conn, job_id)`** — engine-owned % / rate / ETA for the parent job | `await bulk.progress(conn, s["job_id"])` in `app.py` |
