@@ -40,6 +40,60 @@ KEELFLOW_BENCH_DSN=postgresql://postgres:postgres@localhost:5544/keelflow \
 **Never run `soak.py` against the same database concurrently** — the
 advisory lock enforces this; use a separate database if both are needed.
 
+## Results (v5 — worker scaling + chunk-size sweep, batch only)
+
+Same v3/v4 protocol (dedicated DSN, advisory lock, exact oracle gate,
+`--variants keelflow-batch`). One fixed 1M staged dataset per
+invocation; 3 reps per config; all runs pass the gate.
+
+### Phase 1 — worker scaling (1M, chunk=1000)
+
+| workers | mean s | median s | rows/s |
+|---:|---:|---:|---:|
+| 1 | 92.5 | 95.6 | ~10,806 |
+| 2 | 69.5 | 69.2 | ~14,379 |
+| 4 | 67.0 | 66.2 | ~14,917 |
+| 8 | 64.7 | 64.8 | ~15,457 |
+| 16 | 59.9 | 57.7 | ~16,690 |
+
+Scaling is strongly sub-linear: 1→2 workers saves ~25s, 2→4 saves ~2.5s,
+4→8 ~2.3s, 8→16 ~4.8s. The fixed ~9s stage + ~17s partition +
+~26s dispatch TX are worker-independent — they dominate once the
+parallel callback (~10–23s aggregate) saturates.
+
+### Phase 2 — chunk-size sweep (1M, w4+w8)
+
+| chunk_size | w4 mean s | w8 mean s | chunks |
+|---:|---:|---:|---:|
+| 250 | 135.8 | 105.2 | 4,000 |
+| 500 | 81.6 | 80.2 | 2,000 |
+| 1,000 | 67.0 | 64.7 | 1,000 |
+| 2,500 | 67.6 | 62.9 | 400 |
+| 5,000 | 71.6 | 64.3 | 200 |
+
+Small chunks cost heavily: chunk=250 is ~2× slower than chunk=1000 —
+each chunk is one kernel job + one engine chunk job + one callback TX +
+fan-in bookkeeping, so per-chunk overhead scales with row_count/chunk.
+Chunks ≥2500 flatten out; chunk=5000 does not help further.
+**Sweet spot on this box: chunk_size 1000–2500.**
+
+### Phase 3 — confirmation (1M, w8, chunk=2500, 5 reps)
+
+mean 65.6s · median 60.4s · ~15.2k rows/s · 5/5 runs correct —
+consistent with the P2 measurement; config confirmed, not a fluke.
+
+### v5 conclusion
+
+- More workers help but plateau: the **fixed parent cost**
+  (stage ~9s + partition ~17s + dispatch ~26s ≈ 52s of the ~60s total)
+  is sequential and worker-independent. w8–w16 is the sweet spot;
+  beyond ~16 the marginal gain would shrink toward zero.
+- `chunk_size` 1000–2500 balances per-chunk engine overhead against
+  per-callback transaction size. Below ~500 the engine bookkeeping
+  dominates; above ~5000 diminishing returns.
+- Recommended config on this environment: **workers 8–16,
+  chunk_size 1000–2500 → ~60s/1M rows.**
+
 ## Results (v4 — set-based partition + INSERT…SELECT staging)
 
 Same v3 protocol; engine partition now uses one set-based statement

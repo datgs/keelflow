@@ -527,7 +527,8 @@ async def _cleanup_engine_rows(conn, job_id: str) -> None:
 
 
 async def _run_size(conn, kernel, invocation: str, n: int, reps: int,
-                    workers: list[int], chunk_size: int) -> list[dict]:
+                    workers: list[int], chunk_size: int,
+                    variants: list[str]) -> list[dict]:
     batch_id = str(uuid.uuid4())
     await conn.execute(
         "INSERT INTO bench_run_batches (invocation_id, batch_id, size)"
@@ -541,9 +542,13 @@ async def _run_size(conn, kernel, invocation: str, n: int, reps: int,
                 "expected_errors": len(exp_errs), "runs": []}]
     # combos: sql baseline once per rep + keelflow per (mode, workers);
     # order alternates across reps to cancel warm-cache bias
-    combos = [("keelflow-row", w) for w in workers]
-    combos += [("keelflow-batch", w) for w in workers]
-    combos.append(("sql", 0))
+    combos: list[tuple[str, int]] = []
+    if "keelflow-row" in variants:
+        combos += [("keelflow-row", w) for w in workers]
+    if "keelflow-batch" in variants:
+        combos += [("keelflow-batch", w) for w in workers]
+    if "sql" in variants:
+        combos.append(("sql", 0))
     for rep in range(reps):
         order = combos if rep % 2 == 0 else list(reversed(combos))
         for variant, w in order:
@@ -708,7 +713,7 @@ async def main_async(args) -> int:
         await conn.execute(SCHEMA)
         config = {"invocation_id": invocation, "sizes": args.sizes,
                   "reps": args.reps, "workers": args.workers,
-                  "chunk": args.chunk,
+                  "chunk": args.chunk, "variants": args.variants,
                   "row_disposition": "archive", "seed": 42,
                   "kernel_prefix": KERNEL_PREFIX}
         await conn.execute(
@@ -721,7 +726,8 @@ async def main_async(args) -> int:
             for n in args.sizes:
                 all_results.extend(
                     await _run_size(conn, kernel, invocation, n,
-                                    args.reps, args.workers, args.chunk))
+                                    args.reps, args.workers, args.chunk,
+                                    args.variants))
             rep = _report(all_results, env, config)
             os.makedirs(os.path.dirname(args.out) or ".", exist_ok=True)
             md_path = os.path.splitext(args.out)[0] + ".md"
@@ -755,6 +761,10 @@ def main() -> int:
                    help="queue concurrency levels for keelflow variant")
     p.add_argument("--chunk", type=int, default=1000,
                    help="bulk chunk_size (keelflow variant)")
+    p.add_argument("--variants", nargs="+",
+                   choices=["keelflow-row", "keelflow-batch", "sql"],
+                   default=["keelflow-row", "keelflow-batch", "sql"],
+                   help="execution variants to measure (default all)")
     p.add_argument("--out", default=".spikes/erp_bulk_bench/result.json")
     p.add_argument("--allow-db", action="store_true",
                    help="confirm benchmark runs on a dedicated/local DB")
