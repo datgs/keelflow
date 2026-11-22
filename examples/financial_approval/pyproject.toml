@@ -1,0 +1,23 @@
+[project]
+name = "keelflow-demo-financial"
+version = "0.1.0"
+description = "keelflow demo: ~26-step financial payment-run approval DAG — parallel risk fan-out, conditional multi-role approvals, process_batch bulk, external waits"
+requires-python = ">=3.11"
+dependencies = [
+    "keelflow",
+    "fastapi>=0.124",
+    "uvicorn>=0.34",
+    "jinja2>=3.1",
+    "python-multipart>=0.0.9",
+    "pydantic>=2",
+]
+
+[build-system]
+requires = ["uv_build>=0.11.19,<0.12.0"]
+build-backend = "uv_build"
+
+[tool.uv.build-backend]
+module-name = "financial_approval"
+
+[tool.uv.sources]
+keelflow = { workspace = true }

@@ -1,0 +1,33 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="card">
+  <h2>Payment runs <span class="muted">({{ requests|length }})</span></h2>
+  {% if open_tasks %}<p class="pill">{{ open_tasks }} open approval task(s)</p>{% endif %}
+  <table>
+    <tr><th>#</th><th>ref</th><th>vendor</th><th>amount</th><th>ccy</th>
+        <th>urgent</th><th>risk</th><th>status</th><th>latest run</th><th></th></tr>
+    {% for r in requests %}
+    <tr>
+      <td>{{ r.id }}</td>
+      <td><a href="/requests/{{ r.id }}?as={{ nav['as'] }}">{{ r.ref }}</a></td>
+      <td>{{ r.vendor_name }}</td>
+      <td>{{ r.amount }}</td>
+      <td>{{ r.currency }}</td>
+      <td>{{ "yes" if r.urgent else "—" }}</td>
+      <td>{{ r.risk or "—" }}</td>
+      <td><span class="status st-{{ r.status }}">{{ r.status }}</span></td>
+      <td>
+        {% set run = runs.get(r.id) %}
+        {% if run %}
+          <a href="/runs/{{ run.id }}?as={{ nav['as'] }}">
+            <span class="status st-{{ run.status }}">{{ run.status }}</span></a>
+          {% if run.terminal_outcome %}
+            <span class="muted">{{ run.terminal_outcome }}</span>{% endif %}
+        {% else %}—{% endif %}
+      </td>
+      <td><a href="/requests/{{ r.id }}?as={{ nav['as'] }}">open</a></td>
+    </tr>
+    {% endfor %}
+  </table>
+</div>
+{% endblock %}

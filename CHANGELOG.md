@@ -3,6 +3,19 @@
 All notable changes to this project will be documented here.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [Unreleased]
+
+### Added
+
+- `examples/financial_approval` — the largest demo (~23-step payment-run
+  DAG): intake → parallel risk fan-out (machine + `wait.fx_quote` /
+  `wait.bank_preverify`) → risk fan-in → a sequential multi-level human
+  approval chain gated by `if_expr` (manager → controller → CFO →
+  compliance) → GL posting → a set-based `process_batch` payment-line
+  step → `wait.bank_execute` external settle → reconcile/remit/audit.
+  Exercises parallel `needs`, wait/signal, conditional human steps,
+  bulk, cooperative cancel, retry, and audit in one run.
+
 ## [0.1.0a2] — 2026-11-23
 
 ### Added

@@ -1,0 +1,19 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="card">
+  <h2>Inbox — {{ uid }} <span class="muted">({{ tasks|length }} task(s))</span></h2>
+  {% if not tasks %}<p class="muted">No open approval tasks for your roles.</p>{% endif %}
+  {% for t in tasks %}
+  <div style="border:1px solid #ddd6cd;border-radius:8px;padding:10px;margin-bottom:10px">
+    <strong>{{ t.type }}</strong>
+    <span class="muted">· {{ t.request_ref or '' }} · job
+      <a href="/jobs/{{ t.id }}?as={{ nav['as'] }}">{{ t.id[:8] }}</a></span>
+    <form method="post" action="/inbox/{{ t.id }}/complete?as={{ nav['as'] }}" style="margin-top:8px">
+      <input type="text" name="note" placeholder="note (optional)">
+      <button name="decision" value="approve">approve</button>
+      <button name="decision" value="reject" class="warn">reject</button>
+    </form>
+  </div>
+  {% endfor %}
+</div>
+{% endblock %}

@@ -10,6 +10,7 @@ resolution-markers = [
 [manifest]
 members = [
     "keelflow",
+    "keelflow-demo-financial",
     "keelflow-demo-import",
     "keelflow-demo-invoice",
     "keelflow-demo-rag",
@@ -526,6 +527,29 @@ dev = [
     { name = "pytest", specifier = ">=9.2.0" },
     { name = "pytest-asyncio", specifier = ">=1.5.0" },
     { name = "ruff", specifier = ">=0.17.5" },
+]
+
+[[package]]
+name = "keelflow-demo-financial"
+version = "0.1.0"
+source = { editable = "examples/financial_approval" }
+dependencies = [
+    { name = "fastapi" },
+    { name = "jinja2" },
+    { name = "keelflow" },
+    { name = "pydantic" },
+    { name = "python-multipart" },
+    { name = "uvicorn" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "fastapi", specifier = ">=0.124" },
+    { name = "jinja2", specifier = ">=3.1" },
+    { name = "keelflow", editable = "." },
+    { name = "pydantic", specifier = ">=2" },
+    { name = "python-multipart", specifier = ">=0.0.9" },
+    { name = "uvicorn", specifier = ">=0.34" },
 ]
 
 [[package]]

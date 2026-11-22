@@ -1,0 +1,115 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="card">
+  <h2>{{ p.ref }} <span class="muted">{{ p.vendor_name }} ·
+    {{ p.currency }} {{ p.amount }}{% if p.urgent %} · URGENT{% endif %}</span></h2>
+  <p>
+    status <span class="status st-{{ p.status }}">{{ p.status }}</span>
+    · risk <span class="status st-{{ p.risk }}">{{ p.risk or "—" }}</span>
+    · bank {{ p.bank_ref }} ({{ p.country }})
+  </p>
+  {% if p.fail_sanction %}
+    <p class="pill">fail_sanction = ON — sanction adapter will raise
+      (simulated outage).</p>
+  {% endif %}
+  <form method="post" action="/requests/{{ p.id }}/toggle-fail?as={{ nav['as'] }}" style="display:inline">
+    <button>toggle fail_sanction</button>
+  </form>
+  {% if p.status == 'draft' %}
+  <form method="post" action="/requests/{{ p.id }}/submit?as={{ nav['as'] }}" style="display:inline">
+    <button>submit payment run</button>
+  </form>
+  {% endif %}
+  {% if latest and latest.status in ('running','pending') %}
+  <form method="post" action="/requests/{{ p.id }}/cancel/{{ latest.id }}?as={{ nav['as'] }}" style="display:inline">
+    <button class="warn">cancel run</button>
+  </form>
+  {% endif %}
+  {% if latest and latest.status == 'failed' %}
+  <form method="post" action="/requests/{{ p.id }}/resume/{{ latest.id }}?as={{ nav['as'] }}" style="display:inline">
+    <button>resume failed run</button>
+  </form>
+  {% endif %}
+</div>
+
+<div class="card">
+  <h3>Payment lines ({{ lines|length }})</h3>
+  <table>
+    <tr><th>#</th><th>invoice_no</th><th>gl_account</th><th>amount</th></tr>
+    {% for l in lines %}
+    <tr><td>{{ l.line_no }}</td><td>{{ l.invoice_no or '—' }}</td>
+        <td>{{ l.gl_account }}</td><td>{{ l.amount }}</td></tr>
+    {% endfor %}
+  </table>
+</div>
+
+{% if waiting or blocked %}
+<div class="card">
+  <h3>Pending</h3>
+  {% for s in waiting %}
+    {% set prov = {'wait.fx_quote@v1':'fx','wait.bank_preverify@v1':'bank_pre',
+                   'wait.bank_execute@v1':'bank_exec'}[s.type] %}
+    {% set sent = prov_by_type.get(s.type.replace('wait.','wait_')) or
+                  prov_by_type.get(s.type) %}
+    <p><span class="status st-blocked">waiting external</span> {{ s.type }}
+      {% set map = {'wait.fx_quote@v1':'fx_quote',
+                    'wait.bank_preverify@v1':'bank_preverify',
+                    'wait.bank_execute@v1':'bank_execute'} %}
+      {% set ref = prov_by_type.get(map[s.type]) %}
+      {% if ref and ref.status == 'sent' %}
+        <em>(request sent — ref <code>{{ ref.provider_ref }}</code>)</em>
+        <form method="post" action="/integrations/{{ prov }}/callback?as={{ nav['as'] }}" style="display:inline">
+          <input type="hidden" name="provider_ref" value="{{ ref.provider_ref }}">
+          <button name="outcome" value="verified">simulate provider: OK</button>
+          <button name="outcome" value="failed" class="warn">simulate provider: FAIL</button>
+        </form>
+      {% else %}
+        <form method="post" action="/requests/{{ p.id }}/send/{{ prov }}?as={{ nav['as'] }}" style="display:inline">
+          <button>send {{ prov }} request to provider</button>
+        </form>
+      {% endif %}
+    </p>
+  {% endfor %}
+  {% for s in blocked %}
+    <p><span class="status st-blocked">waiting human</span> {{ s.type }}
+      <a href="/inbox?as={{ nav['as'] }}">open inbox</a></p>
+  {% endfor %}
+</div>
+{% endif %}
+
+{% if checks %}
+<div class="card">
+  <h3>Check results</h3>
+  <table>
+    <tr><th>check</th><th>result</th></tr>
+    {% for c in checks %}
+    <tr><td>{{ c.check_type }}</td><td><pre>{{ c.result | tojson(indent=1) }}</pre></td></tr>
+    {% endfor %}
+  </table>
+</div>
+{% endif %}
+
+{% if wf_diagram %}
+<div class="card">
+  <h3>Run DAG — latest</h3>
+  <p class="muted">parallel lanes in the same layer · human steps dashed ·
+    wait steps dotted · skipped = guard false</p>
+  {{ wf_diagram | safe }}
+</div>
+{% endif %}
+
+<div class="card">
+  <h3>Runs ({{ runs|length }})</h3>
+  <table>
+    <tr><th>run</th><th>status</th><th>outcome</th><th>started</th></tr>
+    {% for r in runs %}
+    <tr>
+      <td><a href="/runs/{{ r.id }}?as={{ nav['as'] }}">{{ r.id[:8] }}</a></td>
+      <td><span class="status st-{{ r.status }}">{{ r.status }}</span></td>
+      <td>{{ r.terminal_outcome or '—' }}</td>
+      <td>{{ r.created_at }}</td>
+    </tr>
+    {% endfor %}
+  </table>
+</div>
+{% endblock %}

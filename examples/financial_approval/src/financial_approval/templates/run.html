@@ -1,0 +1,30 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="card">
+  <h2>run {{ run.id[:8] }}
+    <span class="status st-{{ run.status }}">{{ run.status }}</span>
+    {% if run.terminal_outcome %}<span class="muted">{{ run.terminal_outcome }}</span>{% endif %}
+  </h2>
+  <p class="muted">inputs: <code>{{ run.inputs | tojson }}</code></p>
+  <div class="dag">
+    {% for layer in layers %}
+    <div class="dag-layer" data-l="{{ loop.index }}">
+      {% for s in layer %}
+      {% set cls = 'human' if s.type.startswith('human.') else 'wait' if s.type.startswith('wait.') else '' %}
+      <div class="node {{ cls }} {{ 'skipped' if s.status=='skipped' else '' }} {{ 'failed' if s.status=='failed' else '' }} {{ 'active' if s.status in ('running','claimed','blocked') else '' }}">
+        <span class="sid">{{ s.step_id }}</span>
+        <small>{{ s.type }}</small>
+        <small><span class="status st-{{ s.status }}">{{ s.status }}</span></small>
+        {% if s.job %}
+          <small><a href="/jobs/{{ s.job.id }}?as={{ nav['as'] }}">job</a>
+            · attempts {{ s.job.attempts }}</small>
+          {% if s.job.result %}
+            <pre>{{ s.job.result | tojson(indent=1) }}</pre>{% endif %}
+        {% endif %}
+      </div>
+      {% endfor %}
+    </div>
+    {% endfor %}
+  </div>
+</div>
+{% endblock %}

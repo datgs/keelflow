@@ -1,0 +1,74 @@
+<!doctype html>
+<html lang="en">
+<head>
+<title>{% block title %}keelflow · financial approval{% endblock %}</title>
+<style>
+  :root { color-scheme: light; }
+  body { font: 14px/1.45 -apple-system, "SF Mono", Menlo, monospace;
+         margin: 0; background: #f7f5f1; color: #2a2520; }
+  a { color: #1d5fd0; text-decoration: none; } a:hover { text-decoration: underline; }
+  header { background: #2a2520; color: #f7f5f1; padding: 10px 20px;
+           display: flex; gap: 18px; align-items: baseline; }
+  header a { color: #f7f5f1; }
+  header .who { margin-left: auto; font-size: 12px; opacity: .8; }
+  main { max-width: 1200px; margin: 0 auto; padding: 20px; }
+  .demo-warn { background: #fff3cd; border: 1px solid #e0c36b; padding: 6px 10px;
+               border-radius: 6px; font-size: 12px; margin-bottom: 14px; }
+  .card { background: #fff; border: 1px solid #ddd6cd; border-radius: 8px;
+          padding: 14px; margin-bottom: 14px; }
+  table { border-collapse: collapse; width: 100%; }
+  th { text-align: left; color: #8a7f72; font-weight: normal;
+       border-bottom: 1px solid #ddd6cd; padding: 4px 8px; }
+  td { padding: 6px 8px; border-bottom: 1px solid #efe9e1; vertical-align: top; }
+  .status { display: inline-block; padding: 1px 8px; border-radius: 10px;
+            font-size: 12px; }
+  .st-done, .st-active, .st-succeeded, .st-paid { background: #d9ecd9; color: #205f2a; }
+  .st-running, .st-claimed, .st-submitted, .st-executing { background: #d9e6f7; color: #1a4e8a; }
+  .st-pending, .st-draft { background: #efeee9; color: #6b6355; }
+  .st-blocked, .st-medium, .st-scheduled { background: #fdf0d5; color: #8a6410; }
+  .st-failed, .st-rejected, .st-high, .st-cancelled { background: #f8d7d5; color: #8a2020; }
+  .st-skipped { background: transparent; color: #a89f92; text-decoration: line-through; }
+  .st-low, .st-approved { background: #d9ecd9; color: #205f2a; }
+  button, input[type=submit] { font: inherit; padding: 4px 12px;
+    background: #2a2520; color: #f7f5f1; border: 0; border-radius: 6px; cursor: pointer; }
+  button.warn { background: #8a2020; }
+  input[type=text], select { font: inherit; padding: 3px 6px; }
+  .dag { display: flex; flex-direction: column; gap: 10px; }
+  .dag-layer { display: flex; gap: 10px; flex-wrap: wrap; }
+  .dag-layer::before { content: attr(data-l); color: #bdb3a4; width: 14px; }
+  .node { border: 1px solid #ddd6cd; border-radius: 8px; padding: 8px 12px;
+          min-width: 130px; background: #fff; }
+  .node .sid { font-weight: bold; }
+  .node small { color: #8a7f72; display: block; }
+  .node.human { border-style: dashed; }
+  .node.wait { border-style: dotted; }
+  .node.skipped { opacity: .45; }
+  .node.failed { border-color: #c05c58; background: #fdf2f1; }
+  .node.active { border-color: #4f86c6; box-shadow: 0 0 0 1px #4f86c6; }
+  pre { background: #2a2520; color: #d8f0d0; padding: 10px; border-radius: 6px;
+        overflow: auto; font-size: 12px; }
+  .muted { color: #8a7f72; }
+  .pill { background:#d9e6f7;color:#1a4e8a;border-radius:10px;
+          padding:1px 8px;font-size:12px; }
+</style>
+</head>
+<body>
+<header>
+  <strong>keelflow</strong>
+  <a href="/?as={{ nav['as'] }}">payment runs</a>
+  <a href="/inbox?as={{ nav['as'] }}">inbox</a>
+  <span class="who">
+    view as
+    {% for a in nav['actors'] %}
+      <a href="?as={{ a }}" style="padding:0 6px">{{ a.replace('u-','') }}</a>
+    {% endfor %}
+    · {{ nav['names'][nav['as']] }} · perms: {{ nav['perms']|join(', ') }}
+  </span>
+</header>
+<main>
+  <div class="demo-warn">DEMO ONLY — no auth, synthetic data, binds
+    localhost. Refresh manually.</div>
+  {% block content %}{% endblock %}
+</main>
+</body>
+</html>

@@ -1,0 +1,28 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="card">
+  <h2>job {{ job.id[:8] }} <span class="status st-{{ job.status }}">{{ job.status }}</span></h2>
+  <p><strong>{{ job.type }}</strong> · attempts {{ job.attempts }}
+    · created {{ job.created_at }}
+    {% if job.claimed_by %}· claimed by {{ job.claimed_by }}{% endif %}</p>
+  {% if can_cancel %}
+  <form method="post" action="/jobs/{{ job.id }}/cancel?as={{ nav['as'] }}">
+    <button class="warn">cancel job</button>
+  </form>
+  {% endif %}
+  <h4>payload</h4><pre>{{ job.payload | tojson(indent=1) }}</pre>
+  <h4>result</h4><pre>{{ job.result | tojson(indent=1) }}</pre>
+</div>
+
+<div class="card">
+  <h3>audit</h3>
+  <table>
+    <tr><th>actor</th><th>action</th><th>changes</th><th>at</th></tr>
+    {% for a in audit %}
+    <tr><td>{{ a.actor }}</td><td>{{ a.action }}</td>
+        <td><pre>{{ a.changes | tojson(indent=1) }}</pre></td>
+        <td>{{ a.created_at }}</td></tr>
+    {% endfor %}
+  </table>
+</div>
+{% endblock %}
