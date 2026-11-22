@@ -1,0 +1,298 @@
+[2026-11-23 03:21:15][INFO] Started plugin 'Leadership'
+[2026-11-23 03:21:15][INFO] Started plugin 'Pruner'
+[2026-11-23 03:21:15][INFO] Started plugin 'Recovery'
+[2026-11-23 03:21:15][INFO] Started plugin 'Metrics'
+[2026-11-23 03:21:15][INFO] Started plugin 'WorkflowPlugin'
+[2026-11-23 03:21:15][INFO] Adding queue 'default' to worker using executor 'chancy.executors.asyncex.AsyncExecutor'.
+[2026-11-23 03:21:15][INFO] Pulled UUID('03fc8dd5-2391-7e07-9841-b363b7fcd761') ('keelflow.engine.worker.dispatch') for queue 'default'
+[2026-11-23 03:21:15][INFO] Pulled UUID('03fc8dd5-239a-8227-a883-197e24c3ccba') ('keelflow.engine.worker.dispatch') for queue 'default'
+[2026-11-23 03:21:15][INFO] Pulled UUID('03fc8dd5-239a-f3e7-923f-976bcca1653f') ('keelflow.engine.worker.dispatch') for queue 'default'
+[2026-11-23 03:21:15][INFO] Pulled UUID('03fc8dd5-23a2-2167-a485-dba4698c6e86') ('keelflow.engine.worker.dispatch') for queue 'default'
+[2026-11-23 03:21:15][INFO] Pulled UUID('03fc8dd5-23a2-4787-bb23-a4f6bab044f2') ('keelflow.engine.worker.dispatch') for queue 'default'
+[2026-11-23 03:21:15][INFO] Pulled UUID('03fc8dd5-23bc-2f67-a7f8-e09ad8a0b742') ('keelflow.engine.worker.dispatch') for queue 'default'
+[2026-11-23 03:21:15][INFO] Started listening for realtime notifications.
+[03:21:15] soak start: 60.0min concurrent=3 workers=6 seed=42
+[2026-11-23 03:21:15][INFO] Pulled UUID('03fc8dd5-23f3-21a7-85cc-acfa3afab7c9') ('keelflow.engine.worker.dispatch') for queue 'default'
+[2026-11-23 03:21:15][INFO] Pulled UUID('03fc8ddc-f62a-b287-a499-7d9f55f7b041') ('keelflow.engine.worker.dispatch') for queue 'default'
+[2026-11-23 03:21:15][INFO] Pulled UUID('03fc8dec-9b8c-f307-871e-0b35ebc504c8') ('keelflow.engine.worker.dispatch') for queue 'default'
+[2026-11-23 03:21:15][INFO] Pulled UUID('03fc8ded-ba1a-3207-a8bb-f671fc50d9c6') ('keelflow.engine.worker.dispatch') for queue 'default'
+[2026-11-23 03:21:15][INFO] Pulled UUID('03fc8df8-e6af-36c7-8804-dc161b0367d5') ('keelflow.engine.worker.dispatch') for queue 'default'
+[2026-11-23 03:21:15][INFO] Pulled UUID('03fc8e03-127e-3307-8a83-5fa1c2a9d51a') ('keelflow.engine.worker.dispatch') for queue 'default'
+[2026-11-23 03:21:15][INFO] Pulled UUID('03fc8e03-1280-b267-97db-27f895921e51') ('keelflow.engine.worker.dispatch') for queue 'default'
+[03:21:15] runs=0 done=0 cancelled=0 failed=0 active=3 inflight={'pending': 68, 'running': 6, 'open_waits': 44}
+[2026-11-23 03:21:45][INFO] Pulled UUID('03fc8e03-1280-e8c7-8f48-c8c1319bfb31') ('keelflow.engine.worker.dispatch') for queue 'default'
+[03:21:45] runs=0 done=0 cancelled=0 failed=0 active=3 inflight={'pending': 69, 'running': 6, 'open_waits': 44}
+[03:22:15] runs=0 done=0 cancelled=0 failed=0 active=3 inflight={'pending': 69, 'running': 6, 'open_waits': 44}
+query cancellation failed: cancellation timeout expired
+query cancellation failed: cancellation timeout expired
+query cancellation failed: cancellation timeout expired
+query cancellation failed: cancellation timeout expired
+Task exception was never retrieved
+future: <Task finished name='Leadership' coro=<Leadership.run() done, defined at /Users/datgs/Workspace/HD/keelflow/.venv/lib/python3.12/site-packages/chancy/plugins/leadership.py:76> exception=PoolTimeout("couldn't get a connection after 30.00 sec")>
+Traceback (most recent call last):
+  File "/Users/datgs/Workspace/HD/keelflow/.venv/lib/python3.12/site-packages/chancy/plugins/leadership.py", line 109, in run
+    chancy.pool.connection() as conn,
+    ^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/datgs/.local/share/uv/python/cpython-3.12.13-macos-aarch64-none/lib/python3.12/contextlib.py", line 210, in __aenter__
+    return await anext(self.gen)
+           ^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/datgs/Workspace/HD/keelflow/.venv/lib/python3.12/site-packages/psycopg_pool/pool_async.py", line 220, in connection
+    conn = await self.getconn(timeout=timeout)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/datgs/Workspace/HD/keelflow/.venv/lib/python3.12/site-packages/psycopg_pool/pool_async.py", line 255, in getconn
+    raise PoolTimeout(
+psycopg_pool.PoolTimeout: couldn't get a connection after 30.00 sec
+[03:22:45] runs=0 done=0 cancelled=0 failed=0 active=3 inflight={'pending': 69, 'running': 6, 'open_waits': 44}
+[2026-11-23 03:23:15][ERROR] Transient database error in queue 'default', retrying in 0.9s (attempt 1).
+Traceback (most recent call last):
+  File "/Users/datgs/Workspace/HD/keelflow/.venv/lib/python3.12/site-packages/chancy/worker.py", line 505, in _maintain_queue
+    self.chancy.pool.connection() as conn
+    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/datgs/.local/share/uv/python/cpython-3.12.13-macos-aarch64-none/lib/python3.12/contextlib.py", line 210, in __aenter__
+    return await anext(self.gen)
+           ^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/datgs/Workspace/HD/keelflow/.venv/lib/python3.12/site-packages/psycopg_pool/pool_async.py", line 220, in connection
+    conn = await self.getconn(timeout=timeout)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/datgs/Workspace/HD/keelflow/.venv/lib/python3.12/site-packages/psycopg_pool/pool_async.py", line 255, in getconn
+    raise PoolTimeout(
+psycopg_pool.PoolTimeout: couldn't get a connection after 30.00 sec
+[03:23:15] runs=0 done=0 cancelled=0 failed=0 active=3 inflight={'pending': 69, 'running': 6, 'open_waits': 44}
+[03:23:45] runs=0 done=0 cancelled=0 failed=0 active=3 inflight={'pending': 69, 'running': 6, 'open_waits': 44}
+[03:24:15] runs=0 done=0 cancelled=0 failed=0 active=3 inflight={'pending': 69, 'running': 6, 'open_waits': 44}
+[2026-11-23 03:24:45][INFO] Pulled UUID('03fc8e03-1280-e8c7-8f48-c8c1319bfb31') ('keelflow.engine.worker.dispatch') for queue 'default'
+[2026-11-23 03:24:45][INFO] Pulled UUID('03fc8e03-128a-70c7-8290-d90cbcd9386a') ('keelflow.engine.worker.dispatch') for queue 'default'
+[2026-11-23 03:24:45][INFO] Pulled UUID('03fc8e03-128a-9507-a82d-c9804f330e20') ('keelflow.engine.worker.dispatch') for queue 'default'
+[2026-11-23 03:24:45][INFO] Pulled UUID('03fc8e03-128a-d607-a79c-99d454fbe01f') ('keelflow.engine.worker.dispatch') for queue 'default'
+[2026-11-23 03:24:45][INFO] Pulled UUID('03fc8e03-128a-f687-8e30-0cdf605b6963') ('keelflow.engine.worker.dispatch') for queue 'default'
+[2026-11-23 03:24:45][INFO] Pulled UUID('03fc8e03-128f-4507-abd8-2dbe94bdb6a4') ('keelflow.engine.worker.dispatch') for queue 'default'
+[03:24:45] runs=0 done=0 cancelled=0 failed=0 active=3 inflight={'pending': 69, 'running': 6, 'open_waits': 44}
+[03:25:15] runs=0 done=0 cancelled=0 failed=0 active=3 inflight={'pending': 69, 'running': 6, 'open_waits': 44}
+[03:25:45] runs=0 done=0 cancelled=0 failed=0 active=3 inflight={'pending': 69, 'running': 6, 'open_waits': 44}
+[03:26:15] runs=0 done=0 cancelled=0 failed=0 active=3 inflight={'pending': 69, 'running': 6, 'open_waits': 44}
+[03:26:45] runs=0 done=0 cancelled=0 failed=0 active=3 inflight={'pending': 67, 'running': 8, 'open_waits': 44}
+[03:27:15] runs=0 done=0 cancelled=0 failed=0 active=3 inflight={'pending': 65, 'running': 10, 'open_waits': 44}
+[03:27:45] runs=0 done=0 cancelled=0 failed=0 active=3 inflight={'pending': 64, 'running': 12, 'open_waits': 44}
+[03:28:15] runs=0 done=0 cancelled=0 failed=0 active=3 inflight={'pending': 64, 'running': 12, 'open_waits': 44}
+[03:28:45] runs=0 done=0 cancelled=0 failed=0 active=3 inflight={'pending': 64, 'running': 12, 'open_waits': 44}
+[03:29:15] runs=0 done=0 cancelled=0 failed=0 active=3 inflight={'pending': 64, 'running': 12, 'open_waits': 44}
+[03:29:45] runs=0 done=0 cancelled=0 failed=0 active=3 inflight={'pending': 64, 'running': 11, 'open_waits': 44}
+[03:30:15] runs=0 done=0 cancelled=0 failed=0 active=3 inflight={'pending': 64, 'running': 8, 'open_waits': 44}
+[03:30:45] runs=0 done=0 cancelled=0 failed=0 active=3 inflight={'pending': 64, 'running': 7, 'open_waits': 44}
+[2026-11-23 03:31:15][INFO] Pulled UUID('03fc8ded-ba1a-3207-a8bb-f671fc50d9c6') ('keelflow.engine.worker.dispatch') for queue 'default'
+[2026-11-23 03:31:15][INFO] Pulled UUID('03fc8df8-e6af-36c7-8804-dc161b0367d5') ('keelflow.engine.worker.dispatch') for queue 'default'
+[03:31:15] runs=0 done=0 cancelled=0 failed=0 active=3 inflight={'pending': 64, 'running': 7, 'open_waits': 44}
+[03:31:45] runs=0 done=0 cancelled=0 failed=0 active=3 inflight={'pending': 64, 'running': 7, 'open_waits': 44}
+[2026-11-23 03:32:15][INFO] Pulled UUID('03fc8e03-127e-3307-8a83-5fa1c2a9d51a') ('keelflow.engine.worker.dispatch') for queue 'default'
+[2026-11-23 03:32:15][INFO] Pulled UUID('03fc8e03-1280-b267-97db-27f895921e51') ('keelflow.engine.worker.dispatch') for queue 'default'
+[2026-11-23 03:32:15][INFO] Pulled UUID('03fc8e03-128f-c527-9dfa-499abc5fb025') ('keelflow.engine.worker.dispatch') for queue 'default'
+[03:32:15] runs=0 done=0 cancelled=0 failed=0 active=3 inflight={'pending': 64, 'running': 7, 'open_waits': 44}
+[03:32:45] runs=0 done=0 cancelled=0 failed=0 active=3 inflight={'pending': 65, 'running': 7, 'open_waits': 44}
+[03:33:15] runs=0 done=0 cancelled=0 failed=0 active=3 inflight={'pending': 65, 'running': 7, 'open_waits': 44}
+[03:33:45] runs=0 done=0 cancelled=0 failed=0 active=3 inflight={'pending': 65, 'running': 7, 'open_waits': 44}
+[03:34:15] runs=0 done=0 cancelled=0 failed=0 active=3 inflight={'pending': 65, 'running': 7, 'open_waits': 44}
+[03:34:45] runs=0 done=0 cancelled=0 failed=0 active=3 inflight={'pending': 68, 'running': 7, 'open_waits': 45}
+[03:35:15] runs=0 done=0 cancelled=0 failed=0 active=3 inflight={'pending': 68, 'running': 7, 'open_waits': 45}
+[2026-11-23 03:35:45][INFO] Pulled UUID('03fc8e03-1296-bba7-afa5-0ba428c406b9') ('keelflow.engine.worker.dispatch') for queue 'default'
+[03:35:45] runs=0 done=0 cancelled=0 failed=0 active=3 inflight={'pending': 68, 'running': 7, 'open_waits': 45}
+[03:36:15] runs=0 done=0 cancelled=0 failed=0 active=3 inflight={'pending': 68, 'running': 7, 'open_waits': 45}
+[03:36:45] runs=0 done=0 cancelled=0 failed=0 active=3 inflight={'pending': 68, 'running': 7, 'open_waits': 45}
+[03:37:15] runs=0 done=0 cancelled=0 failed=0 active=3 inflight={'pending': 68, 'running': 6, 'open_waits': 45}
+[03:37:45] runs=0 done=0 cancelled=0 failed=0 active=3 inflight={'pending': 70, 'running': 3, 'open_waits': 45}
+[2026-11-23 03:38:15][INFO] Pulled UUID('03fc8e03-12a6-9987-9c71-f291b5884952') ('keelflow.engine.worker.dispatch') for queue 'default'
+[03:38:15] runs=0 done=0 cancelled=0 failed=0 active=3 inflight={'pending': 69, 'running': 4, 'open_waits': 45}
+[03:38:45] runs=0 done=0 cancelled=0 failed=0 active=3 inflight={'pending': 69, 'running': 4, 'open_waits': 45}
+[2026-11-23 03:39:15][INFO] Pulled UUID('03fc8e03-12af-8a47-836d-11d1c6d8c182') ('keelflow.engine.worker.dispatch') for queue 'default'
+[2026-11-23 03:39:15][INFO] Pulled UUID('03fc8e03-12bc-0e07-b128-21ff60e034b9') ('keelflow.engine.worker.dispatch') for queue 'default'
+[2026-11-23 03:39:15][INFO] Pulled UUID('03fc8e03-12c7-8287-b7e9-bdb2825a2cd6') ('keelflow.engine.worker.dispatch') for queue 'default'
+[03:39:15] runs=0 done=0 cancelled=0 failed=0 active=3 inflight={'pending': 71, 'running': 3, 'open_waits': 45}
+[2026-11-23 03:39:45][INFO] Pulled UUID('03fc8e03-12c7-e687-84ff-a42394efeaed') ('keelflow.engine.worker.dispatch') for queue 'default'
+[03:39:45] runs=0 done=0 cancelled=0 failed=0 active=3 inflight={'pending': 71, 'running': 3, 'open_waits': 45}
+[03:40:15] runs=0 done=0 cancelled=0 failed=0 active=3 inflight={'pending': 71, 'running': 3, 'open_waits': 45}
+[03:40:45] runs=0 done=0 cancelled=0 failed=0 active=3 inflight={'pending': 70, 'running': 4, 'open_waits': 45}
+[03:41:15] runs=0 done=0 cancelled=0 failed=0 active=3 inflight={'pending': 70, 'running': 3, 'open_waits': 45}
+[2026-11-23 03:41:45][INFO] Pulled UUID('03fc8e03-12db-35a7-8c11-7853bc010b6e') ('keelflow.engine.worker.dispatch') for queue 'default'
+[03:41:45] runs=0 done=0 cancelled=0 failed=0 active=3 inflight={'pending': 67, 'running': 6, 'open_waits': 45}
+[03:42:15] runs=0 done=0 cancelled=0 failed=0 active=3 inflight={'pending': 66, 'running': 7, 'open_waits': 45}
+[03:42:45] runs=0 done=0 cancelled=0 failed=0 active=3 inflight={'pending': 66, 'running': 7, 'open_waits': 45}
+[03:43:15] runs=0 done=0 cancelled=0 failed=0 active=3 inflight={'pending': 66, 'running': 7, 'open_waits': 45}
+[03:43:45] runs=0 done=0 cancelled=0 failed=0 active=3 inflight={'pending': 66, 'running': 6, 'open_waits': 45}
+[03:44:15] runs=0 done=0 cancelled=0 failed=0 active=3 inflight={'pending': 65, 'running': 5, 'open_waits': 45}
+[2026-11-23 03:44:45][INFO] Pulled UUID('03fc8e03-12db-6fc7-b678-e28ebabb6687') ('keelflow.engine.worker.dispatch') for queue 'default'
+[2026-11-23 03:44:45][INFO] Pulled UUID('03fc8e03-12e3-bf47-a5b9-416d340f8597') ('keelflow.engine.worker.dispatch') for queue 'default'
+[03:44:45] runs=0 done=0 cancelled=0 failed=0 active=3 inflight={'pending': 65, 'running': 4, 'open_waits': 45}
+[2026-11-23 03:45:15][INFO] Pulled UUID('03fc8e0e-3ff1-3487-8e50-1e0a21e664c9') ('keelflow.engine.worker.dispatch') for queue 'default'
+[2026-11-23 03:45:15][INFO] Pulled UUID('03fc8e16-12b3-b627-a049-9090e3fa8b32') ('keelflow.engine.worker.dispatch') for queue 'default'
+[03:45:15] runs=0 done=0 cancelled=0 failed=0 active=3 inflight={'pending': 65, 'running': 4, 'open_waits': 45}
+[03:45:45] runs=0 done=0 cancelled=0 failed=0 active=3 inflight={'pending': 65, 'running': 4, 'open_waits': 45}
+[03:46:15] runs=0 done=0 cancelled=0 failed=0 active=3 inflight={'pending': 65, 'running': 4, 'open_waits': 45}
+[03:46:45] runs=0 done=0 cancelled=0 failed=0 active=3 inflight={'pending': 65, 'running': 4, 'open_waits': 45}
+[03:47:15] runs=0 done=0 cancelled=0 failed=0 active=3 inflight={'pending': 65, 'running': 4, 'open_waits': 45}
+[03:47:45] runs=0 done=0 cancelled=0 failed=0 active=3 inflight={'pending': 63, 'running': 6, 'open_waits': 45}
+[03:48:15] runs=0 done=0 cancelled=0 failed=0 active=3 inflight={'pending': 63, 'running': 6, 'open_waits': 45}
+[03:48:45] runs=0 done=0 cancelled=0 failed=0 active=3 inflight={'pending': 61, 'running': 8, 'open_waits': 45}
+[03:49:15] runs=0 done=0 cancelled=0 failed=0 active=3 inflight={'pending': 61, 'running': 8, 'open_waits': 45}
+[03:49:45] runs=0 done=0 cancelled=0 failed=0 active=3 inflight={'pending': 65, 'running': 7, 'open_waits': 46}
+[03:50:15] runs=0 done=0 cancelled=0 failed=0 active=3 inflight={'pending': 65, 'running': 7, 'open_waits': 46}
+[2026-11-23 03:50:45][INFO] Pulled UUID('03fc8e18-4edd-80c7-a069-65f9e9c8588f') ('keelflow.engine.worker.dispatch') for queue 'default'
+[03:50:45] runs=0 done=0 cancelled=0 failed=0 active=3 inflight={'pending': 65, 'running': 7, 'open_waits': 46}
+[03:51:15] runs=0 done=0 cancelled=0 failed=0 active=3 inflight={'pending': 65, 'running': 7, 'open_waits': 46}
+[03:51:45] runs=0 done=0 cancelled=0 failed=0 active=3 inflight={'pending': 65, 'running': 6, 'open_waits': 46}
+[03:52:15] runs=0 done=0 cancelled=0 failed=0 active=3 inflight={'pending': 65, 'running': 6, 'open_waits': 48}
+[03:52:15] ANOMALY: SOAK-00002-f36fab: run exceeded 1800s driver budget
+[2026-11-23 03:52:15][INFO] Pulled UUID('03fc8e19-6cf8-7787-b387-dfa96fed054d') ('keelflow.engine.worker.dispatch') for queue 'default'
+[2026-11-23 03:52:15][INFO] Pulled UUID('03fc8e1b-a937-4b27-add1-2b236b80dab9') ('keelflow.engine.worker.dispatch') for queue 'default'
+[2026-11-23 03:52:15][INFO] Pulled UUID('03fc8e23-7bef-1dc7-94f4-d1cfe3416aad') ('keelflow.engine.worker.dispatch') for queue 'default'
+[2026-11-23 03:52:15][INFO] Pulled UUID('03fc8e25-b81e-c647-9ea4-845229a68eec') ('keelflow.engine.worker.dispatch') for queue 'default'
+[2026-11-23 03:52:15][INFO] Pulled UUID('03fc8e26-d632-d267-8f61-adab313439aa') ('keelflow.engine.worker.dispatch') for queue 'default'
+[2026-11-23 03:52:15][INFO] Pulled UUID('03fc8e29-1267-5f67-b319-0e807d20587b') ('keelflow.engine.worker.dispatch') for queue 'default'
+[03:52:15] ANOMALY: SOAK-00001-9d9b60: run exceeded 1800s driver budget
+[03:52:15] ANOMALY: SOAK-00003-294342: run exceeded 1800s driver budget
+[2026-11-23 03:52:15][INFO] Pulled UUID('03fc8e37-99ce-0c27-a552-19c8ec674c92') ('keelflow.engine.worker.dispatch') for queue 'default'
+[2026-11-23 03:52:15][INFO] Pulled UUID('03fc8e3a-f412-d147-8444-c2fb5234b351') ('keelflow.engine.worker.dispatch') for queue 'default'
+[2026-11-23 03:52:15][INFO] Pulled UUID('03fc8e3d-304b-45a7-844f-6ade3224a653') ('keelflow.engine.worker.dispatch') for queue 'default'
+[2026-11-23 03:52:15][INFO] Pulled UUID('03fc8e3e-4e5b-f707-9c5d-b70fb8c0fb25') ('keelflow.engine.worker.dispatch') for queue 'default'
+[2026-11-23 03:52:15][INFO] Pulled UUID('03fc8e41-a8df-8a47-96de-1abd94f946fb') ('keelflow.engine.worker.dispatch') for queue 'default'
+[2026-11-23 03:52:15][INFO] Pulled UUID('03fc8e43-e51d-88c7-91fe-cadce1b52612') ('keelflow.engine.worker.dispatch') for queue 'default'
+[2026-11-23 03:52:15][INFO] Pulled UUID('03fc8e45-0337-4207-b03f-ddfa43013cd4') ('keelflow.engine.worker.dispatch') for queue 'default'
+[2026-11-23 03:52:15][INFO] Pulled UUID('03fc8e45-033b-fca7-9961-679354962d22') ('keelflow.engine.worker.dispatch') for queue 'default'
+[2026-11-23 03:52:15][INFO] Pulled UUID('03fc8e47-3f65-3147-baa4-3d2ca5018d69') ('keelflow.engine.worker.dispatch') for queue 'default'
+[03:52:45] runs=3 done=0 cancelled=0 failed=0 active=3 inflight={'pending': 76, 'running': 6, 'open_waits': 53}
+[2026-11-23 03:53:15][INFO] Pulled UUID('03fc8e48-5d86-d427-8f39-5a06d4acf0c6') ('keelflow.engine.worker.dispatch') for queue 'default'
+[03:53:15] runs=3 done=0 cancelled=0 failed=0 active=3 inflight={'pending': 75, 'running': 7, 'open_waits': 53}
+[03:53:45] runs=3 done=0 cancelled=0 failed=0 active=3 inflight={'pending': 76, 'running': 6, 'open_waits': 53}
+[2026-11-23 03:54:15][INFO] Pulled UUID('03fc8e48-5d87-2e27-a50c-2d73f47b91ed') ('keelflow.engine.worker.dispatch') for queue 'default'
+[03:54:15] runs=3 done=0 cancelled=0 failed=0 active=3 inflight={'pending': 76, 'running': 5, 'open_waits': 53}
+[03:54:45] runs=3 done=0 cancelled=0 failed=0 active=3 inflight={'pending': 76, 'running': 4, 'open_waits': 53}
+[2026-11-23 03:55:15][INFO] Pulled UUID('03fc8e48-5da5-6f27-afd4-7f35e76eccaf') ('keelflow.engine.worker.dispatch') for queue 'default'
+[03:55:15] runs=3 done=0 cancelled=0 failed=0 active=3 inflight={'pending': 76, 'running': 3, 'open_waits': 53}
+[03:55:45] runs=3 done=0 cancelled=0 failed=0 active=3 inflight={'pending': 76, 'running': 2, 'open_waits': 53}
+[2026-11-23 03:56:15][INFO] Pulled UUID('03fc8e48-5da8-0507-9b5f-0417bdde376c') ('keelflow.engine.worker.dispatch') for queue 'default'
+[2026-11-23 03:56:15][INFO] Pulled UUID('03fc8e48-5dd2-ce27-9f43-208b99449863') ('keelflow.engine.worker.dispatch') for queue 'default'
+[03:56:15] runs=3 done=0 cancelled=0 failed=0 active=3 inflight={'pending': 75, 'running': 3, 'open_waits': 53}
+[03:56:45] runs=3 done=0 cancelled=0 failed=0 active=3 inflight={'pending': 75, 'running': 3, 'open_waits': 53}
+[2026-11-23 03:57:15][INFO] Pulled UUID('03fc8e48-5ddf-53c7-aaaf-a69cf8c2abac') ('keelflow.engine.worker.dispatch') for queue 'default'
+[03:57:15] runs=3 done=0 cancelled=0 failed=0 active=3 inflight={'pending': 74, 'running': 4, 'open_waits': 53}
+[03:57:45] runs=3 done=0 cancelled=0 failed=0 active=3 inflight={'pending': 73, 'running': 5, 'open_waits': 53}
+[03:58:15] runs=3 done=0 cancelled=0 failed=0 active=3 inflight={'pending': 73, 'running': 5, 'open_waits': 53}
+[03:58:45] runs=3 done=0 cancelled=0 failed=0 active=3 inflight={'pending': 73, 'running': 4, 'open_waits': 53}
+[03:59:15] runs=3 done=0 cancelled=0 failed=0 active=3 inflight={'pending': 71, 'running': 6, 'open_waits': 53}
+[03:59:45] runs=3 done=0 cancelled=0 failed=0 active=3 inflight={'pending': 71, 'running': 6, 'open_waits': 53}
+[2026-11-23 04:00:15][INFO] Pulled UUID('03fc8e48-5e16-b2c7-85c0-9e73809a4a45') ('keelflow.engine.worker.dispatch') for queue 'default'
+[04:00:15] runs=3 done=0 cancelled=0 failed=0 active=3 inflight={'pending': 70, 'running': 7, 'open_waits': 53}
+[04:00:45] runs=3 done=0 cancelled=0 failed=0 active=3 inflight={'pending': 70, 'running': 7, 'open_waits': 53}
+[04:01:15] runs=3 done=0 cancelled=0 failed=0 active=3 inflight={'pending': 70, 'running': 7, 'open_waits': 53}
+[04:01:45] runs=3 done=0 cancelled=0 failed=0 active=3 inflight={'pending': 70, 'running': 5, 'open_waits': 53}
+[04:02:15] runs=3 done=0 cancelled=0 failed=0 active=3 inflight={'pending': 70, 'running': 5, 'open_waits': 53}
+[2026-11-23 04:02:45][INFO] Pulled UUID('03fc8e48-5e24-4c07-b2b6-d8cdea5f2c29') ('keelflow.engine.worker.dispatch') for queue 'default'
+[2026-11-23 04:02:45][INFO] Pulled UUID('03fc8e48-5e2c-4867-beb1-29fe8c3738f4') ('keelflow.engine.worker.dispatch') for queue 'default'
+[04:02:45] runs=3 done=0 cancelled=0 failed=0 active=3 inflight={'pending': 70, 'running': 5, 'open_waits': 53}
+[04:03:15] runs=3 done=0 cancelled=0 failed=0 active=3 inflight={'pending': 69, 'running': 6, 'open_waits': 53}
+[04:03:45] runs=3 done=0 cancelled=0 failed=0 active=3 inflight={'pending': 70, 'running': 6, 'open_waits': 53}
+[04:04:15] runs=3 done=0 cancelled=0 failed=0 active=3 inflight={'pending': 70, 'running': 6, 'open_waits': 53}
+[04:04:45] runs=3 done=0 cancelled=0 failed=0 active=3 inflight={'pending': 70, 'running': 6, 'open_waits': 53}
+[04:05:15] runs=3 done=0 cancelled=0 failed=0 active=3 inflight={'pending': 70, 'running': 6, 'open_waits': 53}
+[04:05:45] runs=3 done=0 cancelled=0 failed=0 active=3 inflight={'pending': 73, 'running': 7, 'open_waits': 55}
+[04:06:15] runs=3 done=0 cancelled=0 failed=0 active=3 inflight={'pending': 77, 'running': 5, 'open_waits': 56}
+[04:06:45] runs=3 done=0 cancelled=0 failed=0 active=3 inflight={'pending': 77, 'running': 5, 'open_waits': 56}
+[2026-11-23 04:07:15][INFO] Pulled UUID('03fc8e48-5e30-bd07-bf60-4f5b3307f8d1') ('keelflow.engine.worker.dispatch') for queue 'default'
+[2026-11-23 04:07:15][INFO] Pulled UUID('03fc8e48-5e3b-a3a7-aca6-19838fde99ab') ('keelflow.engine.worker.dispatch') for queue 'default'
+[04:07:15] runs=3 done=0 cancelled=0 failed=0 active=3 inflight={'pending': 77, 'running': 5, 'open_waits': 56}
+[04:07:45] runs=3 done=0 cancelled=0 failed=0 active=3 inflight={'pending': 77, 'running': 5, 'open_waits': 56}
+[04:08:15] runs=3 done=0 cancelled=0 failed=0 active=3 inflight={'pending': 81, 'running': 4, 'open_waits': 57}
+[2026-11-23 04:08:45][INFO] Pulled UUID('03fc8e48-5e3d-89e7-a06a-8e4f666ab8a7') ('keelflow.engine.worker.dispatch') for queue 'default'
+[04:08:45] runs=3 done=0 cancelled=0 failed=0 active=3 inflight={'pending': 81, 'running': 3, 'open_waits': 57}
+[04:09:15] runs=3 done=0 cancelled=0 failed=0 active=3 inflight={'pending': 81, 'running': 2, 'open_waits': 57}
+[2026-11-23 04:09:45][INFO] Pulled UUID('03fc8e48-5e44-e147-a435-12070d3b38ca') ('keelflow.engine.worker.dispatch') for queue 'default'
+[2026-11-23 04:09:45][INFO] Pulled UUID('03fc8e48-5e58-e007-8bb8-cc0f11c16aac') ('keelflow.engine.worker.dispatch') for queue 'default'
+[04:09:45] runs=3 done=0 cancelled=0 failed=0 active=3 inflight={'pending': 81, 'running': 2, 'open_waits': 57}
+[04:10:15] runs=3 done=0 cancelled=0 failed=0 active=3 inflight={'pending': 79, 'running': 4, 'open_waits': 57}
+[2026-11-23 04:10:45][INFO] Pulled UUID('03fc8e5c-7b5d-69a7-b6e7-2761ef9cb916') ('keelflow.engine.worker.dispatch') for queue 'default'
+[04:10:45] runs=3 done=0 cancelled=0 failed=0 active=3 inflight={'pending': 79, 'running': 4, 'open_waits': 57}
+[04:11:15] runs=3 done=0 cancelled=0 failed=0 active=3 inflight={'pending': 78, 'running': 5, 'open_waits': 57}
+[04:11:45] runs=3 done=0 cancelled=0 failed=0 active=3 inflight={'pending': 78, 'running': 5, 'open_waits': 57}
+[04:12:15] runs=3 done=0 cancelled=0 failed=0 active=3 inflight={'pending': 76, 'running': 7, 'open_waits': 57}
+[04:12:45] runs=3 done=0 cancelled=0 failed=0 active=3 inflight={'pending': 76, 'running': 6, 'open_waits': 57}
+[04:13:15] runs=3 done=0 cancelled=0 failed=0 active=3 inflight={'pending': 75, 'running': 6, 'open_waits': 57}
+[2026-11-23 04:13:45][INFO] Pulled UUID('03fc8e5c-7b5d-a787-a6ac-c1ed67ffcbad') ('keelflow.engine.worker.dispatch') for queue 'default'
+[04:13:45] runs=3 done=0 cancelled=0 failed=0 active=3 inflight={'pending': 75, 'running': 6, 'open_waits': 57}
+[04:14:15] runs=3 done=0 cancelled=0 failed=0 active=3 inflight={'pending': 75, 'running': 6, 'open_waits': 57}
+[2026-11-23 04:14:45][INFO] Pulled UUID('03fc8e5e-b793-3c47-800c-746907dc6d79') ('keelflow.engine.worker.dispatch') for queue 'default'
+[04:14:45] runs=3 done=0 cancelled=0 failed=0 active=3 inflight={'pending': 75, 'running': 5, 'open_waits': 57}
+[04:15:15] runs=3 done=0 cancelled=0 failed=0 active=3 inflight={'pending': 75, 'running': 5, 'open_waits': 57}
+[2026-11-23 04:15:45][INFO] Pulled UUID('03fc8e5f-d5ac-cce7-8b03-d29f5d084df3') ('keelflow.engine.worker.dispatch') for queue 'default'
+[04:15:45] runs=3 done=0 cancelled=0 failed=0 active=3 inflight={'pending': 75, 'running': 4, 'open_waits': 57}
+[2026-11-23 04:16:15][INFO] Pulled UUID('03fc8e5f-d5b0-b627-98ef-990a064adc5c') ('keelflow.engine.worker.dispatch') for queue 'default'
+[04:16:15] runs=3 done=0 cancelled=0 failed=0 active=3 inflight={'pending': 74, 'running': 5, 'open_waits': 57}
+[04:16:45] runs=3 done=0 cancelled=0 failed=0 active=3 inflight={'pending': 76, 'running': 4, 'open_waits': 57}
+[04:17:15] runs=3 done=0 cancelled=0 failed=0 active=3 inflight={'pending': 75, 'running': 5, 'open_waits': 57}
+[04:17:45] runs=3 done=0 cancelled=0 failed=0 active=3 inflight={'pending': 75, 'running': 5, 'open_waits': 57}
+[04:18:15] runs=3 done=0 cancelled=0 failed=0 active=3 inflight={'pending': 76, 'running': 5, 'open_waits': 57}
+[2026-11-23 04:18:45][INFO] Pulled UUID('03fc8e60-f3c7-6fe7-aeff-b7fcc861895e') ('keelflow.engine.worker.dispatch') for queue 'default'
+[04:18:45] runs=3 done=0 cancelled=0 failed=0 active=3 inflight={'pending': 76, 'running': 4, 'open_waits': 57}
+[04:19:15] runs=3 done=0 cancelled=0 failed=0 active=3 inflight={'pending': 75, 'running': 5, 'open_waits': 57}
+[2026-11-23 04:19:45][INFO] Pulled UUID('03fc8e62-11e8-5e27-87ea-e7d12e09afc3') ('keelflow.engine.worker.dispatch') for queue 'default'
+[2026-11-23 04:19:45][INFO] Pulled UUID('03fc8e62-11e9-6367-a8a1-af83de316dd4') ('keelflow.engine.worker.dispatch') for queue 'default'
+[04:19:45] runs=3 done=0 cancelled=0 failed=0 active=3 inflight={'pending': 75, 'running': 5, 'open_waits': 57}
+[04:20:15] runs=3 done=0 cancelled=0 failed=0 active=3 inflight={'pending': 75, 'running': 5, 'open_waits': 57}
+[04:20:45] runs=3 done=0 cancelled=0 failed=0 active=3 inflight={'pending': 75, 'running': 5, 'open_waits': 57}
+[04:21:15] draining 3 drivers…
+[2026-11-23 04:21:15][INFO] Pulled UUID('03fc8e64-4e18-a427-8869-55fd0dbd8255') ('keelflow.engine.worker.dispatch') for queue 'default'
+[2026-11-23 04:21:15][INFO] Pulled UUID('03fc8e66-8a54-7987-8d06-d60176270907') ('keelflow.engine.worker.dispatch') for queue 'default'
+[2026-11-23 04:21:15][INFO] Pulled UUID('03fc8e79-8a15-e867-a891-b6d1412ec74b') ('keelflow.engine.worker.dispatch') for queue 'default'
+[2026-11-23 04:21:15][INFO] Pulled UUID('03fc8e7a-a837-03a7-81e6-8a2676c8124f') ('keelflow.engine.worker.dispatch') for queue 'default'
+[2026-11-23 04:21:15][INFO] Pulled UUID('03fc8e7c-e460-5dc7-bea3-31d6211e9e8d') ('keelflow.engine.worker.dispatch') for queue 'default'
+[2026-11-23 04:21:15][INFO] Pulled UUID('03fc8e7f-2095-2c67-a739-f80745528c90') ('keelflow.engine.worker.dispatch') for queue 'default'
+[2026-11-23 04:21:15][INFO] Pulled UUID('03fc8e88-1144-b387-acfc-0ace6cf5695d') ('keelflow.engine.worker.dispatch') for queue 'default'
+[2026-11-23 04:21:15][INFO] Pulled UUID('03fc8e89-2eab-b127-9af9-8fbfaca1cd74') ('keelflow.engine.worker.dispatch') for queue 'default'
+[2026-11-23 04:21:15][INFO] Pulled UUID('03fc8e89-2f04-ae67-859c-f2ffa2d9d867') ('keelflow.engine.worker.dispatch') for queue 'default'
+[2026-11-23 04:21:15][INFO] Pulled UUID('03fc8e89-2f0a-bee7-b0c9-7cd72c3b2d3d') ('keelflow.engine.worker.dispatch') for queue 'default'
+[2026-11-23 04:21:15][INFO] Pulled UUID('03fc8e89-2f0d-c047-8cf8-5597f0289147') ('keelflow.engine.worker.dispatch') for queue 'default'
+[2026-11-23 04:21:15][INFO] Pulled UUID('03fc8e89-2f08-3b27-b3d4-67dace087acb') ('keelflow.engine.worker.dispatch') for queue 'default'
+[2026-11-23 04:21:15][INFO] Pulled UUID('03fc8e89-2f0d-6147-90c7-5e23c7631e71') ('keelflow.engine.worker.dispatch') for queue 'default'
+[2026-11-23 04:21:15][INFO] Pulled UUID('03fc8e89-2f0d-0107-be63-33d1f0a800e8') ('keelflow.engine.worker.dispatch') for queue 'default'
+[2026-11-23 04:21:15][INFO] Pulled UUID('03fc8e89-2f10-5767-a005-8cd9af7932df') ('keelflow.engine.worker.dispatch') for queue 'default'
+[2026-11-23 04:21:15][INFO] Pulled UUID('03fc8e89-2f11-a487-8198-ed6e6dfd8fe9') ('keelflow.engine.worker.dispatch') for queue 'default'
+[2026-11-23 04:21:15][INFO] Pulled UUID('03fc8e89-2f14-a727-95b8-ac087e6368e5') ('keelflow.engine.worker.dispatch') for queue 'default'
+[2026-11-23 04:21:16][INFO] Pulled UUID('03fc8e89-33e5-e027-86ae-0df898770cd3') ('keelflow.engine.worker.dispatch') for queue 'default'
+[2026-11-23 04:21:16][INFO] Pulled UUID('03fc8e89-35a3-c1c7-b35d-f92d7e57a8c5') ('keelflow.engine.worker.dispatch') for queue 'default'
+[2026-11-23 04:21:16][INFO] Pulled UUID('03fc8e89-361b-0787-ac19-9206174805b2') ('keelflow.engine.worker.dispatch') for queue 'default'
+[04:21:16]   3bcb71ec: 1 blocked human(s)
+[04:21:16]   3bcb71ec: completed ccd30db1
+[04:21:16]   ff49a19e: 1 blocked human(s)
+[04:21:16]   ff49a19e: completed dc04d623
+[2026-11-23 04:21:16][INFO] Pulled UUID('03fc8e89-3aa7-c867-aff6-953c79de59af') ('keelflow.engine.worker.dispatch') for queue 'default'
+[2026-11-23 04:21:16][INFO] Pulled UUID('03fc8e89-3b0f-8d67-81b8-232b2bd462ea') ('keelflow.engine.worker.dispatch') for queue 'default'
+[2026-11-23 04:21:16][INFO] Pulled UUID('03fc8e89-3b1c-dc47-8926-970e738206ba') ('keelflow.engine.worker.dispatch') for queue 'default'
+[2026-11-23 04:21:16][INFO] Pulled UUID('03fc8e89-3b5f-ee47-8c83-138e670fd2e0') ('keelflow.engine.worker.dispatch') for queue 'default'
+[04:21:16]   5abf515b: 1 blocked human(s)
+[04:21:16]   5abf515b: completed c5e11bfd
+[2026-11-23 04:21:16][INFO] Pulled UUID('03fc8e89-3b92-8da7-8251-7ae870343c63') ('keelflow.engine.worker.dispatch') for queue 'default'
+[04:21:17]   3bcb71ec: 1 blocked human(s)
+[04:21:17]   3bcb71ec: completed 62be8f49
+[2026-11-23 04:21:17][INFO] Pulled UUID('03fc8e89-3e8b-e7e7-998b-ea9f87fac779') ('keelflow.engine.worker.dispatch') for queue 'default'
+[2026-11-23 04:21:17][INFO] Pulled UUID('03fc8e89-3eea-4ce7-a9b5-a607f8301740') ('keelflow.engine.worker.dispatch') for queue 'default'
+[2026-11-23 04:21:17][INFO] Pulled UUID('03fc8e89-3ef7-2f07-932d-c6aac32c2d93') ('keelflow.engine.worker.dispatch') for queue 'default'
+[2026-11-23 04:21:17][INFO] Pulled UUID('03fc8e89-3f41-af87-896f-bd80e22e7093') ('keelflow.engine.worker.dispatch') for queue 'default'
+[2026-11-23 04:21:17][INFO] Pulled UUID('03fc8e89-3f76-2a87-9537-11c70429a875') ('keelflow.engine.worker.dispatch') for queue 'default'
+[2026-11-23 04:21:17][INFO] Pulled UUID('03fc8e89-42e2-25c7-8d9a-9baa77d73233') ('keelflow.engine.worker.dispatch') for queue 'default'
+[2026-11-23 04:21:17][INFO] Pulled UUID('03fc8e89-4310-8fa7-819e-6e2ed55d892e') ('keelflow.engine.worker.dispatch') for queue 'default'
+[2026-11-23 04:21:17][INFO] Pulled UUID('03fc8e89-433a-7047-aa43-533fe256736f') ('keelflow.engine.worker.dispatch') for queue 'default'
+[2026-11-23 04:21:17][INFO] Pulled UUID('03fc8e89-4361-c467-8f08-c257e0fdb20f') ('keelflow.engine.worker.dispatch') for queue 'default'
+[04:21:17]   5abf515b: 1 blocked human(s)
+[04:21:17]   5abf515b: completed f939adfe
+[2026-11-23 04:21:17][INFO] Pulled UUID('03fc8e89-43c5-2b47-8671-638dc3408901') ('keelflow.engine.worker.dispatch') for queue 'default'
+[2026-11-23 04:21:17][INFO] Pulled UUID('03fc8e89-43e6-22a7-9c45-5a613c739bca') ('keelflow.engine.worker.dispatch') for queue 'default'
+[2026-11-23 04:21:17][INFO] Pulled UUID('03fc8e89-43ea-ef67-b32f-161b40c5e75e') ('keelflow.engine.worker.dispatch') for queue 'default'
+[2026-11-23 04:21:17][INFO] Pulled UUID('03fc8e89-440a-6207-ba23-424643a4494a') ('keelflow.engine.worker.dispatch') for queue 'default'
+[2026-11-23 04:21:17][INFO] Pulled UUID('03fc8e89-4426-79e7-a0a6-f5107d56febf') ('keelflow.engine.worker.dispatch') for queue 'default'
+[2026-11-23 04:21:17][INFO] Pulled UUID('03fc8e89-4442-c0a7-8740-2a9767c2d602') ('keelflow.engine.worker.dispatch') for queue 'default'
+[2026-11-23 04:21:17][INFO] Pulled UUID('03fc8e89-4514-93a7-ac75-abc985d32c84') ('keelflow.engine.worker.dispatch') for queue 'default'
+[2026-11-23 04:21:17][INFO] Pulled UUID('03fc8e89-4537-e807-9ec1-8e84cd73da8b') ('keelflow.engine.worker.dispatch') for queue 'default'
+[2026-11-23 04:21:17][INFO] Pulled UUID('03fc8e89-455a-d4a7-9a11-cac186d30262') ('keelflow.engine.worker.dispatch') for queue 'default'
+[2026-11-23 04:21:17][INFO] Pulled UUID('03fc8e89-4580-37e7-b9a5-54613762b5d7') ('keelflow.engine.worker.dispatch') for queue 'default'
+[2026-11-23 04:21:18][INFO] Pulled UUID('03fc8e89-4a9c-9ac7-a99c-8d3dc1c1ce61') ('keelflow.engine.worker.dispatch') for queue 'default'
+[2026-11-23 04:21:18][INFO] Pulled UUID('03fc8e89-4af2-afa7-9626-f5d732c800ea') ('keelflow.engine.worker.dispatch') for queue 'default'
+[2026-11-23 04:21:18][INFO] Pulled UUID('03fc8e89-4b38-c267-b318-8c4926b9eac4') ('keelflow.engine.worker.dispatch') for queue 'default'
+[2026-11-23 04:21:18][INFO] Pulled UUID('03fc8e89-4b75-dc47-b78d-1cf8fb733325') ('keelflow.engine.worker.dispatch') for queue 'default'
+[04:21:20] SOAK DONE: runs=6 stats={'done': 3, 'cancelled': 0, 'failed': 0, 'timeout': 3, 'cancels': 0, 'resumes': 0} anomalies=3 → /Users/datgs/Workspace/HD/keelflow/.spikes/financial_soak/soak_result.json

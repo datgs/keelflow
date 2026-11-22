@@ -1,0 +1,25 @@
+{
+  "minutes": 60.0,
+  "concurrent": 3,
+  "workers": 6,
+  "seed": 42,
+  "runs": 6,
+  "stats": {
+    "done": 3,
+    "cancelled": 0,
+    "failed": 0,
+    "timeout": 3,
+    "cancels": 0,
+    "resumes": 0
+  },
+  "done_elapsed": {
+    "min": 1712.9,
+    "mean": 1733.0,
+    "max": 1743.3
+  },
+  "anomalies": [
+    "SOAK-00002-f36fab: run exceeded 1800s driver budget",
+    "SOAK-00001-9d9b60: run exceeded 1800s driver budget",
+    "SOAK-00003-294342: run exceeded 1800s driver budget"
+  ]
+}
