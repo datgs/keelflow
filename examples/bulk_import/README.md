@@ -121,16 +121,20 @@ KEELFLOW_BENCH_DSN=... uv run --package keelflow-demo-import \
   python -m bulk_import.bench --sizes 100000 500000 \
   --reps 3 --workers 1 4 8 --allow-db \
   --out .spikes/erp_bulk_bench/result.json
+# batch-only sweep: --variants keelflow-batch --chunk 2500
 ```
 
-Local findings (see `.spikes/erp_bulk_bench/RESULTS.md`, v4 —
-set-based partition + `INSERT … SELECT` staging): at 1M rows the
-`process_batch` chunk callback reaches ≈16.5k rows/s at 8 workers,
-the per-row `process_row` path ≈3.4k rows/s (≈5×, and it scales with
-worker count); direct set-based SQL ≈145k rows/s — the data-path
-floor, without any of the engine's durable row/chunk bookkeeping.
-Every timed run passes an exact per-row oracle gate (full product
-and error set must match the staged data).
+Local findings (see `.spikes/erp_bulk_bench/RESULTS.md`, v5):
+at **1M rows** the `process_batch` chunk callback reaches **≈60s total
+(≈15–16.7k rows/s)** at 8–16 workers with `chunk_size` 1000–2500 —
+the sweet spot. Worker scaling is sub-linear (1→2 saves ~25s; 8→16
+~5s) because the fixed parent cost — stage ≈9s + partition ≈17s +
+dispatch TX ≈26s — is sequential. Small chunks pay per-chunk engine
+overhead: `chunk_size=250` is ~2× slower than 1000. The per-row
+`process_row` path ≈3.4k rows/s; direct set-based SQL ≈145k rows/s —
+the data-path floor, without any of the engine's durable row/chunk
+bookkeeping. Every timed run passes an exact per-row oracle gate
+(full product and error set must match the staged data).
 
 ## SDK extension points it uses
 

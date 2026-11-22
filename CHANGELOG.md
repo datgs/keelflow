@@ -3,9 +3,9 @@
 All notable changes to this project will be documented here.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
-## [Unreleased]
+## [0.1.0a2] — 2026-11-23
 
-### Added (next release)
+### Added
 
 - Chunk-level batch callback `BulkJobHandler.process_batch(ctx, rows, tx)`
   returning `list[BatchRowResult]` — an optional set-based fast path for
@@ -20,8 +20,9 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   commit siblings to `done` while failed rows enter the error queue.
   Batch callbacks must not perform external I/O (retry would repeat the
   side effect) — stage remote calls via durable jobs/outbox. ERP benchmark
-  (`examples/bulk_import` bench): batch ≈ 4–5× the per-row path at equal
-  worker counts (≈14.5k vs ≈3.3k rows/s at 8 workers on 500k rows).
+  (`examples/bulk_import` bench, v5): batch ≈ 5× the per-row path at equal
+  worker counts (≈15–16.7k vs ≈3.4k rows/s at 8 workers on 1M rows);
+  ~60s total for 1M rows at workers 8–16, `chunk_size` 1000–2500.
 - External-wait steps (`wait.*` + `JobTypeSpec.is_wait`): a DAG step
   that parks the run `blocked` with a durable job row and **no kernel
   claim** — zero worker capacity while waiting. The application
@@ -79,7 +80,26 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   across the demo UIs; Mermaid workflow diagrams + roles in demo READMEs.
 - Alembic 0003–0007.
 
-### Removed (next release)
+### Performance
+
+- Set-based bulk partition — one statement does claim + row numbering +
+  chunk-row insert + `unnest`-joined row→chunk assignment + multi-row
+  `keelflow_jobs` insert (hash join, no nested loop). Combined with
+  `INSERT … SELECT` staging (`jsonb_build_object` server-side), this cut
+  1M batch total ~69s → ~60s; stage ~17s → ~9s; parent dispatch TX
+  ~37s → ~26s.
+
+### Testing
+
+- Benchmark reliability gate — dedicated `KEELFLOW_BENCH_DSN` (no dev
+  fallback), shared advisory lock with soak (mutual exclusion), all
+  output scoped by `batch_id`, engine cleanup by `job_id`, exact
+  per-row product+error oracle; invalid runs excluded + non-zero exit.
+- `--variants` flag on the bench runner to sweep a subset
+  (`keelflow-batch` only) — used for the v5 worker-scaling + chunk-size
+  sweep (chunk 250–5000 × workers 1–16, 50/50 runs pass the gate).
+
+### Removed
 
 - `JobHandler.heartbeat()` — was never invoked; worker liveness is
   kernel-owned (chancy heartbeat + Recovery). `JobHandler.on_cancel`

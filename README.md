@@ -88,10 +88,11 @@ permissions, and transactions.
 - **Postgres only** (by design — that's the feature).
 - **Alpha** (`0.1.x`): APIs can change between minor versions; pin
   `~=` or `<`.
-- **Throughput ceiling**: built for business-app volumes — bulk
-  measured at ~100k rows partition+process in ~10s locally
-  (`.spikes/bulk_bench.py`), not a benchmark promise; profile your hot
-  path before betting on it.
+- **Throughput ceiling**: built for business-app volumes. Measured
+  benchmark (`examples/bulk_import` bench, exact per-row oracle gate):
+  the `process_batch` path lands 1M rows in ~60s (~16k rows/s, workers
+  8, chunk_size 1000–2500); the per-row path ~3.4k rows/s. Not a
+  production-capacity promise — profile your own hot path.
 - **Single-node scheduler**: `run_scheduler` in exactly one process
   (slot dedup is DB-level, but leadership isn't).
 - **Human/role task visibility is app-implemented** — the engine gives
@@ -146,7 +147,7 @@ differentiating is built in-house.
 
 **0.1.x (alpha — now):** API stabilization; the surface above is
 feature-complete for the spec. Expect minor breaking changes between
-alphas — pin `keelflow~=0.1.0a1`.
+alphas — pin `keelflow~=0.1.0a2`.
 
 **0.2** — hardening & ops
 - [ ] Admin UI auth (token or proxy-ready session)
