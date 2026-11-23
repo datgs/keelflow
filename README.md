@@ -75,13 +75,16 @@ permissions, and transactions.
    retries are safe, and idempotent-by-construction patterns (natural
    keys, upserts) cover the rest.
 3. **Delegate the boring machinery.** Claiming, leases, retries,
-   leader election = Chancy. Everything that differentiates —
+   leader election = Chancy by default — behind a real kernel port
+   (`engine/kernel.py`). Everything that differentiates —
    transactional enqueue, DAG semantics, trigger callbacks, bulk
    row state — is keelflow's own ~4k LOC, 7 deps.
 4. **The spec is portable, the code is honest.** `spec/` defines the
    contract (schema, enums, lifecycle) so another implementation can
-   claim conformance; `src/` is the reference — no premature
-   abstraction layers pretending multi-backend support.
+   claim conformance; `src/` is the reference. The dispatch port is
+   proven by a single-record `NativeKernel` and a proof-level
+   `SQLiteKernel` — but the engine storage layer is honestly
+   Postgres-bound.
 
 ## Honest limitations
 
@@ -140,8 +143,10 @@ permissions, and transactions.
 | Language-agnostic spec | ✅ | `spec/` + conformance checklist |
 | Single-TX dispatch (`ctx.tx`) | ✅ | handler writes + finish + advance in one commit |
 
-Kernel lifecycle (claim/retry/schedule) rides on **Chancy**; everything
-differentiating is built in-house.
+Kernel lifecycle (claim/retry/schedule) rides on **Chancy** by default;
+the `Kernel` port also ships experimental `NativeKernel` (claims
+`keelflow_jobs` directly — ~14% faster than Chancy on the 1M bench) and
+proof-level `SQLiteKernel`. See `docs/guide.md` §16.
 
 ## Roadmap
 
@@ -192,7 +197,10 @@ alphas — pin `keelflow~=0.1.0a2`.
       exists; build when a real >thousands-jobs/s use case demands it
       ([why](docs/guide.md))
 - [ ] Multi-backend storage — spec is portable; a second engine
-      implementation lands when someone ports it
+      implementation lands when someone ports it. The *kernel* port is
+      proven (native Postgres + SQLite adapters share one contract
+      suite); porting the engine storage/dialect layer is the remaining
+      project
 - [ ] Chancy 0.27+ kernel upgrade (breaking plugin API upstream)
 
 ## Quickstart

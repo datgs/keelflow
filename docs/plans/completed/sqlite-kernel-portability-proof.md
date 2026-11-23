@@ -4,10 +4,7 @@ Date: 2026-11-23
 
 ## Status
 
-Proposed; awaiting approval before implementation. Uncommitted SQLite-related
-changes already present in the worktree are an unverified exploration only;
-they are not accepted as implementation or validation evidence. Preserve them
-until the approved tasks deliberately reconcile them.
+Completed 2026-11-23 (approved same day).
 
 ## Outcome
 
@@ -224,10 +221,11 @@ Dependency graph: T1 → T2 → T3 → T4.
 - [x] Repo evidence reviewed: core engine dispatch and schema are PostgreSQL
       specific; SQLite runtime available; current uncommitted exploration is
       present and unverified.
-- [ ] T1 — inspect/reconcile current worktree and settle contract matrix.
-- [ ] T2 — implement isolated SQLite kernel.
-- [ ] T3 — parameterize shared kernel contract suite.
-- [ ] T4 — document proof limits and validate.
+- [x] T1 — inspected/reconciled worktree; contract matrix settled.
+- [x] T2 — isolated SQLite kernel implemented (`sqlite_kernel.py`).
+- [x] T3 — shared kernel contract suite parameterized
+      (`tests/test_kernel_contract.py`, `--kernel` selector).
+- [x] T4 — proof limits documented (guide §16, this plan's verdict).
 
 ## Validation
 

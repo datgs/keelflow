@@ -21,8 +21,8 @@ Path: Standard, architecture-sensitive
 
 ## Status
 
-Planning complete; awaiting implementation approval. This plan does not
-authorize code changes or a production-default switch.
+Completed 2026-11-23. Chancy remains the default and supported backend;
+native and sqlite are experimental/proof adapters.
 
 ## Outcome
 
@@ -292,7 +292,8 @@ No secondary adapter is authorized by this plan.
       (`NativeKernel` + `NativeWorker`: SKIP LOCKED claim, per-job
       leases, reaper, heartbeat fencing, poll-based wakeup);
       9 conformance tests green in `tests/test_native_kernel.py`.
-- [ ] T4 — conformance, operations, and benchmark comparison.
+- [x] T4 — conformance, operations, and benchmark comparison
+      (adapter-parameterized suite, guide matrix, 1M bench).
 
 ## Decisions and open gates
 
@@ -444,3 +445,15 @@ stays; production-default decision deferred per plan scope.**
 
 Validation this round: 214 tests pass (chancy default), +15 pass under
 `--kernel=both` for the parameterized files; ruff+mypy clean.
+
+
+## Result
+
+All four tasks shipped and verified on 2026-11-23 (commits cded136,
+a32ea4f, 4f36303). The Kernel port is real: three backends (Chancy,
+native Postgres, SQLite) run one contract suite; native is ~14% faster
+than Chancy at 1M rows; SQLite proves the port survives a second DB
+engine at kernel level only. Known limits stay documented: native lacks
+rate limits/pause/tags/priority/metrics; the engine storage layer
+remains Postgres-bound. No default change; production parity is a
+separate decision.
