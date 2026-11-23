@@ -337,25 +337,62 @@ def run_worker(
     registry: Registry,
     dsn: str | None = None,
     *,
+    kernel=None,
     queues: list[chancy.Queue] | None = None,
     prefix: str = "keelflow_kernel_",
     event_bus=None,
 ) -> None:
     """Run a kernel worker claiming keelflow jobs. Blocks until SIGINT/SIGTERM.
 
-    `prefix` namespaces the KERNEL tables (chancy's `*_jobs`, `*_queues`…).
-    It MUST differ from the engine's `keelflow_` schema prefix or kernel
+    `kernel=None` (default) bootstraps a Chancy backend, creating and
+    owning the `chancy.Chancy` client for the process. `prefix`
+    namespaces the KERNEL tables (chancy's `*_jobs`, `*_queues`…). It
+    MUST differ from the engine's `keelflow_` schema prefix or kernel
     tables collide with `keelflow_jobs`/`keelflow_queues` (chancy also
     creates `<prefix>jobs`).
+
+    Pass `kernel=` to run a caller-owned Kernel adapter (e.g.
+    `NativeKernel`, `SQLiteKernel`): the helper configures dispatch,
+    migrates and starts the worker through the port — it never closes a
+    caller-owned kernel. `queues` is Chancy-only configuration and is
+    rejected for other backends.
 
     Equivalent of `python -m keelflow.engine.worker`.
     """
     import asyncio
 
     from .chancy_kernel import ChancyKernel
+    from .kernel import as_kernel
 
-    dsn = dsn or os.environ[DSN_ENV]
+    injected = as_kernel(kernel) if kernel is not None else None
+    if injected is not None and queues is not None \
+            and not isinstance(injected, ChancyKernel):
+        raise ValueError(
+            "queues= is chancy-specific; configure concurrency on the"
+            " kernel's create_worker instead")
+
+    dsn = dsn or os.environ.get(DSN_ENV) \
+        or getattr(injected, "dsn", None) or os.environ[DSN_ENV]
     configure(registry=registry, dsn=dsn)
+
+    if injected is not None:
+        async def _run_injected() -> None:
+            configure(registry=registry, dsn=dsn, kernel=injected)
+            await injected.migrate()
+            worker = injected.create_worker()
+            await worker.start()
+            try:
+                tasks = [worker.wait_for_shutdown()]
+                if event_bus is not None:
+                    from .events import dispatch_events
+
+                    tasks.append(dispatch_events(dsn, event_bus))
+                await asyncio.gather(*tasks)
+            finally:
+                await worker.stop()
+
+        asyncio.run(_run_injected())
+        return
 
     async def _run() -> None:
         async with chancy.Chancy(dsn, prefix=prefix) as client:
@@ -373,12 +410,15 @@ def run_worker(
                 await kernel.declare_queue(q, upsert=True)
             worker = kernel.create_worker()
             await worker.start()
-            tasks = [worker.wait_for_shutdown()]
-            if event_bus is not None:
-                from .events import dispatch_events
+            try:
+                tasks = [worker.wait_for_shutdown()]
+                if event_bus is not None:
+                    from .events import dispatch_events
 
-                tasks.append(dispatch_events(dsn, event_bus))
-            await asyncio.gather(*tasks)
+                    tasks.append(dispatch_events(dsn, event_bus))
+                await asyncio.gather(*tasks)
+            finally:
+                await worker.stop()
 
     asyncio.run(_run())
 

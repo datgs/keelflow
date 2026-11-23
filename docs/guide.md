@@ -661,6 +661,20 @@ uv run pytest tests/test_kernel_contract.py --kernel=sqlite # no Postgres needed
 parameterized for chancy/native; files touching chancy internals gate on
 `require_chancy`.
 
+Standalone worker bootstrap accepts the backend explicitly:
+
+```python
+run_worker(registry=reg)                      # Chancy default (owns the client)
+run_worker(registry=reg, kernel=NativeKernel(dsn))  # caller-owned adapter
+run_worker(registry=reg, kernel=ChancyKernel(client))  # client ctx owned by caller
+```
+
+A supplied kernel is caller-owned — `run_worker` migrates + starts its
+worker through the port and stops the worker on exit, but never closes
+the kernel/client. `queues=` is Chancy-specific and raises `ValueError`
+on other backends; engine `dispatch` itself remains Postgres-bound
+(SQLite kernel is a portability proof, not an engine backend).
+
 ## 17. Environment variables
 
 | Var | Default | Purpose |
