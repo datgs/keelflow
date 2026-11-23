@@ -20,7 +20,6 @@ from datetime import UTC, datetime
 from enum import Enum
 from typing import Any
 
-import chancy
 from pydantic import BaseModel, ValidationError
 
 from ..sdk import (
@@ -33,11 +32,8 @@ from ..sdk import (
 )
 from .context import ctx_to_dict
 
-#: Kernel job func that dispatches into our handler registry. The worker (T5)
-#: registers this name; kwargs carry the keelflow_jobs id.
-DISPATCH_FUNC = "keelflow.engine.worker.dispatch"
-
-DEFAULT_QUEUE = "default"
+#: Re-exported from kernel.py (canonical home) for existing callers.
+from .kernel import DEFAULT_QUEUE, DISPATCH_FUNC  # noqa: F401
 
 
 class EnqueueError(ValueError):
@@ -96,7 +92,7 @@ class JobBuilder:
 
     # ── enqueue ──────────────────────────────────────────────────────
 
-    async def enqueue(self, tx: Transaction, *, chancy_client: chancy.Chancy) -> JobRef:
+    async def enqueue(self, tx: Transaction, *, kernel) -> JobRef:
         spec = self._registry.job_type(self._type)  # KeyError → unknown type
 
         if spec.is_wait:
@@ -169,17 +165,17 @@ class JobBuilder:
 
         # 2. kernel job (claimed by workers). Same transaction → notify
         #    fires only on commit.
-        await chancy_client.push_ex(
+        from .kernel import dispatch_spec
+
+        await kernel.push_ex(
             cursor,
-            chancy.Job(
-                func=DISPATCH_FUNC,
-                queue=DEFAULT_QUEUE,
-                kwargs={"job_id": str(job_id)},
+            # NOTE: concurrency_key is NOT mapped to unique_key — it
+            # serializes *execution* (advisory lock in dispatch), not
+            # enqueue-time dedup.
+            dispatch_spec(
+                job_id=job_id,
                 max_attempts=spec.retry.max_attempts,
                 scheduled_at=self._run_at or now,
-                # NOTE: concurrency_key is NOT mapped to unique_key — it
-                # serializes *execution* (advisory lock in dispatch), not
-                # enqueue-time dedup.
                 meta={"job_id": str(job_id), "type": self._type},
             ),
         )
@@ -205,22 +201,24 @@ class JobBuilder:
 
 
 class JobService:
-    """SDK-facing service; construct with the shared registry + chancy app."""
+    """SDK-facing service; construct with the shared registry + kernel."""
 
-    def __init__(self, registry: Registry, chancy_client: chancy.Chancy) -> None:
+    def __init__(self, registry: Registry, kernel) -> None:
+        from .kernel import as_kernel
+
         self._registry = registry
-        self._chancy = chancy_client
+        self._kernel = as_kernel(kernel)
 
     @property
     def registry(self) -> Registry:
         return self._registry
 
     @property
-    def kernel(self) -> chancy.Chancy:
-        return self._chancy
+    def kernel(self):
+        return self._kernel
 
     def builder(self, type: str) -> JobBuilder:
-        return _BoundJobBuilder(self._registry, type, self._chancy)
+        return _BoundJobBuilder(self._registry, type, self._kernel)
 
     async def cancel(self, job_id: str, ctx: JobContext) -> bool:
         """Request cooperative cancellation of a live job.
@@ -241,48 +239,55 @@ class JobService:
 
         Returns True when the request was recorded (job was live).
         """
+        import psycopg
+
         from .permissions import DefaultPermissionService
         from .workflow import on_job_finished
 
         DefaultPermissionService().require(ctx, "job.cancel")
-        async with self._chancy.pool.connection() as conn, conn.transaction():
-            cur = await conn.execute(
-                "UPDATE keelflow_jobs"
-                " SET cancel_requested=true,"
-                "     status = CASE WHEN status = 'pending'"
-                "                   THEN 'cancelled' ELSE status END,"
-                "     updated_at=now()"
-                " WHERE id=%s"
-                "   AND status IN ('pending','claimed','running','blocked')"
-                " RETURNING status",
-                (job_id,),
-            )
-            landed = await cur.fetchone()
-            if landed:
-                # Cascade the request to live children (bulk chunks).
-                await conn.execute(
+        conn = await psycopg.AsyncConnection.connect(self._kernel.dsn)
+        try:
+            async with conn.transaction():
+                cur = await conn.execute(
                     "UPDATE keelflow_jobs"
                     " SET cancel_requested=true,"
                     "     status = CASE WHEN status = 'pending'"
                     "                   THEN 'cancelled' ELSE status END,"
                     "     updated_at=now()"
-                    " WHERE parent_job_id=%s"
-                    "   AND status IN ('pending','claimed','running','blocked')",
+                    " WHERE id=%s"
+                    "   AND status IN ('pending','claimed','running','blocked')"
+                    " RETURNING status",
                     (job_id,),
                 )
-            # Only a job that actually terminalized here (pending→cancelled)
-            # may advance its owning step — flagged-but-live jobs must not.
-            # Non-kernel lifecycles (wait.*, human.*) have no dispatch
-            # delivery to do this later; for machine jobs the worker's
-            # terminal skip performs the same idempotent write.
-            if landed and landed[0] == "cancelled":
-                step = await (await conn.execute(
-                    "SELECT id FROM keelflow_step_runs WHERE job_id=%s",
-                    (job_id,))).fetchone()
-                if step:
-                    await on_job_finished(
-                        conn, self._chancy, self._registry, job_id,
-                        str(step[0]), JobStatus.CANCELLED, {})
+                landed = await cur.fetchone()
+                if landed:
+                    # Cascade the request to live children (bulk chunks).
+                    await conn.execute(
+                        "UPDATE keelflow_jobs"
+                        " SET cancel_requested=true,"
+                        "     status = CASE WHEN status = 'pending'"
+                        "                   THEN 'cancelled' ELSE status END,"
+                        "     updated_at=now()"
+                        " WHERE parent_job_id=%s"
+                        "   AND status IN ('pending','claimed','running','blocked')",
+                        (job_id,),
+                    )
+                # Only a job that actually terminalized here
+                # (pending→cancelled) may advance its owning step —
+                # flagged-but-live jobs must not. Non-kernel lifecycles
+                # (wait.*, human.*) have no dispatch delivery to do this
+                # later; for machine jobs the worker's terminal skip
+                # performs the same idempotent write.
+                if landed and landed[0] == "cancelled":
+                    step = await (await conn.execute(
+                        "SELECT id FROM keelflow_step_runs WHERE job_id=%s",
+                        (job_id,))).fetchone()
+                    if step:
+                        await on_job_finished(
+                            conn, self._kernel, self._registry, job_id,
+                            str(step[0]), JobStatus.CANCELLED, {})
+        finally:
+            await conn.close()
         return bool(landed)
 
     async def signal(self, conn, job_id: str, result: dict[str, Any],
@@ -344,20 +349,20 @@ class JobService:
             )
             step = await cur.fetchone()
             if step:
-                await on_job_finished(
-                    conn, self._chancy, self._registry, str(job_id),
-                    str(step["id"]), status, result)
+                    await on_job_finished(
+                        conn, self._kernel, self._registry, str(job_id),
+                        str(step["id"]), status, result)
 
 
 class _BoundJobBuilder(JobBuilder):
-    """JobBuilder bound to a chancy client so enqueue(tx) matches the SDK."""
+    """JobBuilder bound to a kernel so enqueue(tx) matches the SDK."""
 
-    def __init__(self, registry: Registry, type_name: str, client: chancy.Chancy) -> None:
+    def __init__(self, registry: Registry, type_name: str, kernel) -> None:
         super().__init__(registry, type_name)
-        self._client = client
+        self._kernel = kernel
 
     async def enqueue(self, tx: Transaction) -> JobRef:  # type: ignore[override]
-        return await super().enqueue(tx, chancy_client=self._client)
+        return await super().enqueue(tx, kernel=self._kernel)
 
 
 # ── helpers ─────────────────────────────────────────────────────────────

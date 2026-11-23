@@ -233,7 +233,7 @@ class BulkJobHandler(JobHandler):
             ).model_dump(mode="json")
             payloads.append(json.dumps(child_payload))
             contexts.append(json.dumps(_ctx_d(child_ctx)))
-            kernel_jobs.append(_kernel_job(child_id, str(chunk_id)))
+            kernel_jobs.append(_chunk_dispatch_spec(child_id, str(chunk_id)))
         await cur.execute(
             """
             INSERT INTO keelflow_jobs
@@ -757,17 +757,14 @@ def register(registry, dsn: str | None = None,
     )
 
 
-def _kernel_job(job_id, chunk_id: str):
-    import chancy
+def _chunk_dispatch_spec(job_id, chunk_id: str):
+    from .kernel import dispatch_spec
 
-    from .enqueue import DEFAULT_QUEUE, DISPATCH_FUNC
-
-    return chancy.Job(
-        func=DISPATCH_FUNC,
-        queue=DEFAULT_QUEUE,
-        kwargs={"job_id": str(job_id)},
+    return dispatch_spec(
+        job_id=job_id,
         max_attempts=3,
-        meta={"job_id": str(job_id), "type": CHUNK_TYPE, "chunk_id": chunk_id},
+        meta={"job_id": str(job_id), "type": CHUNK_TYPE,
+              "chunk_id": chunk_id},
     )
 
 def _ctx_d(ctx: JobContext) -> dict[str, Any]:

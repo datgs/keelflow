@@ -5,6 +5,21 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added
+
+- Kernel port (`keelflow.engine.kernel`): engine dispatch now goes
+  through a backend-neutral `Kernel` protocol (`KernelJobSpec`,
+  `dispatch_spec`, `as_kernel`). `ChancyKernel` adapts the existing
+  chancy client with no behavior change; `configure` still accepts a
+  raw `chancy.Chancy` for compatibility.
+- Experimental `NativeKernel` (`keelflow.engine.native_kernel`): a
+  second dispatch backend that claims straight from `keelflow_jobs`
+  (no kernel table) — `FOR UPDATE SKIP LOCKED` claim, per-job
+  `lease_until` renewal, reaper for expired claims, heartbeat fencing,
+  poll-based wakeup. Opt-in only; Chancy remains the default. Known
+  gaps: rate limits, queue pause, tags, priority, metrics plugins.
+  Conformance: `tests/test_native_kernel.py`.
+
 ## [0.1.0a3] — 2026-11-23
 
 ### Added

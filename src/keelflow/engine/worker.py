@@ -52,7 +52,9 @@ def configure(registry: Registry | None = None, dsn: str | None = None,
     # Always reset: a stale client from an earlier configure() would
     # silently route retry pushes into the wrong kernel (test pollution
     # and a real bug when re-configuring between registries).
-    _kernel_client = kernel
+    from .kernel import as_kernel
+
+    _kernel_client = as_kernel(kernel) if kernel is not None else None
 
 
 def _get_registry() -> Registry:
@@ -350,13 +352,16 @@ def run_worker(
     """
     import asyncio
 
+    from .kernel import ChancyKernel
+
     dsn = dsn or os.environ[DSN_ENV]
     configure(registry=registry, dsn=dsn)
 
     async def _run() -> None:
         async with chancy.Chancy(dsn, prefix=prefix) as client:
-            configure(registry=registry, dsn=dsn, kernel=client)
-            await client.migrate()
+            kernel = ChancyKernel(client)
+            configure(registry=registry, dsn=dsn, kernel=kernel)
+            await kernel.migrate()
             for q in queues or [
                 chancy.Queue(
                     "default",
@@ -365,8 +370,8 @@ def run_worker(
                     eager_polling=True,
                 )
             ]:
-                await client.declare(q, upsert=True)
-            worker = chancy.Worker(client)
+                await kernel.declare_queue(q, upsert=True)
+            worker = kernel.create_worker()
             await worker.start()
             tasks = [worker.wait_for_shutdown()]
             if event_bus is not None:
@@ -394,18 +399,16 @@ def _retry_delay(spec, attempt: int) -> float:
 
 
 def _retry_kernel_job(job_id, type_name: str, spec, step_run_id, delay: float):
-    """Replacement kernel job for an engine-scheduled retry."""
-    from .enqueue import DEFAULT_QUEUE, DISPATCH_FUNC
+    """Replacement dispatch spec for an engine-scheduled retry."""
+    from .kernel import dispatch_spec
 
-    return chancy.Job(
-        func=DISPATCH_FUNC,
-        queue=DEFAULT_QUEUE,
-        kwargs={"job_id": str(job_id),
-                "step_run_id": str(step_run_id) if step_run_id else None},
+    return dispatch_spec(
+        job_id=job_id,
         max_attempts=spec.retry.max_attempts if spec.retry else 3,
         scheduled_at=datetime.now(UTC) + timedelta(seconds=delay),
         meta={"job_id": str(job_id), "type": type_name,
               "step_run_id": str(step_run_id) if step_run_id else None},
+        step_run_id=step_run_id,
     )
 
 

@@ -32,13 +32,16 @@ from ..sdk import (
     WorkflowTriggerSpec,
 )
 from .context import ctx_to_dict
-from .enqueue import DEFAULT_QUEUE, DISPATCH_FUNC, _as_cursor
+from .enqueue import _as_cursor
+from .kernel import dispatch_spec
 
 
 class EngineStateMachineService(StateMachineService):
     def __init__(self, registry, kernel=None, audit=None) -> None:
+        from .kernel import as_kernel
+
         self._registry = registry
-        self._kernel = kernel
+        self._kernel = as_kernel(kernel) if kernel is not None else None
         self._audit = audit  # optional PostgresAuditService
 
     async def ensure_schema(self, conn) -> None:
@@ -219,13 +222,10 @@ class EngineStateMachineService(StateMachineService):
             ),
         )
         if not type_name.startswith("human.") and self._kernel is not None:
-            import chancy
-
             await self._kernel.push_ex(
                 cursor,
-                chancy.Job(
-                    func=DISPATCH_FUNC, queue=DEFAULT_QUEUE,
-                    kwargs={"job_id": str(job_id)},
+                dispatch_spec(
+                    job_id=job_id,
                     max_attempts=spec.retry.max_attempts if spec.retry else 3,
                     meta={"job_id": str(job_id), "type": type_name},
                 ),

@@ -75,6 +75,9 @@ async def tick(conn, registry: Registry, kernel, *, now: datetime | None = None)
     (`run_scheduler`) or from tests.
     """
     now = now or datetime.now(UTC)
+    from .kernel import as_kernel
+
+    kernel = as_kernel(kernel)
     enqueued = 0
     for spec in _scheduled_types(registry):
         cron = spec.schedule
@@ -168,16 +171,13 @@ def _scheduled_types(registry) -> list:
 
 
 def _kernel_job(job_id, type_name: str, run_at: datetime, unique_key: str):
-    import chancy
+    from .kernel import dispatch_spec
 
-    from .enqueue import DEFAULT_QUEUE, DISPATCH_FUNC
-
-    return chancy.Job(
-        func=DISPATCH_FUNC,
-        queue=DEFAULT_QUEUE,
-        kwargs={"job_id": str(job_id)},
+    return dispatch_spec(
+        job_id=job_id,
         max_attempts=3,
         scheduled_at=run_at,
         unique_key=unique_key,
-        meta={"job_id": str(job_id), "type": type_name, "scheduled": True},
+        meta={"job_id": str(job_id), "type": type_name,
+              "scheduled": True},
     )

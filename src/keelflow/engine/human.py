@@ -47,8 +47,10 @@ class HumanTaskService:
     """
 
     def __init__(self, registry, kernel=None, sm=None) -> None:
+        from .kernel import as_kernel
+
         self._registry = registry
-        self._kernel = kernel
+        self._kernel = as_kernel(kernel) if kernel is not None else None
         self._sm = sm  # EngineStateMachineService, for complete_and_transition
 
     async def my_tasks(self, conn, actor: Actor, roles: list[str] | None = None) -> list[dict[str, Any]]:

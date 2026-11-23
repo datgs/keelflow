@@ -37,7 +37,7 @@ from ..sdk import (
     Transaction,
 )
 from .context import ctx_to_dict
-from .enqueue import DEFAULT_QUEUE, DISPATCH_FUNC, _as_cursor
+from .enqueue import _as_cursor
 
 log = logging.getLogger("keelflow.workflow")
 
@@ -645,16 +645,15 @@ async def _enqueue_wait_step(
     )
 
 
-def _kernel_job(job_id, type_name: str, spec, *, step_run_id) -> object:
-    import chancy
+def _kernel_job(job_id, type_name: str, spec, *, step_run_id):
+    from .kernel import dispatch_spec
 
-    return chancy.Job(
-        func=DISPATCH_FUNC,
-        queue=DEFAULT_QUEUE,
-        kwargs={"job_id": str(job_id), "step_run_id": str(step_run_id)},
+    return dispatch_spec(
+        job_id=job_id,
         max_attempts=spec.retry.max_attempts if spec.retry else 3,
         meta={"job_id": str(job_id), "type": type_name,
               "step_run_id": str(step_run_id)},
+        step_run_id=step_run_id,
     )
 
 
