@@ -16,9 +16,18 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   second dispatch backend that claims straight from `keelflow_jobs`
   (no kernel table) — `FOR UPDATE SKIP LOCKED` claim, per-job
   `lease_until` renewal, reaper for expired claims, heartbeat fencing,
-  poll-based wakeup. Opt-in only; Chancy remains the default. Known
-  gaps: rate limits, queue pause, tags, priority, metrics plugins.
-  Conformance: `tests/test_native_kernel.py`.
+  LISTEN/NOTIFY wakeup with poll fallback. Opt-in only; Chancy remains
+  the default. Known gaps: rate limits, queue pause, tags, priority,
+  metrics plugins. Conformance: `tests/test_native_kernel.py`.
+- Proof-only `SQLiteKernel` (`keelflow.engine.sqlite_kernel`, optional
+  `keelflow[sqlite]` extra): same single-record model in SQLite —
+  file-backed, `UPDATE … RETURNING` claim under write serialization,
+  in-process wakeup. Exercises the kernel port outside Postgres; the
+  engine and `JobService` remain Postgres-bound.
+- Adapter-parameterized kernel contract suite
+  `tests/test_kernel_contract.py` with injected stub dispatch —
+  `--kernel=chancy|native|sqlite|both|all` proves push/claim/lease/
+  fencing/dedup semantics per backend.
 
 ## [0.1.0a3] — 2026-11-23
 

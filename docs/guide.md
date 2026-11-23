@@ -640,7 +640,28 @@ class LoadH(JobHandler):
 - `JobHandler.on_cancel` is an unused experimental placeholder. Worker
   liveness/recovery is kernel-owned (chancy), not heartbeat-per-job.
 
-## 16. Environment variables
+## 16. Dispatch backends (experimental)
+
+Engine dispatch goes through a kernel port (`keelflow.engine.kernel`):
+
+| Backend | Class | Status | Notes |
+|---|---|---|---|
+| chancy | `ChancyKernel` (wraps `chancy.Chancy`) | default | full ADR feature set |
+| native | `NativeKernel` | experimental | claims `keelflow_jobs` directly; no rate limits/pause/tags/priority/metrics plugins |
+| sqlite | `SQLiteKernel` (`pip install keelflow[sqlite]`) | proof only | kernel-portability proof; in-process wakeup, single-writer; engine services remain Postgres-bound |
+
+Kernel contract tests run per backend:
+
+```bash
+uv run pytest tests/test_kernel_contract.py --kernel=all   # all three
+uv run pytest tests/test_kernel_contract.py --kernel=sqlite # no Postgres needed
+```
+
+`--kernel=both` = chancy+native; `all` adds sqlite. `test_worker.py` is
+parameterized for chancy/native; files touching chancy internals gate on
+`require_chancy`.
+
+## 17. Environment variables
 
 | Var | Default | Purpose |
 |---|---|---|
@@ -648,7 +669,7 @@ class LoadH(JobHandler):
 | `KEELFLOW_REGISTRY` | — | dotted path `pkg.mod:registry` for dispatch |
 | `KEELFLOW_TEST_DSN` | `...:5544/keelflow` | test DB |
 
-## 17. Production checklist
+## 18. Production checklist
 
 - [ ] Handlers idempotent (upserts / natural keys / dedupe).
 - [ ] Workers under a restart supervisor.

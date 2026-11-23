@@ -17,18 +17,21 @@ from contextlib import asynccontextmanager
 
 import pytest
 
+_KINDS = {"chancy": ["chancy"], "native": ["native"],
+          "sqlite": ["sqlite"], "both": ["chancy", "native"],
+          "all": ["chancy", "native", "sqlite"]}
+
 
 def pytest_addoption(parser):
     parser.addoption(
-        "--kernel", choices=["chancy", "native", "both"], default="chancy",
+        "--kernel", choices=list(_KINDS), default="chancy",
         help="kernel backend for adapter-parameterized tests")
 
 
 def pytest_generate_tests(metafunc):
     if "kernel_kind" in metafunc.fixturenames:
-        mode = metafunc.config.getoption("--kernel")
-        kinds = ["chancy", "native"] if mode == "both" else [mode]
-        metafunc.parametrize("kernel_kind", kinds)
+        metafunc.parametrize(
+            "kernel_kind", _KINDS[metafunc.config.getoption("--kernel")])
 
 
 DSN = os.environ.get(
@@ -44,12 +47,20 @@ async def open_kernel(kind: str, *, dsn: str = DSN,
 
     For 'chancy' the raw `chancy.Chancy` client is yielded (fixtures
     still declare queues / build `chancy.Worker` themselves); for
-    'native' a `NativeKernel` is yielded.
+    'native' a `NativeKernel`; for 'sqlite' a `SQLiteKernel` on the
+    given path/URI (`dsn` should be a temp file path — :memory: does
+    not share across connections).
     """
     if kind == "native":
         from keelflow.engine.native_kernel import NativeKernel
 
         k = NativeKernel(dsn)
+        await k.migrate()
+        yield k
+    elif kind == "sqlite":
+        from keelflow.engine.sqlite_kernel import SQLiteKernel
+
+        k = SQLiteKernel(dsn)
         await k.migrate()
         yield k
     else:
@@ -73,22 +84,46 @@ async def declare_default_queue(kernel, kind: str, *, concurrency: int):
 
 
 def make_worker(kernel, kind: str, *, concurrency: int = 4,
-                shutdown_timeout: float = 5, **kwargs):
+                shutdown_timeout: float = 5, dispatch=None, **kwargs):
     """Backend-agnostic worker creation.
 
-    chancy → `chancy.Worker(kernel, shutdown_timeout=…)`
-    native → `NativeWorker` with fast polling for tests.
+    chancy → `chancy.Worker(kernel, shutdown_timeout=…)` — dispatch is
+    selected per job by `spec.func`, so a `dispatch` override is a
+    no-op here (use CONTRACT_FUNC in the spec).
+    native/sqlite → worker with fast polling for tests; `dispatch`
+    overrides the engine entry point (contract tests inject a stub).
     """
-    if kind == "native":
+    if kind in ("native", "sqlite"):
         return kernel.create_worker(
             concurrency=concurrency,
             poll_interval=kwargs.pop("poll_interval", 0.05),
             lease_seconds=kwargs.pop("lease_seconds", 30.0),
             heartbeat_interval=kwargs.pop("heartbeat_interval", 1.0),
+            dispatch=dispatch,
             **kwargs)
     from chancy import Worker
 
     return Worker(kernel, shutdown_timeout=shutdown_timeout, **kwargs)
+
+
+# ── kernel-port contract stubs ──────────────────────────────────────────
+
+#: Dotted path resolvable by chancy's in-process executor.
+CONTRACT_FUNC = "conftest.kernel_contract_dispatch"
+
+#: (job_id, step_run_id) invocations recorded by the stub.
+KERNEL_DISPATCH_RECORD: list[tuple] = []
+#: set by the stub when it observes cancellation mid-flight.
+KERNEL_DISPATCH_CANCELLED: list[str] = []
+
+
+async def kernel_contract_dispatch(job_id, step_run_id=None):
+    """Stub dispatch used by the kernel-port contract suite.
+
+    Importable by dotted path (chancy) and injectable as a callable
+    (native/sqlite `create_worker(dispatch=…)`).
+    """
+    KERNEL_DISPATCH_RECORD.append((job_id, step_run_id))
 
 
 def require_chancy(kernel_kind: str):

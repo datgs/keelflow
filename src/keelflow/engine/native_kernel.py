@@ -19,8 +19,12 @@ Stale-claim fencing: a worker whose heartbeat no longer matches its
 
 Known capability gaps vs Chancy (native stays experimental):
 rate limits, queue pause/resume, worker tags, priority ordering
-(claims are FIFO by run_at), chancy metrics plugins, LISTEN/NOTIFY
-wakeup (polling only — notify_pushed emits pg_notify for future use).
+(claims are FIFO by run_at), chancy metrics plugins. Wakeup is
+LISTEN/NOTIFY via `pg_notify` with a polling fallback.
+
+`sqlite_kernel.SQLiteKernel` reuses `NativeWorker`'s claim/lease/fence
+skeleton with SQLite dialect overrides — the port boundary is exercised
+by subclassing the worker internals here.
 """
 from __future__ import annotations
 
@@ -118,17 +122,24 @@ class NativeKernel:
     def create_worker(self, **kwargs: Any) -> NativeWorker:
         return NativeWorker(self, **kwargs)
 
+
 class NativeWorker:
-    """Poll/claim loop over `keelflow_jobs` invoking `dispatch`."""
+    """Poll/LISTEN claim loop over `keelflow_jobs` invoking dispatch.
+
+    Subclass hooks for other dialects (see sqlite_kernel):
+    `_connect`, `_wait_wakeup`, `_claim_once`, `_heartbeat`, `_reap`,
+    `recover`, and `stop`'s connection close.
+    """
 
     def __init__(
         self,
-        kernel: NativeKernel,
+        kernel,
         *,
         concurrency: int = 8,
         poll_interval: float = 0.5,
         lease_seconds: float = 30.0,
         heartbeat_interval: float = 10.0,
+        dispatch=None,
     ) -> None:
         self._kernel = kernel
         self.worker_id = f"native-{uuid.uuid4().hex[:12]}"
@@ -136,15 +147,36 @@ class NativeWorker:
         self.poll_interval = poll_interval
         self.lease_seconds = lease_seconds
         self.heartbeat_interval = heartbeat_interval
+        self._dispatch = dispatch  # None → engine dispatch
         self._inflight: dict[str, asyncio.Task] = {}
         self._stop = asyncio.Event()
         self._tasks: list[asyncio.Task] = []
-        self._conn: psycopg.AsyncConnection | None = None
+        self._conn: Any = None
+
+    # ── connection / wakeup hooks ───────────────────────────────────────
+
+    async def _connect(self):
+        return await psycopg.AsyncConnection.connect(
+            self._kernel.dsn, autocommit=True)
+
+    async def _open(self) -> None:
+        self._conn = await self._connect()
+        await self._conn.execute("LISTEN keelflow_dispatch")
+
+    async def _wait_wakeup(self) -> None:
+        """Block until a push notify or poll_interval elapses.
+
+        Postgres: LISTEN on `keelflow_dispatch`. Subclasses override for
+        other transports; correctness never depends on wakeup (polling
+        fallback bounds delay at `poll_interval`).
+        """
+        conn = self._conn
+        async for _ in conn.notifies(
+                timeout=self.poll_interval, stop_after=1):
+            break
 
     async def start(self) -> None:
-        self._conn = await psycopg.AsyncConnection.connect(
-            self._kernel.dsn, autocommit=True)
-        await self._conn.execute("LISTEN keelflow_dispatch")
+        await self._open()
         self._tasks = [
             asyncio.create_task(self._claim_loop()),
             asyncio.create_task(self._maintenance_loop()),
@@ -161,18 +193,11 @@ class NativeWorker:
                 raise
             except Exception:
                 log.exception("native claim loop error")
-            # LISTEN wakeup (enqueues pg_notify) with a poll fallback —
-            # a lost/blocked notify can at worst delay a claim by
-            # poll_interval, never lose it.
-            conn = self._conn
-            assert conn is not None
             try:
-                async for _ in conn.notifies(
-                        timeout=self.poll_interval, stop_after=1):
-                    break
+                await self._wait_wakeup()
             except asyncio.CancelledError:
                 raise
-            except Exception:  # noqa: BLE001 - LISTEN degraded
+            except Exception:  # noqa: BLE001 - wakeup degraded
                 # → plain sleep; polling still correct.
                 try:
                     await asyncio.wait_for(self._stop.wait(),
@@ -180,10 +205,10 @@ class NativeWorker:
                 except TimeoutError:
                     pass
 
-    async def _claim_once(self, limit: int) -> None:
+    # ── dialect statements ──────────────────────────────────────────────
 
+    async def _claim_once(self, limit: int) -> None:
         conn = self._conn
-        assert conn is not None
         async with conn.cursor() as cur:
             await cur.execute(
                 """
@@ -207,14 +232,21 @@ class NativeWorker:
                 (limit, self.worker_id, self.lease_seconds),
             )
             rows = await cur.fetchall()
+        self._spawn(rows)
+
+    def _spawn(self, rows) -> None:
         for job_id, step_run_id in rows:
             task = asyncio.create_task(
-                self._run(str(job_id), step_run_id))
+                self._run(str(job_id),
+                          str(step_run_id) if step_run_id else None))
             self._inflight[str(job_id)] = task
 
     async def _run(self, job_id: str, step_run_id: str | None) -> None:
-        from .worker import dispatch
+        dispatch = self._dispatch
+        if dispatch is None:
+            from .worker import dispatch as _dispatch
 
+            dispatch = _dispatch
         try:
             await dispatch(job_id, step_run_id)
         except asyncio.CancelledError:
@@ -245,7 +277,6 @@ class NativeWorker:
             return
         ids = list(self._inflight)
         conn = self._conn
-        assert conn is not None
         async with conn.cursor() as cur:
             await cur.execute(
                 """
@@ -258,6 +289,9 @@ class NativeWorker:
                 (self.lease_seconds, ids, self.worker_id),
             )
             kept = {str(r[0]) for r in await cur.fetchall()}
+        self._fence(ids, kept)
+
+    def _fence(self, ids: list[str], kept: set[str]) -> None:
         for job_id in ids:
             if job_id not in kept:
                 task = self._inflight.get(job_id)
@@ -269,7 +303,6 @@ class NativeWorker:
 
     async def _reap(self) -> int:
         conn = self._conn
-        assert conn is not None
         async with conn.cursor() as cur:
             await cur.execute(
                 """
