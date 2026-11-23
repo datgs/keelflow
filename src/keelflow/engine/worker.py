@@ -352,7 +352,7 @@ def run_worker(
     """
     import asyncio
 
-    from .kernel import ChancyKernel
+    from .chancy_kernel import ChancyKernel
 
     dsn = dsn or os.environ[DSN_ENV]
     configure(registry=registry, dsn=dsn)

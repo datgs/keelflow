@@ -10,9 +10,9 @@ module. A `Kernel` implementation supplies:
   never claims dispatch work itself.
 - `migrate()` / `declare_queue()` — backend schema/queue setup.
 
-Chancy is the default backend (`ChancyKernel`). A native Postgres backend
-on `keelflow_jobs` is the T3 goal in
-`docs/plans/active/kernel-port-and-native-backend.md`.
+Chancy is the default backend (`chancy_kernel.ChancyKernel`); native
+Postgres (`native_kernel`) and SQLite (`sqlite_kernel`) adapters
+implement the same port.
 """
 from __future__ import annotations
 
@@ -73,62 +73,6 @@ class Kernel(Protocol):
     async def declare_queue(self, queue: Any, *, upsert: bool = False) -> Any: ...
 
 
-class ChancyKernel:
-    """Kernel backed by a `chancy.Chancy` client (production default)."""
-
-    def __init__(self, client) -> None:
-        self.client = client
-        self.dsn = client.dsn
-
-    # ── spec factory ────────────────────────────────────────────────────
-
-    def job(self, **kwargs: Any) -> KernelJobSpec:
-        return KernelJobSpec(**kwargs)
-
-    # ── dispatch push ───────────────────────────────────────────────────
-
-    async def push_ex(self, cursor, spec: KernelJobSpec):
-        return await self.client.push_ex(cursor, _to_chancy_job(spec))
-
-    async def push_many_ex(self, cursor, specs: list[KernelJobSpec]):
-        return await self.client.push_many_ex(
-            cursor, [_to_chancy_job(s) for s in specs])
-
-    async def notify_pushed(self, cursor, queue: str) -> None:
-        await self.client.notify(cursor, "queue.pushed", {"q": queue})
-
-    # ── lifecycle ───────────────────────────────────────────────────────
-
-    def create_worker(self, **kwargs: Any) -> KernelWorker:
-        import chancy
-
-        return chancy.Worker(self.client, **kwargs)
-
-    async def migrate(self) -> None:
-        await self.client.migrate()
-
-    async def declare_queue(self, queue: Any, *, upsert: bool = False) -> Any:
-        return await self.client.declare(queue, upsert=upsert)
-
-
-def _to_chancy_job(spec: KernelJobSpec):
-    from datetime import UTC, datetime
-
-    import chancy
-
-    return chancy.Job(
-        func=spec.func,
-        queue=spec.queue,
-        kwargs=spec.kwargs,
-        priority=spec.priority,
-        max_attempts=spec.max_attempts,
-        scheduled_at=spec.scheduled_at or datetime.now(UTC),
-        limits=list(spec.limits),
-        unique_key=spec.unique_key,
-        meta=spec.meta or {},
-    )
-
-
 def dispatch_spec(*, job_id, queue: str = DEFAULT_QUEUE,
                   max_attempts: int = 3, scheduled_at=None,
                   unique_key: str | None = None,
@@ -157,6 +101,8 @@ def as_kernel(obj: Any) -> Kernel:
     Raw `chancy.Chancy` objects are wrapped — the test suite and
     `run_worker` bootstrap pass the client directly today.
     """
+    from .chancy_kernel import ChancyKernel
+
     if isinstance(obj, ChancyKernel):
         return obj
     if isinstance(obj, Kernel):
