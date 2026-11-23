@@ -302,3 +302,25 @@ Caveats: local docker Postgres, synthetic uniform rows, single worker
 process, `atomic='row'`; `atomic='chunk'` semantics differ (one TX per
 chunk, whole-chunk rollback on failure). Numbers are workload-specific —
 not a general "keelflow vs n8n" claim.
+
+## Addendum (2026-11-23) — kernel-insert optimization measured and rejected
+
+Following the v5 note that "kernel-row inserts are the remaining ~17s of
+`super_run`", a set-based `unnest` INSERT directly into `{prefix}jobs`
+(replacing `push_many_ex`'s per-job loop) was implemented, contract-tested
+(row fields, notification once-per-batch, rollback atomicity), and
+benchmarked on the same box under the v3 oracle:
+
+| rows | baseline `super_run` | direct-insert `super_run` |
+|---|---|---|
+| 500k | 7.25–7.42s | 6.07–7.05s |
+| 1M | 16.1–18.3s | 15.2–16.6s |
+
+**The v5 attribution was wrong**: kernel inserts cost ~1.3s at 1M, not
+~17s. `super_run` is dominated by the partition CTE's 1M-row claim +
+`chunk_id` UPDATE (WAL + row writes), not round-trips. The ~1.3s/1M
+saving was not worth coupling to the kernel table schema (unkeyed-only
+path, non-extensible); reverted to `kernel.push_many_ex`. Correct
+upstream fix would be an `executemany` patch inside chancy itself.
+Result files: `result_baseline_*.json`, `result_batchinsert_*.json`;
+plan record: `docs/plans/completed/bulk-kernel-batch-inserts.md`.

@@ -249,9 +249,11 @@ class BulkJobHandler(JobHandler):
              parent_cancel, now, now,
              child_ids, payloads, contexts),
         )
-        # push_many_ex still inserts one kernel row per job (Chancy
-        # 0.26), but sends a single queue notification at the end
-        # instead of one per chunk.
+        # push_many_ex inserts one kernel row per job (Chancy 0.26),
+        # but sends a single queue notification at the end. A set-based
+        # direct insert was measured to save only ~1.3s at 1M rows —
+        # not worth coupling to the kernel table schema; see
+        # docs/plans/completed/bulk-kernel-batch-inserts.md.
         await kernel.push_many_ex(cur, kernel_jobs)
 
         # parent stays running until fan-in (dispatch honors marker)
@@ -767,7 +769,6 @@ def _kernel_job(job_id, chunk_id: str):
         max_attempts=3,
         meta={"job_id": str(job_id), "type": CHUNK_TYPE, "chunk_id": chunk_id},
     )
-
 
 def _ctx_d(ctx: JobContext) -> dict[str, Any]:
     from .context import ctx_to_dict
