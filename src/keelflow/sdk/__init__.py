@@ -2,6 +2,7 @@
 
 Only this package is imported by applications. Engine internals are private.
 """
+
 from .actor import Actor, ActorType
 from .context import ExecutionContext, JobCancelled, JobContext
 from .handler import JobHandler
@@ -25,7 +26,6 @@ from .services import (
     ScopeFilter,
     StateMachineService,
     StepRun,
-    Storage,
     Transaction,
     WorkflowRun,
     WorkflowService,
@@ -45,6 +45,8 @@ from .specs import (
     WorkflowDefinition,
     WorkflowTriggerSpec,
 )
+from .storage import DlqInsert, JobFinish, JobInsert, RowArchiveResult, Storage
+from .uow import Session, Tx, UnitOfWork
 
 __all__ = [
     "Actor",
@@ -54,6 +56,7 @@ __all__ = [
     "BatchRowResult",
     "ConcurrencySpec",
     "CronSpec",
+    "DlqInsert",
     "DomainEvent",
     "EntityRef",
     "EventBus",
@@ -64,7 +67,9 @@ __all__ = [
     "JobCancelled",
     "JobContext",
     "JobFilter",
+    "JobFinish",
     "JobHandler",
+    "JobInsert",
     "JobRef",
     "JobResult",
     "JobService",
@@ -74,9 +79,11 @@ __all__ = [
     "PermissionService",
     "Registry",
     "RetryPolicy",
+    "RowArchiveResult",
     "RunFilter",
     "RunRef",
     "ScopeFilter",
+    "Session",
     "StateMachineDefinition",
     "StateMachineService",
     "StepRun",
@@ -85,6 +92,8 @@ __all__ = [
     "TaskUiSpec",
     "Transaction",
     "TransitionSpec",
+    "Tx",
+    "UnitOfWork",
     "WorkflowDefinition",
     "WorkflowRun",
     "WorkflowService",
