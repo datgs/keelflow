@@ -6,10 +6,10 @@ itself, so `push_ex`/`push_many_ex` are UPDATEs inside the caller's
 transaction (commit makes the row claimable — same atomicity guarantee
 as the Chancy adapter).
 
-Claimable = `status='pending' AND run_at<=now() AND type` is a machine
-job type (registry `is_human`/`is_wait` types and `human.*` rows are
-never claimed — people claim those via Inbox). `bulk.chunk@v1` is
-always dispatchable.
+Claimable = `status='pending' AND run_at<=now() AND dispatch_queued`
+— `push_ex` sets the flag on the engine row; human/wait rows never
+receive a dispatch push, so workers cannot steal them regardless of
+registry state.
 
 Leases are per-job: the worker renews `lease_until` for its in-flight
 jobs; the reaper returns expired claims to `pending` (at-least-once,
@@ -36,22 +36,12 @@ from .kernel import DEFAULT_QUEUE, KernelJobSpec
 
 log = logging.getLogger("keelflow.native_kernel")
 
-CHUNK_TYPE = "bulk.chunk@v1"
-
-_ACTIVE = "('pending','claimed','running','blocked')"
-
 
 class NativeKernel:
     """Kernel port implemented directly on `keelflow_jobs`."""
 
     def __init__(self, dsn: str) -> None:
         self.dsn = dsn
-        # Set by configure() → worker bootstrap; the registry decides
-        # which types are dispatchable.
-        self._registry = None
-
-    def bind(self, registry) -> None:
-        self._registry = registry
 
     def job(self, **kwargs: Any) -> KernelJobSpec:
         return KernelJobSpec(**kwargs)
@@ -64,13 +54,17 @@ class NativeKernel:
         `unique_key` dedup mirrors chancy's ON CONFLICT no-op: if another
         active row already carries the key this update matches nothing.
         """
+        await self._push_one(cursor, spec)
+        await self.notify_pushed(cursor)
+
+    async def _push_one(self, cursor, spec: KernelJobSpec) -> None:
         job_id = spec.kwargs["job_id"]
         run_at = spec.scheduled_at or datetime.now(UTC)
         await cursor.execute(
             """
             UPDATE keelflow_jobs j
                SET status='pending', claimed_by=NULL, lease_until=NULL,
-                   run_at=%s,
+                   run_at=%s, dispatch_queued=true,
                    unique_key=COALESCE(j.unique_key, %s),
                    updated_at=now()
              WHERE j.id=%s AND j.status IN ('pending','claimed','running')
@@ -83,10 +77,24 @@ class NativeKernel:
             (run_at, spec.unique_key, job_id, spec.unique_key,
              spec.unique_key),
         )
+        # Dedup conflict (rowcount 0 on a live row): mark it cancelled so
+        # it can never be claimed — mirrors chancy's silent orphaning of
+        # the push while making the outcome observable.
+        if spec.unique_key is not None and cursor.rowcount == 0:
+            await cursor.execute(
+                """
+                UPDATE keelflow_jobs
+                   SET status='cancelled', updated_at=now(),
+                       error='dedup: unique_key already active'
+                 WHERE id=%s AND status='pending' AND dispatch_queued
+                """,
+                (job_id,),
+            )
 
     async def push_many_ex(self, cursor, specs: list[KernelJobSpec]):
         for spec in specs:
-            await self.push_ex(cursor, spec)
+            await self._push_one(cursor, spec)
+        await self.notify_pushed(cursor)
 
     async def notify_pushed(self, cursor, queue: str = DEFAULT_QUEUE) -> None:
         await cursor.execute("SELECT pg_notify('keelflow_dispatch', %s)",
@@ -109,23 +117,6 @@ class NativeKernel:
 
     def create_worker(self, **kwargs: Any) -> NativeWorker:
         return NativeWorker(self, **kwargs)
-
-    # ── claim internals (worker-facing) ─────────────────────────────────
-
-    def _dispatchable_types(self) -> list[str]:
-        reg = self._registry
-        if reg is None:
-            return [CHUNK_TYPE]
-        names: dict = getattr(reg, "_job_types", {})
-        types = [
-            name for name in names
-            if not getattr(reg.job_type(name), "is_human", False)
-            and not getattr(reg.job_type(name), "is_wait", False)
-        ]
-        if CHUNK_TYPE not in types:
-            types.append(CHUNK_TYPE)
-        return types
-
 
 class NativeWorker:
     """Poll/claim loop over `keelflow_jobs` invoking `dispatch`."""
@@ -151,17 +142,9 @@ class NativeWorker:
         self._conn: psycopg.AsyncConnection | None = None
 
     async def start(self) -> None:
-        from . import worker as engine_worker
-
-        try:
-            engine_worker._get_registry()
-        except RuntimeError:
-            engine_worker.configure(
-                registry=self._kernel._registry,
-                dsn=self._kernel.dsn,
-                kernel=self._kernel)
         self._conn = await psycopg.AsyncConnection.connect(
             self._kernel.dsn, autocommit=True)
+        await self._conn.execute("LISTEN keelflow_dispatch")
         self._tasks = [
             asyncio.create_task(self._claim_loop()),
             asyncio.create_task(self._maintenance_loop()),
@@ -173,19 +156,32 @@ class NativeWorker:
                 free = self.concurrency - len(self._inflight)
                 if free > 0:
                     await self._claim_once(free)
+                    continue  # drain before sleeping
             except asyncio.CancelledError:
                 raise
             except Exception:
                 log.exception("native claim loop error")
+            # LISTEN wakeup (enqueues pg_notify) with a poll fallback —
+            # a lost/blocked notify can at worst delay a claim by
+            # poll_interval, never lose it.
+            conn = self._conn
+            assert conn is not None
             try:
-                await asyncio.wait_for(self._stop.wait(),
-                                       timeout=self.poll_interval)
-            except TimeoutError:
-                pass
+                async for _ in conn.notifies(
+                        timeout=self.poll_interval, stop_after=1):
+                    break
+            except asyncio.CancelledError:
+                raise
+            except Exception:  # noqa: BLE001 - LISTEN degraded
+                # → plain sleep; polling still correct.
+                try:
+                    await asyncio.wait_for(self._stop.wait(),
+                                           timeout=self.poll_interval)
+                except TimeoutError:
+                    pass
 
     async def _claim_once(self, limit: int) -> None:
 
-        types = self._kernel._dispatchable_types()
         conn = self._conn
         assert conn is not None
         async with conn.cursor() as cur:
@@ -194,7 +190,7 @@ class NativeWorker:
                 WITH cand AS (
                     SELECT id FROM keelflow_jobs
                      WHERE status='pending' AND run_at<=now()
-                       AND type = ANY(%s)
+                       AND dispatch_queued
                      ORDER BY run_at, id
                      LIMIT %s
                      FOR UPDATE SKIP LOCKED
@@ -208,7 +204,7 @@ class NativeWorker:
                     (SELECT s.id::text FROM keelflow_step_runs s
                       WHERE s.job_id=j.id LIMIT 1)
                 """,
-                (types, limit, self.worker_id, self.lease_seconds),
+                (limit, self.worker_id, self.lease_seconds),
             )
             rows = await cur.fetchall()
         for job_id, step_run_id in rows:
@@ -282,9 +278,8 @@ class NativeWorker:
                        updated_at=now()
                  WHERE status IN ('claimed','running')
                    AND lease_until < now()
-                   AND type = ANY(%s)
+                   AND dispatch_queued
                 """,
-                (self._kernel._dispatchable_types(),),
             )
             return cur.rowcount
 
@@ -320,9 +315,8 @@ class NativeWorker:
                            lease_until=NULL, updated_at=now()
                      WHERE status IN ('claimed','running')
                        AND lease_until < now()
-                       AND type = ANY(%s)
+                       AND dispatch_queued
                     """,
-                    (self._kernel._dispatchable_types(),),
                 )
                 return cur.rowcount
         return await self._reap()

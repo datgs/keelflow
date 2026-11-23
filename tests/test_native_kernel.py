@@ -111,7 +111,6 @@ async def reg():
 async def env(db, reg):
     CALLS.clear()
     kernel = NativeKernel(DSN)
-    kernel.bind(reg)
     worker_mod.configure(registry=reg, dsn=DSN, kernel=kernel)
     w = kernel.create_worker(
         concurrency=4, poll_interval=0.05,
@@ -183,7 +182,6 @@ async def test_native_retry_then_done(env, db, reg, monkeypatch):
         type="test.flaky@v1", input_schema=Pay, handler=FlakyH,
         retry=RetryPolicy(max_attempts=3, base_seconds=0.1,
                           backoff="fixed", jitter=False)))
-    env["kernel"].bind(reg)  # pick up the new type
     job_id = await _enqueue(env["jobs"], "test.flaky@v1",
                             {"invoice_id": "i-9"})
     assert await _wait_status(db, job_id, "done", timeout=15) == "done"
@@ -206,16 +204,27 @@ async def test_native_handler_fails_permanently(env, db):
 
 
 @pytest.mark.asyncio
-async def test_native_human_job_not_claimed(env, db):
-    """human.* rows stay pending for Inbox — the worker must not steal them."""
-    job_id = await _enqueue(env["jobs"], "human.rev@v1",
-                            {"invoice_id": "i-h"})
+async def test_native_non_dispatch_row_not_claimed(env, db):
+    """A pending engine row that never went through push_ex (e.g. a
+    workflow-created human task — the workflow path materializes the row
+    without a kernel push) has dispatch_queued=false and must never be
+    claimed by the worker."""
+    import json
+    import uuid
+
+    job_id = uuid.uuid4()
+    await db.execute(
+        "INSERT INTO keelflow_jobs"
+        " (id, type, status, payload, context)"
+        " VALUES (%s, 'human.rev@v1', 'pending', %s, %s)",
+        (job_id, json.dumps({"invoice_id": "i-h"}), json.dumps({})),
+    )
     await asyncio.sleep(1.0)
     row = await (await db.execute(
-        "SELECT status, claimed_by FROM keelflow_jobs WHERE id=%s",
-        (job_id,))).fetchone()
-    assert row[0] == "pending" and row[1] is None
-    assert ("ok", {"actor": "u1"}) not in CALLS
+        "SELECT status, claimed_by, dispatch_queued"
+        " FROM keelflow_jobs WHERE id=%s", (job_id,))).fetchone()
+    assert row[0] == "pending" and row[1] is None and row[2] is False
+    assert CALLS == []
 
 
 @pytest.mark.asyncio
@@ -278,7 +287,9 @@ async def test_native_reclaim_after_lease_expiry(env, db):
 
 @pytest.mark.asyncio
 async def test_native_stale_worker_cannot_finish(env, db):
-    """Fencing: reclaim wins; the stale dispatch is cancelled locally."""
+    """Fencing: once the row belongs to another owner (reclaimed and
+    finished elsewhere), the stale worker's heartbeat detects the lost
+    lease and cancels its local dispatch task."""
     job_id = await _enqueue(env["jobs"], "test.slow@v1",
                             {"invoice_id": "i-s"})
     # Wait until claimed by our worker.
@@ -289,10 +300,16 @@ async def test_native_stale_worker_cannot_finish(env, db):
         if row[0] in ("claimed", "running"):
             break
         await asyncio.sleep(0.05)
-    # A reaper steals it (simulating worker death detection elsewhere).
+    assert row[0] in ("claimed", "running")
+    # Reclaim + finish elsewhere: the row is terminal and owned by
+    # someone else — our running dispatch must not outlive it.
     await db.execute(
-        "UPDATE keelflow_jobs SET status='pending', claimed_by='other',"
-        " lease_until=now()+interval '1 hour' WHERE id=%s", (job_id,))
-    await asyncio.sleep(1.0)  # heartbeat notices lost lease → cancels task
+        "UPDATE keelflow_jobs SET status='done', claimed_by='other'"
+        " WHERE id=%s", (job_id,))
+    for _ in range(100):
+        task = env["worker"]._inflight.get(job_id)
+        if task is None or task.done():
+            break
+        await asyncio.sleep(0.05)
     task = env["worker"]._inflight.get(job_id)
     assert task is None or task.done()

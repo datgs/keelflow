@@ -398,3 +398,49 @@ raw `chancy.Chancy` today.
    'claimed' unused — recommended reuse.
 3. Capability gaps accepted for experimental tag: rate limits, queue pause,
    tags, metrics plugin parity — all currently kernel-owned in Chancy.
+
+## T4 stress comparison (2026-11-23)
+
+Harness: `--kernel=chancy|native|both` pytest option (`tests/conftest.py`
+`open_kernel`/`make_worker`/`require_chancy`); `bench.py --kernel`.
+`test_worker.py` is the first adapter-parameterized file; others convert
+incrementally (chancy-only internals → `require_chancy`).
+
+Design changes landed during T4:
+
+- `keelflow_jobs.dispatch_queued` column (schema.sql migration, partial
+  index `ix_jobs_native_claim`) — push_ex flips it; the claim filter no
+  longer depends on the registry (`bind()` removed). Parity finding:
+  `JobBuilder.enqueue` accepts `is_human` types in BOTH backends; the
+  "not stolen" guarantee lives at the workflow layer, which never
+  pushes a dispatch row. `dispatch_queued` encodes exactly that.
+- LISTEN/NOTIFY wakeup: `push_ex`/`push_many_ex` emit `pg_notify`
+  (tx-scoped — fires on commit); claim loop uses `conn.notifies()`
+  with `poll_interval` fallback. Poll-only at 0.1s cost ~32% at 200k;
+  with notify the worker drains the claim batch before sleeping.
+- `push_many_ex` emits ONE notify after all updates (not per row).
+
+Bench evidence (same container, same config, oracle gate green):
+
+| size | workers | reps | chancy | native | delta |
+|---|---|---|---|---|---|
+| 200k | 8 | 3 | 12.0s / 16.7k r/s | 11.8s / 17.0k r/s | −1.7% |
+| 1M | 8 | 3 | 68.9s / 14.5k r/s | 59.3s / 16.9k r/s | −14.0% |
+
+Phase split @1M (native vs chancy): `parent_super_run_s` 16.2 vs 19.0
+(no `{prefix}jobs` inserts), `parent_tx_s` 24.5 vs 28.8, `callback_sum`
+15.9 vs 15.1 (noise). Native per-chunk `push_many_ex` is per-row UPDATE
+on the engine row — still the partition CTE bottleneck identified in
+v5; the single-row design removes the kernel-write overhead entirely.
+
+Artifacts: `.spikes/erp_bulk_bench/result_{native,chancy}_200k.json`,
+`result_native_200k_p02.json` (poll-only data point),
+`result_{native,chancy}_1m.json`.
+
+**Outcome: native is ~14% faster than chancy at 1M and parity at
+200k — single-state-store pays for itself. Not better in a vacuum:
+it lacks rate limits/pause/tags/priority/metrics. Experimental label
+stays; production-default decision deferred per plan scope.**
+
+Validation this round: 214 tests pass (chancy default), +15 pass under
+`--kernel=both` for the parameterized files; ruff+mypy clean.

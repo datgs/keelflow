@@ -10,7 +10,7 @@ import os
 import psycopg
 import pytest
 import pytest_asyncio
-from chancy import Chancy, Queue, Worker
+from conftest import declare_default_queue, make_worker, open_kernel
 from pydantic import BaseModel
 
 from keelflow.engine import worker as worker_mod
@@ -24,6 +24,7 @@ from keelflow.sdk import (
     JobResult,
     JobStatus,
     JobTypeSpec,
+    RetryPolicy,
 )
 
 DSN = os.environ.get(
@@ -47,6 +48,11 @@ class OkHandler(JobHandler):
 class FailHandler(JobHandler):
     async def run(self, ctx, payload: Pay):
         raise RuntimeError("boom")
+
+
+@pytest.fixture(autouse=True)
+def _clear_calls():
+    CALLS.clear()
 
 
 async def _conn(autocommit: bool = True) -> psycopg.AsyncConnection:
@@ -74,18 +80,9 @@ async def db():
 
 
 @pytest_asyncio.fixture
-async def kernel(db):
-    async with Chancy(DSN, prefix=CHANCY_PREFIX) as client:
-        await client.migrate()
-        await client.declare(
-            Queue(
-                "default",
-                concurrency=4,
-                executor=Chancy.Executor.Async,
-                eager_polling=True,
-            ),
-            upsert=True,
-        )
+async def kernel(db, kernel_kind):
+    async with open_kernel(kernel_kind) as client:
+        await declare_default_queue(client, kernel_kind, concurrency=4)
         yield client
 
 
@@ -96,9 +93,18 @@ async def service(kernel):
         JobTypeSpec(type="test.ok@v1", input_schema=Pay, handler=OkHandler)
     )
     reg.register_job_type(
-        JobTypeSpec(type="test.fail@v1", input_schema=Pay, handler=FailHandler)
+        JobTypeSpec(
+            type="test.fail@v1",
+            input_schema=Pay,
+            handler=FailHandler,
+            # short backoff so both backends exercise the same
+            # engine-scheduled retry path quickly
+            retry=RetryPolicy(
+                max_attempts=3, base_seconds=0.2,
+                backoff="fixed", jitter=False),
+        )
     )
-    worker_mod.configure(registry=reg, dsn=DSN)
+    worker_mod.configure(registry=reg, dsn=DSN, kernel=kernel)
     return JobService(reg, kernel)
 
 
@@ -126,9 +132,10 @@ async def _wait_status(db, job_id: str, want: str, timeout: float = 15.0) -> str
 
 
 @pytest.mark.asyncio
-async def test_worker_claims_and_completes(service, db, kernel):
+async def test_worker_claims_and_completes(service, db, kernel,
+                                         kernel_kind):
     job_id = await _enqueue(service, "test.ok@v1", {"invoice_id": "i-1"})
-    w = Worker(kernel, shutdown_timeout=5)
+    w = make_worker(kernel, kernel_kind)
     await w.start()
     try:
         assert await _wait_status(db, job_id, "done") == "done"
@@ -147,15 +154,16 @@ async def test_worker_claims_and_completes(service, db, kernel):
 
 
 @pytest.mark.asyncio
-async def test_handler_exception_marks_failed(service, db, kernel):
+async def test_handler_exception_marks_failed(service, db, kernel,
+                                              kernel_kind):
     job_id = await _enqueue(service, "test.fail@v1", {"invoice_id": "i-2"})
-    w = Worker(kernel, shutdown_timeout=5)
+    w = make_worker(kernel, kernel_kind)
     await w.start()
     try:
         status = await _wait_status(db, job_id, "failed", timeout=20)
     finally:
         await w.stop(timeout=5)
-    # kernel retries up to max_attempts=3 → eventually 'failed'
+    # kernel retries up to max_attempts → eventually 'failed'
     assert status == JobStatus.FAILED.value
     row = await (
         await db.execute("SELECT error FROM keelflow_jobs WHERE id=%s", (job_id,))
@@ -164,13 +172,13 @@ async def test_handler_exception_marks_failed(service, db, kernel):
 
 
 @pytest.mark.asyncio
-async def test_dispatch_unknown_type(service, db, kernel):
+async def test_dispatch_unknown_type(service, db, kernel, kernel_kind):
     # craft a job row whose type is unregistered, then kernel-dispatch it
     job_id = await _enqueue(service, "test.ok@v1", {"invoice_id": "i-3"})
     await db.execute(
         "UPDATE keelflow_jobs SET type='test.unknown@v1' WHERE id=%s", (job_id,)
     )
-    w = Worker(kernel, shutdown_timeout=5)
+    w = make_worker(kernel, kernel_kind)
     await w.start()
     try:
         status = await _wait_status(db, job_id, "failed", timeout=15)

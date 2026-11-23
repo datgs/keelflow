@@ -337,11 +337,18 @@ async def run_keelflow(conn, kernel, batch_id: str, n_workers: int,
 
     # true per-run concurrency: re-declare the queue at this level so
     # each measurement really runs at the requested worker count
-    await kernel.declare(
-        Queue("default", concurrency=n_workers,
-              executor=Chancy.Executor.Async, eager_polling=True),
-        upsert=True)
-    w = Worker(kernel, shutdown_timeout=5)
+    from keelflow.engine.native_kernel import NativeKernel
+
+    if isinstance(kernel, NativeKernel):
+        w = kernel.create_worker(concurrency=n_workers,
+                                 poll_interval=0.02,
+                                 heartbeat_interval=5.0)
+    else:
+        await kernel.declare(
+            Queue("default", concurrency=n_workers,
+                  executor=Chancy.Executor.Async, eager_polling=True),
+            upsert=True)
+        w = Worker(kernel, shutdown_timeout=5)
     await w.start()
     t0 = time.perf_counter()
     try:
@@ -715,13 +722,32 @@ async def main_async(args) -> int:
                   "reps": args.reps, "workers": args.workers,
                   "chunk": args.chunk, "variants": args.variants,
                   "row_disposition": "archive", "seed": 42,
-                  "kernel_prefix": KERNEL_PREFIX}
+                  "kernel_backend": args.kernel,
+                  "kernel_prefix": KERNEL_PREFIX if args.kernel == "chancy"
+                  else None}
         await conn.execute(
             "INSERT INTO bench_invocations (invocation_id, config)"
             " VALUES (%s,%s)", (invocation, json.dumps(config)))
         env = await _env_metadata(conn)
-        async with Chancy(dsn, prefix=KERNEL_PREFIX) as kernel:
-            await kernel.migrate()
+        if args.kernel == "native":
+            from contextlib import asynccontextmanager
+
+            from keelflow.engine.native_kernel import NativeKernel
+
+            @asynccontextmanager
+            async def _kernel():
+                k = NativeKernel(dsn)
+                await k.migrate()
+                yield k
+        else:
+            from contextlib import asynccontextmanager
+
+            @asynccontextmanager
+            async def _kernel():
+                async with Chancy(dsn, prefix=KERNEL_PREFIX) as client:
+                    await client.migrate()
+                    yield client
+        async with _kernel() as kernel:
             all_results = []
             for n in args.sizes:
                 all_results.extend(
@@ -765,6 +791,9 @@ def main() -> int:
                    choices=["keelflow-row", "keelflow-batch", "sql"],
                    default=["keelflow-row", "keelflow-batch", "sql"],
                    help="execution variants to measure (default all)")
+    p.add_argument("--kernel", choices=["chancy", "native"],
+                   default="chancy",
+                   help="dispatch backend for keelflow-* variants")
     p.add_argument("--out", default=".spikes/erp_bulk_bench/result.json")
     p.add_argument("--allow-db", action="store_true",
                    help="confirm benchmark runs on a dedicated/local DB")

@@ -1,0 +1,127 @@
+{
+  "env": {
+    "host": "Darwin/arm64",
+    "python": "3.12.13",
+    "time": "2026-11-23T08:15:55.335268+00:00",
+    "postgres": {
+      "server_version": "16.16",
+      "max_connections": "100",
+      "shared_buffers": "128MB",
+      "work_mem": "4MB",
+      "synchronous_commit": "on"
+    },
+    "git": {
+      "rev": "cded136",
+      "dirty": true
+    },
+    "keelflow_version": "0.1.0a3"
+  },
+  "config": {
+    "invocation_id": "969a5f97-4059-4f67-9fcd-8564bf706e2e",
+    "sizes": [
+      200000
+    ],
+    "reps": 3,
+    "workers": [
+      8
+    ],
+    "chunk": 1000,
+    "variants": [
+      "keelflow-batch"
+    ],
+    "row_disposition": "archive",
+    "seed": 42,
+    "kernel_backend": "native",
+    "kernel_prefix": null
+  },
+  "sizes": [
+    {
+      "size": 200000,
+      "batch_id": "4ab2d0b0-9cdd-4fc1-8fe7-5dcfe992d7a4",
+      "stage_s": 1.3626980000008189,
+      "expected_errors": 16072,
+      "runs": [
+        {
+          "variant": "keelflow-batch",
+          "workers": 8,
+          "rep": 0,
+          "process_s": 17.663603500001045,
+          "rows_s": 11322.717926723624,
+          "errors": 16072,
+          "status": "done",
+          "correct": true,
+          "phases": {
+            "enqueue_s": 0.005797874997369945,
+            "process_s": 17.663603500001045,
+            "parent_queue_s": 0.018044208001811057,
+            "parent_stage_s": 2.0039427499978046,
+            "parent_super_run_s": 4.44495891599945,
+            "parent_tx_s": 6.448905208999349,
+            "callback_sum_s": 3.746085211983882,
+            "callback_max_s": 0.07936204100042232,
+            "callback_calls": 200
+          },
+          "diagnostics": []
+        },
+        {
+          "variant": "keelflow-batch",
+          "workers": 8,
+          "rep": 1,
+          "process_s": 15.499512542002776,
+          "rows_s": 12903.631611511113,
+          "errors": 16072,
+          "status": "done",
+          "correct": true,
+          "phases": {
+            "enqueue_s": 0.0024610000000393484,
+            "process_s": 15.499512542002776,
+            "parent_queue_s": 0.02635162499791477,
+            "parent_stage_s": 2.530237750001106,
+            "parent_super_run_s": 4.3118718750010885,
+            "parent_tx_s": 6.842113542003062,
+            "callback_sum_s": 4.283174954001879,
+            "callback_max_s": 0.24394037499951082,
+            "callback_calls": 200
+          },
+          "diagnostics": []
+        },
+        {
+          "variant": "keelflow-batch",
+          "workers": 8,
+          "rep": 2,
+          "process_s": 14.306141250002838,
+          "rows_s": 13980.010158222107,
+          "errors": 16072,
+          "status": "done",
+          "correct": true,
+          "phases": {
+            "enqueue_s": 0.0017281670006923378,
+            "process_s": 14.306141250002838,
+            "parent_queue_s": 0.01617570800226531,
+            "parent_stage_s": 2.540893542001868,
+            "parent_super_run_s": 4.3789434999998775,
+            "parent_tx_s": 6.919838457997685,
+            "callback_sum_s": 3.6644777140063525,
+            "callback_max_s": 0.03892866599926492,
+            "callback_calls": 200
+          },
+          "diagnostics": []
+        }
+      ],
+      "summary": [
+        {
+          "variant": "keelflow-batch",
+          "workers": 8,
+          "n": 3,
+          "mean_s": 15.82308576400222,
+          "median_s": 15.499512542002776,
+          "min_s": 14.306141250002838,
+          "max_s": 17.663603500001045,
+          "rows_s_mean": 12639.759588171055
+        }
+      ],
+      "n_invalid_runs": 0
+    }
+  ],
+  "all_correct": true
+}

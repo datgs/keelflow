@@ -28,6 +28,14 @@ CREATE TABLE IF NOT EXISTS keelflow_jobs (
 CREATE INDEX IF NOT EXISTS ix_jobs_claim
     ON keelflow_jobs (status, run_at, type)
     WHERE status = 'pending';
+
+-- Native-kernel claim marker: push_ex flips it true; the claim loop only
+-- selects flagged rows (human/wait rows never get a dispatch push).
+ALTER TABLE keelflow_jobs
+    ADD COLUMN IF NOT EXISTS dispatch_queued BOOLEAN NOT NULL DEFAULT FALSE;
+CREATE INDEX IF NOT EXISTS ix_jobs_native_claim
+    ON keelflow_jobs (run_at, id)
+    WHERE status = 'pending' AND dispatch_queued;
 CREATE INDEX IF NOT EXISTS ix_jobs_key
     ON keelflow_jobs (concurrency_key) WHERE status = 'running';
 -- Idempotent enqueue: at most one non-terminal job per (type, unique_key).
