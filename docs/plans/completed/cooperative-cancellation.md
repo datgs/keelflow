@@ -17,10 +17,11 @@ Date: 2026-11-20
 
 ## Status
 
-Active — approved and implemented (2026-11-20). Verification: 130/131
-tests pass; `tests/test_e2e.py::test_e2e_scenario` intermittently fails
-on its kill-resume timeout — reproduced on a clean baseline (stash),
-pre-existing flake unrelated to this feature.
+Completed — approved and implemented (2026-11-20). The `test_e2e_scenario`
+kill-resume flake noted here was fixed in `a76aa17` (2026-11-22): the test
+now forces `Recovery.recover` after the dead worker's heartbeat lapse
+instead of racing the Recovery poll. Verified 2026-11-23: 12/12 e2e runs +
+25/25 isolated kill-resume stress iterations pass.
 
 ## Outcome
 

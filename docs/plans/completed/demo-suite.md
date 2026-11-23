@@ -21,8 +21,8 @@ related_code: [examples/invoice_flow, examples/supplier_onboarding]
       → partitions on ctx.tx; _fan_in never advanced a workflow step
       (bulk couldn't be a DAG step) → on_job_finished in fan-in TX +
       row counts in parent result.
-- [ ] Public readiness: security pass done (`90258f1`); remaining =
-      tag `0.1.0a1` + PyPI release.
+- [x] Public readiness: security pass (`90258f1`); `v0.1.0a1` and
+      `v0.1.0a2` tagged and published to PyPI via `release.yml`.
 
 # Demo suite plan: invoice_flow + supplier_onboarding + bulk_import
 

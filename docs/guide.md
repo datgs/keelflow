@@ -356,6 +356,12 @@ actions = await sm.allowed_actions(EntityRef("invoice", "INV-1"),
 
 Guard keys in `TransitionSpec.guard`:
 - `permission` — `ctx.permissions` must contain it (`"*"` wildcard ok).
+  The string must also be declared via
+  `Registry.register_permission("inv.submit")` **before** the state
+  machine is registered — an unknown permission raises `ValueError`
+  at load time rather than failing as a 403 at runtime.
+  (`InMemoryRegistry` pre-registers the engine's own `job.cancel` and
+  `job.signal`.)
 - `assignee_role` — the `creates_job` task goes to `role:<name>`.
 - `sm_actions` — maps task decisions to SM actions (see §8).
 

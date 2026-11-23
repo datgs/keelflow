@@ -1,6 +1,6 @@
 [project]
 name = "keelflow"
-version = "0.1.0a2"
+version = "0.1.0a3"
 description = "Reusable Postgres-backed durable workflow engine"
 readme = "README.md"
 license = "MIT"

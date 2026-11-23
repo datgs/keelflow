@@ -4,7 +4,7 @@
 **Project:** keelflow — reusable workflow engine
 **Maintainer:** keelflow maintainers
 **Status:** Draft for technical review \
-**Related:** `docs/plans/active/execution-plan.md`
+**Related:** `docs/plans/completed/execution-plan.md`
 
 > **Naming note (2026-11-19):** the engine originally called `hd-flow`
 > (and scaffolded as `pyerp`) is published as **`keelflow`** — the

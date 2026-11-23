@@ -4,7 +4,9 @@ Date: 2026-11-20
 
 ## Status
 
-Active — ready for implementation approval (except T7, which has its own gate).
+Completed 2026-11-23 — all tasks including the release gate are done;
+`0.1.0a2` is tagged (`v0.1.0a2`) and published via the Release workflow
+(run `45052460071`).
 
 ## Outcome
 
@@ -39,7 +41,7 @@ first public release:
   (`src/keelflow/engine/worker.py:406-433`) with **no size cap** on `result`
   or step `outputs`.
 - `pyproject.toml:3` is `version = "0.1.0a1"`; `release.yml` publishes on `v*`
-  tags via PyPI trusted publishing; `docs/plans/active/demo-suite.md` tracks
+  tags via PyPI trusted publishing; `docs/plans/completed/demo-suite.md` tracks
   the remaining `tag 0.1.0a1 + PyPI release` item as its last unchecked step.
 - FK behaviour that the sweep must respect: `keelflow_chunks.job_id` and
   `keelflow_row_status.job_id` are `REFERENCES keelflow_jobs(id) ON DELETE
@@ -304,7 +306,8 @@ CI must be green on `main` after each pushed batch.
 - [x] Phase C — T4 DLQ replay resumes owning run (alembic 0005 + test).
 - [x] Phase C — T6 result/outputs size visibility (alembic 0006 + 2 tests).
 - [x] Phase C — T5 `unique_key` idempotent enqueue (alembic 0007 + 2 tests).
-- [ ] Phase D — T7 release validation (own approval gate).
+- [x] Phase D — T7 release: `v0.1.0a1`/`v0.1.0a2` tagged; Release
+      workflow `45052460071` published `0.1.0a2` to PyPI.
 
 ## Phase A audit record (2026-11-20)
 

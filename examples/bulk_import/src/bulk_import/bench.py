@@ -11,7 +11,7 @@ workload on the same staged data:
 - ``sql`` — set-based PostgreSQL baseline: INSERT…SELECT with a CASE
   classifier. A *data-path lower bound* — no job/chunk orchestration.
 
-Safety contract (docs/plans/active/benchmark-reliability.md):
+Safety contract (docs/plans/completed/benchmark-reliability.md):
 - Requires an explicit ``KEELFLOW_BENCH_DSN`` — no fallback to the
   dev/test DSN — plus ``--allow-db``.
 - Acquires a PostgreSQL session advisory lock (shared with soak.py) so

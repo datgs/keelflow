@@ -97,6 +97,7 @@ async def env(db):
             upsert=True,
         )
         reg = InMemoryRegistry()
+        reg.register_permission("inv.approve")
         reg.register_job_type(JobTypeSpec(type="wf.step@v1", input_schema=P,
                                           handler=OkH))
         reg.register_job_type(JobTypeSpec(

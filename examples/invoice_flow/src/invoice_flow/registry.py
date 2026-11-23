@@ -116,6 +116,10 @@ class _NoopH(JobHandler):
 
 def build_registry() -> InMemoryRegistry:
     reg = InMemoryRegistry()
+    # Permission catalog: `guard.permission` strings below must be
+    # registered first or registration fails loudly.
+    reg.register_permission("inv.submit")
+    reg.register_permission("inv.approve")
     reg.register_job_type(JobTypeSpec(
         type="inv.post_ledger@v1", input_schema=InvPayload,
         handler=PostLedgerH, retry=RetryPolicy(max_attempts=1)))

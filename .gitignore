@@ -7,3 +7,5 @@ build/
 .env
 .env.*
 !.env.example
+.spikes/erp_bulk_bench/logs/
+.spikes/financial_soak/logs/

@@ -92,6 +92,8 @@ async def env(db):
 
 @pytest.mark.asyncio
 async def test_transition_valid_and_guard(env, db):
+    env["reg"].register_permission("inv.submit")
+    env["reg"].register_permission("inv.approve")
     env["reg"].register_state_machine(StateMachineDefinition(
         name="invoice@v1", entity="invoice",
         states=("draft", "in_review", "approved"),

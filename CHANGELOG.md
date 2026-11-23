@@ -5,6 +5,8 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.1.0a3] — 2026-11-23
+
 ### Added
 
 - `examples/financial_approval` — the largest demo (~23-step payment-run
@@ -15,6 +17,11 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   step → `wait.bank_execute` external settle → reconcile/remit/audit.
   Exercises parallel `needs`, wait/signal, conditional human steps,
   bulk, cooperative cancel, retry, and audit in one run.
+- Permission catalog: `Registry.register_permission` +
+  `Registry.permissions`. `InMemoryRegistry.register_state_machine`
+  rejects a `guard.permission` not previously registered (engine
+  reserves `job.cancel`/`job.signal`) — unknown permissions now fail
+  at load time per the Registry contract, not as a silent 403.
 
 ## [0.1.0a2] — 2026-11-23
 

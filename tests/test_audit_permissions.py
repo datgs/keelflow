@@ -33,6 +33,57 @@ async def db():
         yield conn
 
 
+# ── permission catalog / load-time lint ──────────────────────────────────
+
+
+def test_register_state_machine_rejects_unknown_permission():
+    from keelflow.engine.registry import InMemoryRegistry
+    from keelflow.sdk import StateMachineDefinition, TransitionSpec
+
+    reg = InMemoryRegistry()
+    with pytest.raises(ValueError, match="unregistered permission"):
+        reg.register_state_machine(StateMachineDefinition(
+            name="invoice@v1", entity="invoice",
+            states=("draft", "approved"),
+            transitions=(
+                TransitionSpec("draft", "approved", "approve",
+                               guard={"permission": "inv.approve"}),
+            ),
+            initial="draft",
+        ))
+    # unknown permission must NOT be half-registered
+    with pytest.raises(KeyError):
+        reg.state_machine("invoice@v1")
+
+
+def test_register_state_machine_accepts_registered_permission():
+    from keelflow.engine.registry import InMemoryRegistry
+    from keelflow.sdk import StateMachineDefinition, TransitionSpec
+
+    reg = InMemoryRegistry()
+    reg.register_permission("inv.approve")
+    reg.register_state_machine(StateMachineDefinition(
+        name="invoice@v1", entity="invoice",
+        states=("draft", "approved"),
+        transitions=(
+            TransitionSpec("draft", "approved", "approve",
+                           guard={"permission": "inv.approve"}),
+        ),
+        initial="draft",
+    ))
+    # engine-reserved permissions are pre-registered
+    assert "job.cancel" in reg.permissions()
+    assert "job.signal" in reg.permissions()
+    assert "inv.approve" in reg.permissions()
+
+
+def test_register_permission_rejects_empty():
+    from keelflow.engine.registry import InMemoryRegistry
+
+    with pytest.raises(ValueError):
+        InMemoryRegistry().register_permission("")
+
+
 # ── permissions ────────────────────────────────────────────────────────────
 
 

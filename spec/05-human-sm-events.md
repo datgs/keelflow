@@ -45,6 +45,9 @@
    state = definition's `initial`.
 2. Find transition `(from=current, action)` — missing → `ValueError`.
 3. If `guard.permission` — `ctx.require(perm)` → `PermissionError`.
+   The string MUST be registered via `Registry.register_permission`
+   before `register_state_machine`; an unknown permission fails at
+   load time, not as a silent 403 (`06-context.md`).
 4. Upsert `keelflow_entity_state` (state=to, version+1).
 5. `creates_job` → insert job row (+ kernel job unless `human.*`),
    `assignee` from `guard.assignee_role`, payload carries
