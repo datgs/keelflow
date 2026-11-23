@@ -51,6 +51,7 @@ dev = [
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 pythonpath = [
+    ".",
     "src",
     "examples/invoice_flow/src",
     "examples/supplier_onboarding/src",

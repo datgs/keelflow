@@ -17,10 +17,10 @@ import time
 import psycopg
 import pytest
 import pytest_asyncio
-from chancy import Chancy, Queue, Worker
 from financial_approval.registry import DSN_ENV, build_registry
 from psycopg.rows import dict_row
 
+from conftest import declare_default_queue, make_worker, open_kernel
 from keelflow.engine import worker as worker_mod
 from keelflow.engine.enqueue import JobService
 from keelflow.engine.human import HumanTaskService
@@ -64,8 +64,8 @@ async def db():
 
         await apply_async(conn)
         await conn.execute(DEMO_SCHEMA)
-        async with Chancy(DSN, prefix=KERNEL_PREFIX) as _k:
-            await _k.migrate()
+        async with open_kernel("chancy", prefix=KERNEL_PREFIX):
+            pass
         await conn.execute(
             "TRUNCATE keelflow_jobs, keelflow_outbox, keelflow_audit,"
             " keelflow_step_runs, keelflow_workflow_runs, keelflow_chunks,"
@@ -80,19 +80,15 @@ async def db():
 
 
 @pytest_asyncio.fixture
-async def env(db):
-    async with Chancy(DSN, prefix=KERNEL_PREFIX) as kernel:
-        await kernel.migrate()
-        await kernel.declare(
-            Queue("default", concurrency=8,
-                  executor=Chancy.Executor.Async, eager_polling=True),
-            upsert=True)
+async def env(db, kernel_kind):
+    async with open_kernel(kernel_kind, prefix=KERNEL_PREFIX) as kernel:
+        await declare_default_queue(kernel, kernel_kind, concurrency=8)
         reg = build_registry()
         worker_mod.configure(registry=reg, dsn=DSN, kernel=kernel)
         jobs = JobService(reg, kernel)
         human = HumanTaskService(reg, kernel)
         yield {"wf": WorkflowService(reg, jobs), "jobs": jobs,
-               "human": human, "kernel": kernel}
+               "human": human, "kernel": kernel, "kind": kernel_kind}
 
 
 async def _mk_request(db, amount=50000.00, currency="USD", urgent=False,
@@ -202,7 +198,7 @@ async def test_full_26_step_run(env, db):
     fx step is skipped for USD; one line fails in pay_lines."""
     rid = await _mk_request(db, amount=120_000.00, blank_invoice=True)
 
-    w = Worker(env["kernel"], shutdown_timeout=5)
+    w = make_worker(env["kernel"], env["kind"], concurrency=8)
     await w.start()
     try:
         async with (await _conn(False)) as c, c.transaction(), \
@@ -280,7 +276,7 @@ async def test_low_risk_short_chain(env, db):
     ap_cfo, ap_comp all skipped; run still completes paid."""
     rid = await _mk_request(db, amount=1_000.00)
 
-    w = Worker(env["kernel"], shutdown_timeout=5)
+    w = make_worker(env["kernel"], env["kind"], concurrency=8)
     await w.start()
     try:
         async with (await _conn(False)) as c, c.transaction(), \

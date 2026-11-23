@@ -14,10 +14,10 @@ import os
 import psycopg
 import pytest
 import pytest_asyncio
-from chancy import Chancy, Queue, Worker
 from rag_demo.registry import DSN_ENV, build_registry
 from rag_demo.seed import DOCS
 
+from conftest import declare_default_queue, make_worker, open_kernel
 from keelflow.engine import worker as worker_mod
 from keelflow.engine.enqueue import JobService
 from keelflow.engine.human import HumanTaskService
@@ -75,8 +75,8 @@ async def db():
     async with conn:
         await conn.execute(DEMO_SCHEMA)
         await apply_async(conn)
-        async with Chancy(DSN, prefix=KERNEL_PREFIX) as _k:
-            await _k.migrate()
+        async with open_kernel("chancy", prefix=KERNEL_PREFIX):
+            pass
         await conn.execute(
             "TRUNCATE keelflow_jobs, keelflow_outbox, keelflow_audit,"
             " keelflow_step_runs, keelflow_workflow_runs, keelflow_chunks,"
@@ -99,13 +99,9 @@ async def db():
 
 
 @pytest_asyncio.fixture
-async def env(db):
-    async with Chancy(DSN, prefix=KERNEL_PREFIX) as kernel:
-        await kernel.migrate()
-        await kernel.declare(
-            Queue("default", concurrency=4,
-                  executor=Chancy.Executor.Async, eager_polling=True),
-            upsert=True)
+async def env(db, kernel_kind):
+    async with open_kernel(kernel_kind, prefix=KERNEL_PREFIX) as kernel:
+        await declare_default_queue(kernel, kernel_kind, concurrency=4)
         reg = build_registry()
         worker_mod.configure(registry=reg, dsn=DSN, kernel=kernel)
         jobs = JobService(reg, kernel)
@@ -113,7 +109,7 @@ async def env(db):
         human = HumanTaskService(reg, kernel)
         mon = MonitoringService(jobs)
         yield {"jobs": jobs, "wf": wf, "human": human, "mon": mon,
-               "kernel": kernel}
+               "kernel": kernel, "kind": kernel_kind}
 
 
 def _ctx(uid="u-ops"):
@@ -145,7 +141,7 @@ async def _wait_run(db, run_id, want, timeout=30):
 async def test_index_docs_embeds_chunks(env, db):
     """Index workflow: split → bulk embed → docs marked indexed."""
     ref = await _start(env, "rag.index@v1", {"doc_id": None})
-    w = Worker(env["kernel"], shutdown_timeout=5)
+    w = make_worker(env["kernel"], env["kind"], concurrency=4)
     await w.start()
     try:
         assert (await _wait_run(db, ref.id, "done", timeout=30))[0] == "done"
@@ -166,7 +162,7 @@ async def test_ask_happy_path_auto_publishes(env, db):
     """High-confidence answer → score gate skips review → published."""
     # index first — answer must start only after chunks exist
     iref = await _start(env, "rag.index@v1", {"doc_id": None})
-    w = Worker(env["kernel"], shutdown_timeout=5)
+    w = make_worker(env["kernel"], env["kind"], concurrency=4)
     await w.start()
     try:
         assert (await _wait_run(db, iref.id, "done", timeout=30))[0] == "done"
@@ -197,7 +193,7 @@ async def test_low_confidence_goes_to_human_review(env, db):
     """weak_retrieval → 0 hits → low confidence → review step blocked →
     reviewer approve → published via review_done."""
     iref = await _start(env, "rag.index@v1", {"doc_id": None})
-    w = Worker(env["kernel"], shutdown_timeout=5)
+    w = make_worker(env["kernel"], env["kind"], concurrency=4)
     await w.start()
     try:
         assert (await _wait_run(db, iref.id, "done", timeout=30))[0] == "done"
@@ -235,7 +231,7 @@ async def test_flaky_llm_retries_then_dlq(env, db):
     """flaky_llm → generate fails → engine backoff retry; with the knob
     left on, retries exhaust → job 'failed' + keelflow_dlq row."""
     iref = await _start(env, "rag.index@v1", {"doc_id": None})
-    w = Worker(env["kernel"], shutdown_timeout=5)
+    w = make_worker(env["kernel"], env["kind"], concurrency=4)
     await w.start()
     try:
         assert (await _wait_run(db, iref.id, "done", timeout=30))[0] == "done"
@@ -264,7 +260,7 @@ async def test_slow_llm_timeout_kills_job(env, db):
     """slow_llm sleeps longer than timeout_seconds=10 — job fails on
     timeout, retries, and eventually lands in the DLQ."""
     iref = await _start(env, "rag.index@v1", {"doc_id": None})
-    w = Worker(env["kernel"], shutdown_timeout=5)
+    w = make_worker(env["kernel"], env["kind"], concurrency=4)
     await w.start()
     try:
         assert (await _wait_run(db, iref.id, "done", timeout=30))[0] == "done"

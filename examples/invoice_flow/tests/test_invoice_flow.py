@@ -17,10 +17,10 @@ import os
 import psycopg
 import pytest
 import pytest_asyncio
-from chancy import Chancy, Queue, Worker
 from invoice_flow.registry import DSN_ENV, build_registry
 from psycopg.rows import dict_row
 
+from conftest import declare_default_queue, make_worker, open_kernel
 from keelflow.engine import worker as worker_mod
 from keelflow.engine.audit import PostgresAuditService
 from keelflow.engine.enqueue import JobService
@@ -83,8 +83,8 @@ async def db():
         await conn.execute(DEMO_SCHEMA)
         await apply_async(conn)
         # fresh DB (CI): kernel tables must exist before we truncate them.
-        async with Chancy(DSN, prefix=KERNEL_PREFIX) as _k:
-            await _k.migrate()
+        async with open_kernel("chancy", prefix=KERNEL_PREFIX):
+            pass
         await conn.execute(
             "TRUNCATE keelflow_jobs, keelflow_outbox, keelflow_audit,"
             " keelflow_step_runs, keelflow_workflow_runs, keelflow_chunks,"
@@ -101,13 +101,9 @@ async def db():
 
 
 @pytest_asyncio.fixture
-async def env(db):
-    async with Chancy(DSN, prefix=KERNEL_PREFIX) as kernel:
-        await kernel.migrate()
-        await kernel.declare(
-            Queue("default", concurrency=4,
-                  executor=Chancy.Executor.Async, eager_polling=True),
-            upsert=True)
+async def env(db, kernel_kind):
+    async with open_kernel(kernel_kind, prefix=KERNEL_PREFIX) as kernel:
+        await declare_default_queue(kernel, kernel_kind, concurrency=4)
         reg = build_registry()
         worker_mod.configure(registry=reg, dsn=DSN, kernel=kernel)
         audit = PostgresAuditService()
@@ -115,7 +111,7 @@ async def env(db):
         jobs = JobService(reg, kernel)
         human = HumanTaskService(reg, kernel, sm=sm)
         wf = WorkflowService(reg, jobs)
-        yield {"sm": sm, "human": human, "wf": wf, "kernel": kernel}
+        yield {"sm": sm, "human": human, "wf": wf, "kernel": kernel, "kind": kernel_kind}
 
 
 async def _invoice(db, no, state="draft"):
@@ -164,7 +160,7 @@ async def test_happy_path_sm_to_posted(env, db):
             roles=["finance"])
     assert await _state(db, "INV-9001") == "posting"
 
-    w = Worker(env["kernel"], shutdown_timeout=5)
+    w = make_worker(env["kernel"], env["kind"], concurrency=4)
     await w.start()
     try:
         # ledger + record run, then gl_check appears in gl1's inbox
@@ -228,7 +224,7 @@ async def test_business_reject_and_repost(env, db):
         db, str(task[0]), Actor.user("fin1"), "approve", CTX["fin1"],
         roles=["finance"])
 
-    w = Worker(env["kernel"], shutdown_timeout=5)
+    w = make_worker(env["kernel"], env["kind"], concurrency=4)
     await w.start()
     try:
         for _ in range(150):
@@ -291,7 +287,7 @@ async def test_technical_failure_and_fix_task(env, db):
         db, str(task[0]), Actor.user("fin1"), "approve", CTX["fin1"],
         roles=["finance"])
 
-    w = Worker(env["kernel"], shutdown_timeout=5)
+    w = make_worker(env["kernel"], env["kind"], concurrency=4)
     await w.start()
     try:
         for _ in range(150):

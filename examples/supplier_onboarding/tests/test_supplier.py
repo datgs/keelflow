@@ -15,10 +15,10 @@ import time
 import psycopg
 import pytest
 import pytest_asyncio
-from chancy import Chancy, Queue, Worker
 from psycopg.rows import dict_row
 from supplier_onboarding.registry import DSN_ENV, build_registry
 
+from conftest import declare_default_queue, make_worker, open_kernel
 from keelflow.engine import worker as worker_mod
 from keelflow.engine.enqueue import JobService
 from keelflow.engine.human import HumanTaskService
@@ -60,8 +60,8 @@ async def db():
         await apply_async(conn)
         await conn.execute(DEMO_SCHEMA)
         # fresh DB (CI): kernel tables must exist before we truncate them.
-        async with Chancy(DSN, prefix=KERNEL_PREFIX) as _k:
-            await _k.migrate()
+        async with open_kernel("chancy", prefix=KERNEL_PREFIX):
+            pass
         await conn.execute(
             "TRUNCATE keelflow_jobs, keelflow_outbox, keelflow_audit,"
             " keelflow_step_runs, keelflow_workflow_runs, keelflow_chunks,"
@@ -75,19 +75,15 @@ async def db():
 
 
 @pytest_asyncio.fixture
-async def env(db):
-    async with Chancy(DSN, prefix=KERNEL_PREFIX) as kernel:
-        await kernel.migrate()
-        await kernel.declare(
-            Queue("default", concurrency=6,
-                  executor=Chancy.Executor.Async, eager_polling=True),
-            upsert=True)
+async def env(db, kernel_kind):
+    async with open_kernel(kernel_kind, prefix=KERNEL_PREFIX) as kernel:
+        await declare_default_queue(kernel, kernel_kind, concurrency=6)
         reg = build_registry()
         worker_mod.configure(registry=reg, dsn=DSN, kernel=kernel)
         jobs = JobService(reg, kernel)
         human = HumanTaskService(reg, kernel)
         yield {"wf": WorkflowService(reg, jobs), "jobs": jobs,
-               "human": human, "kernel": kernel}
+               "human": human, "kernel": kernel, "kind": kernel_kind}
 
 
 async def _mk_supplier(db, name, bank="OK001", fail=False) -> int:
@@ -172,7 +168,7 @@ async def test_parallel_checks_and_conditional_hitl(env, db):
     """Full run: 4 parallel adapters → risk → conditional HITL → ERP → active."""
     sid = await _mk_supplier(db, "parallel parts")
 
-    w = Worker(env["kernel"], shutdown_timeout=5)
+    w = make_worker(env["kernel"], env["kind"], concurrency=6)
     await w.start()
     try:
         async with (await _conn(False)) as c, c.transaction(), \
@@ -233,7 +229,7 @@ async def test_technical_failure_and_resume(env, db):
     re-executes in place to completion."""
     sid = await _mk_supplier(db, "fail parts", fail=True)
 
-    w = Worker(env["kernel"], shutdown_timeout=5)
+    w = make_worker(env["kernel"], env["kind"], concurrency=6)
     await w.start()
     try:
         async with (await _conn(False)) as c, c.transaction(), \
