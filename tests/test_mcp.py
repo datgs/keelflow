@@ -11,7 +11,7 @@ from keelflow.mcp.server import make_server
 from keelflow.postgres.schema import apply_async
 
 DSN = os.environ.get(
-    "KEELFLOW_TEST_DSN", "postgresql://postgres:postgres@localhost:5544/keelflow"
+    "KEELFLOW_TEST_DSN", "postgresql://postgres:postgres@localhost:5544/keelflow_test"
 )
 
 

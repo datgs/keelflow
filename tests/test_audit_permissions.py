@@ -14,7 +14,7 @@ from keelflow.postgres.storage import PostgresStorage
 from keelflow.sdk import Actor, AuditEvent, EntityRef, JobContext
 
 DSN = os.environ.get(
-    "KEELFLOW_TEST_DSN", "postgresql://postgres:postgres@localhost:5544/keelflow"
+    "KEELFLOW_TEST_DSN", "postgresql://postgres:postgres@localhost:5544/keelflow_test"
 )
 
 

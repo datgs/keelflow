@@ -16,7 +16,7 @@ from keelflow.postgres.storage import PostgresStorage
 from keelflow.sdk import DomainEvent
 
 DSN = os.environ.get(
-    "KEELFLOW_TEST_DSN", "postgresql://postgres:postgres@localhost:5544/keelflow"
+    "KEELFLOW_TEST_DSN", "postgresql://postgres:postgres@localhost:5544/keelflow_test"
 )
 
 STORAGE = PostgresStorage(DSN)

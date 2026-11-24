@@ -13,7 +13,7 @@ from keelflow.postgres.schema import apply_async
 from keelflow.postgres.storage import PostgresStorage
 
 DSN = os.environ.get(
-    "KEELFLOW_TEST_DSN", "postgresql://postgres:postgres@localhost:5544/keelflow"
+    "KEELFLOW_TEST_DSN", "postgresql://postgres:postgres@localhost:5544/keelflow_test"
 )
 
 

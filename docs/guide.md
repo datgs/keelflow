@@ -694,7 +694,7 @@ on other backends; engine `dispatch` itself remains Postgres-bound
 |---|---|---|
 | `KEELFLOW_DSN` | — | Postgres DSN (worker + handlers) |
 | `KEELFLOW_REGISTRY` | — | dotted path `pkg.mod:registry` for dispatch |
-| `KEELFLOW_TEST_DSN` | `...:5544/keelflow` | test DB |
+| `KEELFLOW_TEST_DSN` | `...:5544/keelflow_test` | test DB (auto-created; fixtures truncate) |
 
 ## 18. Production checklist
 

@@ -51,7 +51,7 @@ from keelflow.sdk import (
 )
 
 DSN = os.environ.get(
-    "KEELFLOW_TEST_DSN", "postgresql://postgres:postgres@localhost:5544/keelflow"
+    "KEELFLOW_TEST_DSN", "postgresql://postgres:postgres@localhost:5544/keelflow_test"
 )
 CHANCY_PREFIX = "keelflow_test_"
 

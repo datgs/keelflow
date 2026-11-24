@@ -236,13 +236,17 @@ error queue, human map/approve),
 - `src/keelflow/mcp/` — read-only agent tools
 - `spec/` — language-agnostic keelflow spec (port to .NET/Java/PHP)
 - `docs/architecture-design-brief.md` — design source of truth
+- `docs/reliability.md` — durability/recovery guarantee matrix + upgrade policy
+- `docs/security.md` — data access, telemetry, admin/MCP boundaries
 - `docs/plans/active/` — execution plan + acceptance evidence
 
 ## Dev
 
 ```bash
 uv sync --dev
-uv run pytest          # needs Postgres at $KEELFLOW_TEST_DSN (default :5544/keelflow)
+uv run pytest          # needs Postgres; fixtures truncate keelflow_*
+                       # tables, so tests run on $KEELFLOW_TEST_DSN
+                       # (default :5544/keelflow_test, auto-created)
 uv run ruff check src tests
 uv run mypy src/keelflow
 ```

@@ -92,7 +92,7 @@ async def test_begin_still_rejects_nested_begin():
 
 # ── live Postgres cases ────────────────────────────────────────────────
 
-DSN_IMPORT = "postgresql://postgres:postgres@localhost:5544/keelflow"
+DSN_IMPORT = "postgresql://postgres:postgres@localhost:5544/keelflow_test"
 
 
 @pytest.mark.asyncio

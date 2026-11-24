@@ -30,7 +30,7 @@ from keelflow.sdk.services import JobStatus
 from keelflow.sdk.storage import DlqInsert, JobFinish, JobInsert
 
 DSN = os.environ.get(
-    "KEELFLOW_TEST_DSN", "postgresql://postgres:postgres@localhost:5544/keelflow"
+    "KEELFLOW_TEST_DSN", "postgresql://postgres:postgres@localhost:5544/keelflow_test"
 )
 
 

@@ -17,7 +17,7 @@ from fastapi.testclient import TestClient
 from invoice_flow.registry import DSN_ENV
 
 DSN = os.environ.get(
-    "KEELFLOW_TEST_DSN", "postgresql://postgres:postgres@localhost:5544/keelflow")
+    "KEELFLOW_TEST_DSN", "postgresql://postgres:postgres@localhost:5544/keelflow_test")
 KERNEL_PREFIX = "keelflow_test_"
 os.environ.setdefault(DSN_ENV, DSN)
 

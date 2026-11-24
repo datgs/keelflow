@@ -23,7 +23,7 @@ from keelflow.sdk import Actor
 
 DSN = os.environ.get(
     "KEELFLOW_TEST_DSN",
-    "postgresql://postgres:postgres@localhost:5544/keelflow")
+    "postgresql://postgres:postgres@localhost:5544/keelflow_test")
 
 
 @pytest_asyncio.fixture

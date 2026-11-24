@@ -13,6 +13,7 @@ the default path or call `require_chancy`.
 from __future__ import annotations
 
 import os
+import warnings
 from contextlib import asynccontextmanager
 
 import pytest
@@ -35,9 +36,29 @@ def pytest_generate_tests(metafunc):
 
 
 DSN = os.environ.get(
-    "KEELFLOW_TEST_DSN", "postgresql://postgres:postgres@localhost:5544/keelflow"
+    "KEELFLOW_TEST_DSN", "postgresql://postgres:postgres@localhost:5544/keelflow_test"
 )
 CHANCY_PREFIX = "keelflow_test_"
+
+
+def pytest_sessionstart(session):
+    """Fail-closed guard: fixtures truncate keelflow_* tables, so the
+    suite must run against a clearly disposable database. A custom
+    `KEELFLOW_TEST_DSN` without 'test' in the database name requires
+    `KEELFLOW_TEST_ALLOW_DESTRUCTIVE=1`. The default `keelflow_test`
+    database is created if missing."""
+    import asyncio
+
+    from keelflow.testing import assert_safe_test_dsn, ensure_test_database
+
+    try:
+        assert_safe_test_dsn(DSN)
+    except RuntimeError as exc:
+        pytest.exit(str(exc), returncode=3)
+    try:
+        asyncio.run(ensure_test_database(DSN))
+    except Exception as exc:  # noqa: BLE001 - DB may be down; tests skip
+        warnings.warn(f"could not ensure test database: {exc}")
 
 
 @asynccontextmanager

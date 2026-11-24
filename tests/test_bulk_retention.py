@@ -28,7 +28,7 @@ from keelflow.postgres.schema import apply_async
 from keelflow.postgres.storage import PostgresStorage
 from keelflow.sdk import Actor, JobContext, JobTypeSpec
 
-DSN = "postgresql://postgres:postgres@localhost:5544/keelflow"
+DSN = "postgresql://postgres:postgres@localhost:5544/keelflow_test"
 
 STORAGE = PostgresStorage(DSN)
 

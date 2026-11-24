@@ -23,8 +23,8 @@ jobs:
           --health-timeout 5s
           --health-retries 20
     env:
-      KEELFLOW_TEST_DSN: postgresql://postgres:postgres@localhost:5544/keelflow
-      KEELFLOW_DSN: postgresql://postgres:postgres@localhost:5544/keelflow
+      KEELFLOW_TEST_DSN: postgresql://postgres:postgres@localhost:5544/keelflow_test
+      KEELFLOW_DSN: postgresql://postgres:postgres@localhost:5544/keelflow_test
       UV_CACHE_DIR: /tmp/uv-cache
 
     steps:

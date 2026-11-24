@@ -41,6 +41,12 @@ class InMemoryRegistry(Registry):
         return frozenset(self._permissions)
 
     def register_job_type(self, spec: JobTypeSpec) -> None:
+        if spec.concurrency.max_workers is not None:
+            raise ValueError(
+                f"{spec.type!r}: concurrency.max_workers is declared "
+                "but not enforced by any kernel — refusing to register "
+                "a silent no-op limit. Remove the field or wait for "
+                "per-type concurrency support.")
         if spec.is_external_wait and not spec.type.startswith("wait."):
             raise ValueError(
                 f"is_external_wait type {spec.type!r} must use the 'wait.' namespace")

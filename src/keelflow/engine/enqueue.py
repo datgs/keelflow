@@ -118,6 +118,21 @@ class JobBuilder:
                 f"payload for {self._type} exceeds {spec.payload_max_bytes} bytes"
             )
 
+        # Spec-declared serialization key: a payload path like
+        # "payload.sku_id" resolves to the job's concurrency_key so
+        # same-key jobs never run in parallel. An explicit
+        # .concurrency_key() call wins over the spec path.
+        concurrency_key = self._concurrency_key
+        if concurrency_key is None and spec.concurrency.key:
+            resolved = _resolve_path(
+                spec.concurrency.key, {"payload": payload_dict})
+            if resolved is None:
+                raise EnqueueError(
+                    f"{self._type} declares concurrency.key "
+                    f"{spec.concurrency.key!r} but the payload has no "
+                    "value there")
+            concurrency_key = str(resolved)
+
         job_id = uuid.uuid4()
         now = datetime.now(UTC)
 
@@ -131,7 +146,7 @@ class JobBuilder:
             context=ctx_to_dict(self._ctx),
             max_attempts=spec.retry.max_attempts,
             run_at=self._run_at or now,
-            concurrency_key=self._concurrency_key,
+            concurrency_key=concurrency_key,
             assignee=self._assignee,
             unique_key=self._unique_key,
         ))
@@ -311,3 +326,13 @@ class _BoundJobBuilder(JobBuilder):
 
 
 
+def _resolve_path(path: str, scope: dict) -> Any:
+    """Resolve a dotted path like 'payload.sku_id' against the enqueue
+    scope {payload: {...}}. Returns None when any segment is missing."""
+    cur: Any = scope
+    for part in path.split("."):
+        if isinstance(cur, dict) and part in cur:
+            cur = cur[part]
+        else:
+            return None
+    return cur

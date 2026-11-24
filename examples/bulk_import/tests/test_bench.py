@@ -25,7 +25,7 @@ from keelflow.postgres.schema import apply_async
 
 DSN = os.environ.get(
     "KEELFLOW_TEST_DSN",
-    "postgresql://postgres:postgres@localhost:5544/keelflow")
+    "postgresql://postgres:postgres@localhost:5544/keelflow_test")
 KERNEL_PREFIX = "keelflow_test_"
 
 

@@ -34,7 +34,7 @@ from keelflow.sdk import (
 )
 
 DSN = os.environ.get(
-    "KEELFLOW_TEST_DSN", "postgresql://postgres:postgres@localhost:5544/keelflow"
+    "KEELFLOW_TEST_DSN", "postgresql://postgres:postgres@localhost:5544/keelflow_test"
 )
 
 CALLS: list[tuple[str, dict]] = []
