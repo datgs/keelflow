@@ -168,7 +168,17 @@ def build_registry() -> InMemoryRegistry:
             TransitionSpec("posting", "posting_rejected", "posting_rejected"),
             TransitionSpec("posting_rejected", "posting", "repost"),
             TransitionSpec("posting", "posting_failed", "posting_failed"),
-            TransitionSpec("posting_failed", "posting", "retry_post"),
+            # recovery from a failed posting (including a cancelled run,
+            # whose entity lands here via on_failed) is an explicit new
+            # run — steps re-execute and domain writes are idempotent.
+            # resume_run remains available for failed/rejected runs.
+            TransitionSpec("posting_failed", "posting", "retry_post",
+                           triggers_workflow=WorkflowTriggerSpec(
+                               workflow="post.wf@v1",
+                               on_succeeded="posted",
+                               on_rejected="posting_rejected",
+                               on_failed="posting_failed",
+                               failure_job="human.posting_fix@v1")),
         ),
     ))
 

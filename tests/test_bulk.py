@@ -485,7 +485,8 @@ async def test_bulk_cancel_cascades_and_checkpoints(env, db):
 async def test_bulk_chunk_checkpoint_stops_mid_run(env, db):
     """A running chunk honours a flag set on it alone: rows processed
     before the flag commits keep their work; remaining rows stay
-    pending; the unrequested parent still terminalizes 'done'."""
+    pending. The unrequested parent terminalizes 'cancelled' — its
+    rows are not fully processed, so the pass is not a success."""
     _reset_gate()
     env["reg"].register_job_type(JobTypeSpec(
         type="imp.gate@v1", input_schema=Payload, handler=_CancelGateH))
@@ -525,7 +526,9 @@ async def test_bulk_chunk_checkpoint_stops_mid_run(env, db):
     parent_row = await (await db.execute(
         "SELECT status FROM keelflow_jobs WHERE id=%s", (parent,)
     )).fetchone()
-    assert parent_row[0] == "done"    # parent never requested cancel
+    # child-only cancellation leaves rows unprocessed → incomplete,
+    # not an ordinary success even though the parent never requested it
+    assert parent_row[0] == "cancelled"
 
 
 # ── randomized row-failure matrix ───────────────────────────────────────────

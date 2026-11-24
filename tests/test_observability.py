@@ -2,6 +2,8 @@
 
 import logging
 
+import pytest
+
 from keelflow.observability import (
     LOG_FIELDS,
     _child_traceparent,
@@ -76,3 +78,50 @@ def test_prometheus_handles_missing_values():
     out = format_metrics_prometheus({"queue_depth": 0})
     assert "keelflow_queue_depth 0" in out
     assert "keelflow_running 0" in out
+
+
+@pytest.mark.asyncio
+async def test_workers_alive_counts_only_fresh_heartbeats():
+    """D3: stale worker rows must not count alive; fresh ones do."""
+    import os
+
+    import psycopg
+    from psycopg.rows import dict_row
+
+    from keelflow.postgres.storage import PostgresStorage
+
+    dsn = os.environ.get(
+        "KEELFLOW_TEST_DSN",
+        "postgresql://postgres:postgres@localhost:5544/keelflow_test",
+    )
+    conn = await psycopg.AsyncConnection.connect(
+        dsn, autocommit=True, row_factory=dict_row
+    )
+    try:
+        await conn.execute("DELETE FROM keelflow_process_health")
+        await conn.execute(
+            "INSERT INTO keelflow_process_health (name, kind, last_seen)"
+            " VALUES ('fresh-1','worker', now()),"
+            "        ('fresh-2','worker', now() - interval '5 seconds'),"
+            "        ('stale-1','worker', now() - interval '10 minutes'),"
+            "        ('stale-2','worker', now() - interval '1 hour'),"
+            "        ('sched-live','scheduler', now()),"
+            "        ('sched-dead','scheduler', now() - interval '1 day')"
+        )
+        storage = PostgresStorage(dsn)
+        session = await storage.connect()
+        try:
+            async with session.begin() as uow:
+                snap = await storage.ops_metrics_snapshot(uow)
+        finally:
+            await session.close()
+        assert snap["workers_alive"] == 2
+        assert snap["workers_stale"] == 2
+        assert snap["schedulers_alive"] == 1
+        text = format_metrics_prometheus(snap)
+        assert "keelflow_workers_alive 2" in text
+        assert "keelflow_workers_stale 2" in text
+        assert "keelflow_schedulers_alive 1" in text
+    finally:
+        await conn.execute("DELETE FROM keelflow_process_health")
+        await conn.close()

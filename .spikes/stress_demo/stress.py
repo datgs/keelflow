@@ -211,8 +211,11 @@ async def _drive_import(dsn, env, spec, rnd, stats):
                 f"demo_imports status {imp['status']}")
         stats["import_" + (outcome["status"] or "?")] = \
             stats.get("import_" + (outcome["status"] or "?"), 0) + 1
-        # DELETE coverage: remove finished import + its raw rows
-        if spec.get("delete", True):
+        outcome["elapsed_s"] = round(time.monotonic() - t0, 1)
+        # DELETE coverage: remove finished import + its raw rows —
+        # only when the run completed; failed/timeout runs keep their
+        # data for the oracle/diagnosis
+        if spec.get("delete", True) and outcome["status"] == "done":
             try:
                 await wc.execute(
                     "DELETE FROM demo_import_raw WHERE import_id=%s", (iid,))
@@ -296,34 +299,30 @@ async def _drive_invoice(dsn, env, spec, rnd, stats):
                         " FROM keelflow_workflow_runs"
                         " WHERE triggered_by_entity_id=%s",
                         (no,))).fetchone()
-                    if run and run["terminal_outcome"] == "cancelled":
-                        # cancelled runs are not resumable — the entity
-                        # has no supported recovery path (finding F1);
-                        # mark once so the driver stops thrashing
-                        if "cancel_unresumable" not in outcome["anomalies"]:
-                            outcome["anomalies"].append(
-                                "cancel_unresumable")
-                            stats["inv_cancelled_unresumable"] = \
-                                stats.get("inv_cancelled_unresumable",
-                                          0) + 1
-                    elif run:
-                        if state == "posting_failed":
-                            # the fix-task flow: gl clears the defect
-                            # flag, then the run resumes
-                            await wc.execute(
-                                "UPDATE demo_invoices"
-                                " SET fail_post=false WHERE number=%s",
-                                (no,))
-                            await wc.commit()
+                    if not run:
+                        pass
+                    elif state == "posting_rejected":
+                        # business reject → resume the same run in place
                         async with wc.transaction(), wc.cursor() as cur:
                             await env["wf"].resume_run(cur, str(run["id"]),
                                                        FIN_CTX)
-                        if state == "posting_rejected":
-                            stats["invoice_reposts"] += 1
-                        else:
-                            stats["invoice_retries"] += 1
+                        stats["invoice_reposts"] += 1
+                    else:
+                        # posting_failed (technical OR cancelled run):
+                        # clear the defect flag then retry_post — an
+                        # explicit NEW run via triggers_workflow
+                        await wc.execute(
+                            "UPDATE demo_invoices"
+                            " SET fail_post=false WHERE number=%s", (no,))
+                        await wc.commit()
+                        async with wc.transaction(), wc.cursor() as cur:
+                            await env["sm"].transition(ent, "retry_post",
+                                                       FIN_CTX, cur)
+                        stats["invoice_retries"] += 1
+                        stats["invoice_new_runs"] = \
+                            stats.get("invoice_new_runs", 0) + 1
                 except Exception as exc:  # noqa: BLE001
-                    log(f"  inv {no}: resume race {exc!r}")
+                    log(f"  inv {no}: recovery race {exc!r}")
             # occasional mid-run cancel of a step job
             if spec["cancel"] and not cancelled and \
                     time.monotonic() - t0 > rnd.uniform(2, 6):
@@ -359,6 +358,7 @@ async def _drive_invoice(dsn, env, spec, rnd, stats):
                 outcome["anomalies"].append("thin audit trail")
         stats["inv_" + (outcome["status"] or "?")] = \
             stats.get("inv_" + (outcome["status"] or "?"), 0) + 1
+        outcome["elapsed_s"] = round(time.monotonic() - t0, 1)
         return outcome
     finally:
         await rc.close()
@@ -495,6 +495,7 @@ async def _drive_supplier(dsn, env, spec, rnd, stats):
                     f"only {checks['n']} check results")
         stats["sup_" + (outcome["status"] or "?")] = \
             stats.get("sup_" + (outcome["status"] or "?"), 0) + 1
+        outcome["elapsed_s"] = round(time.monotonic() - t0, 1)
         return outcome
     finally:
         await rc.close()
@@ -526,21 +527,50 @@ async def _chaos(dsn, env, rnd, stats, deadline):
         while time.monotonic() < deadline:
             await asyncio.sleep(rnd.uniform(25, 60))
             job = await (await conn.execute(
-                "SELECT id FROM keelflow_jobs"
-                " WHERE status IN ('pending','claimed')"
+                "SELECT id, status FROM keelflow_jobs"
+                " WHERE status IN ('pending','claimed','running')"
                 "   AND type NOT LIKE 'human.%%'"
                 "   AND type NOT LIKE 'wait.%%'"
-                " ORDER BY random() LIMIT 1")).fetchone()
+                " ORDER BY status='running' DESC, random() LIMIT 1")).fetchone()
             if not job:
                 continue
+            jid = str(job["id"])
             try:
-                await env["jobs"].cancel(str(job["id"]), OPS_CTX)
-                stats["chaos_cancels"] += 1
-                log(f"chaos: cancelled {str(job['id'])[:8]}")
+                ok = await env["jobs"].cancel(jid, OPS_CTX)
+                if not ok:
+                    log(f"chaos cancel refused for {jid[:8]}")
+                    continue
+                # verify terminal state actually lands
+                term = await (await conn.execute(
+                    "SELECT status FROM keelflow_jobs WHERE id=%s",
+                    (jid,))).fetchone()
+                if term and term["status"] in ("cancelled", "pending"):
+                    stats["chaos_cancels"] += 1
+                    stats.setdefault("chaos_on_running", 0)
+                    if job["status"] == "running":
+                        stats["chaos_on_running"] += 1
+                    log(f"chaos: cancelled {jid[:8]} (was {job['status']})")
+                else:
+                    log(f"chaos cancel did not land on {jid[:8]}: {term}")
+                    stats.setdefault("chaos_no_effect", 0)
+                    stats["chaos_no_effect"] += 1
             except Exception as exc:  # noqa: BLE001
                 log(f"chaos cancel race: {exc!r}")
     finally:
         await conn.close()
+
+
+def _resources() -> dict:
+    """Cheap stdlib-only resource snapshot: loadavg + max RSS + cpu
+    count. DB connections come from the metrics query itself."""
+    import os
+    import resource
+    la = os.getloadavg()
+    return {"load1": round(la[0], 2), "load5": round(la[1], 2),
+            "load15": round(la[2], 2),
+            "maxrss_mb": round(resource.getrusage(
+                resource.RUSAGE_SELF).ru_maxrss / 1024 / 1024, 1),
+            "cpus": os.cpu_count()}
 
 
 async def _metrics(dsn, fh, deadline, stats):
@@ -568,6 +598,7 @@ async def _metrics(dsn, fh, deadline, stats):
                 "  max(extract(epoch FROM now()-last_seen)) oldest_age"
                 " FROM keelflow_process_health GROUP BY kind")).fetchall()
             rec = {"t": round(time.time(), 1),
+                   "resources": _resources(),
                    "jobs": {r["status"]: r["n"] for r in row},
                    "runs": {f"{r['status']}/{r['terminal_outcome']}": r["n"]
                             for r in runs},
@@ -640,6 +671,8 @@ async def main_async(args) -> int:
     stats = {"cancels": 0, "chaos_cancels": 0, "invoice_reposts": 0,
              "invoice_retries": 0, "supplier_resumes": 0,
              "imports_deleted": 0, "noise_crud": 0}
+    manifest: dict[str, list] = {"imports": [], "invoices": [],
+                                 "suppliers": []}
     outcomes: list[dict] = []
     log_path = os.path.join(os.path.dirname(__file__),
                             f"stress-{int(time.time())}.jsonl")
@@ -649,6 +682,13 @@ async def main_async(args) -> int:
         for name in ("bulk_import", "invoice_flow",
                      "supplier_onboarding"):
             await conn.execute(_demo_schema(name))
+        baseline = {
+            "jobs_done": (await (await conn.execute(
+                "SELECT count(*) n FROM keelflow_jobs"
+                " WHERE status='done'")).fetchone())["n"],
+            "runs_done": (await (await conn.execute(
+                "SELECT count(*) n FROM keelflow_workflow_runs"
+                " WHERE status='done'")).fetchone())["n"]}
 
         storage = PostgresStorage(dsn)
         async with Chancy(dsn, prefix=KERNEL_PREFIX,
@@ -680,12 +720,14 @@ async def main_async(args) -> int:
                 seq["i"] += 1
                 n_rows = rnd.randint(300, 600)
                 iid = await _stage_import(gen_conn, n_rows, 0.08)
+                manifest["imports"].append(iid)
                 return {"iid": iid, "n_rows": n_rows,
                         "delete": rnd.random() < 0.9}
 
             async def next_invoice():
                 seq["i"] += 1
                 no = await _mk_invoice(gen_conn, seq["i"], rnd, args)
+                manifest["invoices"].append(no)
                 return {"no": no, "cancel": rnd.random() < 0.05}
 
             async def next_supplier():
@@ -699,7 +741,36 @@ async def main_async(args) -> int:
                     " 'requested')", (name, f"T-{name[:12]}", fail))
                 sid = (await (await gen_conn.execute(
                     "SELECT max(id) id FROM demo_suppliers")).fetchone())["id"]
+                manifest["suppliers"].append(sid)
                 return {"sid": sid, "fail": fail}
+
+            async def worker_restart():
+                await asyncio.sleep(rnd.uniform(300, 600))
+                log("chaos: graceful worker restart")
+                await w.stop(timeout=10)
+                await w.start()
+                stats["worker_restarts"] = stats.get("worker_restarts", 0) + 1
+
+            async def db_fault():
+                """Terminate our own app's pg backend connections —
+                tests reconnect paths in driver and worker pools."""
+                fc = await _conn(dsn)
+                try:
+                    while time.monotonic() < deadline:
+                        await asyncio.sleep(rnd.uniform(240, 480))
+                        victims = await (await fc.execute(
+                            "SELECT pid FROM pg_stat_activity"
+                            " WHERE datname=current_database()"
+                            "   AND pid <> pg_backend_pid()"
+                            " ORDER BY random() LIMIT 2")).fetchall()
+                        for v in victims:
+                            await fc.execute(
+                                "SELECT pg_terminate_backend(%s)", (v["pid"],))
+                        stats["db_terminations"] = \
+                            stats.get("db_terminations", 0) + len(victims)
+                        log(f"chaos: terminated {len(victims)} db backends")
+                finally:
+                    await fc.close()
 
             async def noise():
                 while time.monotonic() < deadline:
@@ -732,6 +803,8 @@ async def main_async(args) -> int:
                     asyncio.create_task(_chaos(dsn, env, rnd, stats,
                                                deadline)),
                     asyncio.create_task(_metrics(dsn, fh, deadline, stats)),
+                    asyncio.create_task(worker_restart()),
+                    asyncio.create_task(db_fault()),
                     asyncio.create_task(noise()),
                 ]
                 await asyncio.gather(*tasks)
@@ -741,8 +814,21 @@ async def main_async(args) -> int:
             await w.stop(timeout=10)
             sched.cancel()
 
-        # ── final report ────────────────────────────────────────────
-        await _report(conn, outcomes, stats, args, log_path)
+        args._baseline = baseline
+        # ── final report + oracle ───────────────────────────────────
+        oracle = await _oracle(conn, manifest)
+        await _report(conn, outcomes, stats, args, log_path, oracle)
+        unexplained = [a for a in oracle["violations"]
+                       if a["kind"] != "cancelled_ok"]
+        if unexplained:
+            log(f"ORACLE FAIL: {len(unexplained)} unexplained violations")
+            return 1
+        log("oracle: all manifested entities terminal")
+        anomalies_total = sum(len(o.get("anomalies", []))
+                              for o in outcomes)
+        if anomalies_total:
+            log(f"reporting {anomalies_total} anomalies → exit 1")
+            return 1
         return 0
     finally:
         await conn.close()
@@ -751,14 +837,55 @@ async def main_async(args) -> int:
         await lock_conn.close()
 
 
-async def _report(conn, outcomes, stats, args, log_path):
+async def _oracle(conn, manifest):
+    """Per-run reconciliation: every created entity must reach its
+    terminal state by drain end. Anything else is unexplained."""
+    violations: list[dict] = []
+    for iid in manifest["imports"]:
+        r = await (await conn.execute(
+            "SELECT status FROM demo_imports WHERE id=%s", (iid,))
+        ).fetchone()
+        if r is None:
+            violations.append({"kind": "import", "id": iid,
+                               "state": "missing"})
+        elif r["status"] in ("uploaded", "processing"):
+            violations.append({"kind": "import", "id": iid,
+                               "state": r["status"]})
+    for no in manifest["invoices"]:
+        r = await (await conn.execute(
+            "SELECT state FROM keelflow_entity_state"
+            " WHERE entity_type='invoice' AND entity_id=%s", (no,))
+        ).fetchone()
+        if r is None:
+            violations.append({"kind": "invoice", "id": no,
+                               "state": "missing"})
+        elif r["state"] in ("draft", "in_review", "posting"):
+            violations.append({"kind": "invoice", "id": no,
+                               "state": r["state"]})
+    for sid in manifest["suppliers"]:
+        r = await (await conn.execute(
+            "SELECT status FROM demo_suppliers WHERE id=%s", (sid,))
+        ).fetchone()
+        if r is None:
+            violations.append({"kind": "supplier", "id": sid,
+                               "state": "missing"})
+        elif r["status"] not in ("active", "rejected"):
+            violations.append({"kind": "supplier", "id": sid,
+                               "state": r["status"]})
+    return {"checked": {k: len(v) for k, v in manifest.items()},
+            "violations": violations}
+
+
+async def _report(conn, outcomes, stats, args, log_path, oracle=None):
     def of(kind):
         return [o for o in outcomes if o.get("kind") == kind]
 
     anomalies = [(o.get("id"), a) for o in outcomes
                  for a in o.get("anomalies", [])]
     report = {"minutes": args.minutes, "log": log_path,
-              "stats": stats, "anomalies": anomalies}
+              "baseline": getattr(args, "_baseline", None),
+              "stats": stats, "oracle": oracle,
+              "anomalies": anomalies}
     for kind in ("import", "invoice", "supplier"):
         rows = of(kind)
         by: dict[str, int] = {}
@@ -775,6 +902,12 @@ async def _report(conn, outcomes, stats, args, log_path):
     report["final_runs"] = {r["status"]: r["n"] for r in tail_r}
     report["dlq"] = (await (await conn.execute(
         "SELECT count(*) n FROM keelflow_dlq")).fetchone())["n"]
+    lat = sorted(o["elapsed_s"] for o in outcomes if "elapsed_s" in o)
+    if lat:
+        report["e2e_latency_s"] = {
+            "n": len(lat), "p50": lat[len(lat) // 2],
+            "p95": lat[min(len(lat) - 1, int(len(lat) * 0.95))],
+            "max": lat[-1]}
     report["domain"] = {
         "imports": (await (await conn.execute(
             "SELECT count(*) n FROM demo_imports")).fetchone())["n"],

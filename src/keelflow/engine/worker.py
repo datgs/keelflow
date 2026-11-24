@@ -420,7 +420,8 @@ def run_worker(
             worker = injected.create_worker()
             await worker.start()
             try:
-                tasks = [worker.wait_for_shutdown()]
+                tasks = [worker.wait_for_shutdown(),
+                         worker_heartbeat_loop(storage)]
                 if event_bus is not None:
                     from .events import dispatch_events
 
@@ -450,7 +451,8 @@ def run_worker(
             worker = kernel.create_worker()
             await worker.start()
             try:
-                tasks = [worker.wait_for_shutdown()]
+                tasks = [worker.wait_for_shutdown(),
+                         worker_heartbeat_loop(storage)]
                 if event_bus is not None:
                     from .events import dispatch_events
 
@@ -530,6 +532,12 @@ async def _settle_cancelled_chunk(uow, session, storage, type_name,
 
 _worker_id: str | None = None
 
+#: Liveness contract: workers upsert a heartbeat every
+#: HEARTBEAT_INTERVAL_S (dispatch and idle); a process is alive while
+#: its heartbeat is fresher than STALE_AFTER_S.
+HEARTBEAT_INTERVAL_S = 10.0
+STALE_AFTER_S = 30.0
+
 
 def _worker_name() -> str:
     """Stable per-process worker identity for heartbeat rows."""
@@ -538,6 +546,32 @@ def _worker_name() -> str:
         import socket
         _worker_id = f"worker-{socket.gethostname()}-{os.getpid()}"
     return _worker_id
+
+
+async def worker_heartbeat_loop(
+    storage: Storage,
+    *,
+    interval: float = HEARTBEAT_INTERVAL_S,
+    stop: asyncio.Event | None = None,
+) -> None:
+    """Periodic worker heartbeat — keeps a live worker visible even when
+    it dispatches no jobs. Each upsert commits in its own session unit
+    so a failed cycle reconnects cleanly on the next one.
+    """
+    import asyncio as _aio
+
+    while not (stop and stop.is_set()):
+        try:
+            session = await storage.connect()
+            try:
+                async with session.begin() as uow:
+                    await storage.heartbeat_upsert(
+                        uow, _worker_name(), "worker")
+            finally:
+                await session.close()
+        except Exception:  # liveness must never kill the worker
+            log.debug("worker heartbeat failed", exc_info=True)
+        await _aio.sleep(interval)
 
 
 def _job_logger(job_id: str, type_name: str, correlation_id: str,

@@ -75,9 +75,16 @@ MUST, in the one chunk transaction:
 - Explicit per-row business errors never fail the chunk or the parent;
   they are error-queue data like row-atomic failures.
 
-4. Fan-in: last chunk to settle flips parent to `done` (or `failed` if
-   any chunk failed) and merges a summary into `result`
-   (`chunks` per-status counts + `rows_total`/`rows_done`/`rows_failed`).
+4. Fan-in: last chunk to settle flips parent to `done`, `failed`, or
+   `cancelled`, and merges a summary into `result`
+   (`chunks` per-status counts + `rows_total`/`rows_done`/`rows_failed`/
+   `rows_pending`/`rows_processing`). `done` means every input row
+   reached a terminal row disposition — row-level business failures are
+   error-queue data, not parent failures. A **cancelled chunk leaves its
+   unprocessed rows pending**, so the parent becomes `cancelled` (not
+   `done`) even when the parent never requested cancellation — an
+   incomplete pass MUST NOT advance downstream as a success. Any chunk
+   `failed` makes the parent `failed`.
    If the parent job belongs to a workflow step, fan-in MUST call the
    step-finish hook (`on_job_finished`) **in the same transaction** —
    step completion and downstream advance are atomic with the parent's

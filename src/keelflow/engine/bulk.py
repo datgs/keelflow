@@ -473,6 +473,11 @@ class ChunkJobHandler(JobHandler):
                 return
             if pj["cancel_requested"]:
                 final = "cancelled"
+            elif counts.get("cancelled"):
+                # A cancelled chunk leaves its unprocessed rows pending —
+                # the pass did not complete. Parent is non-success so a
+                # workflow step does not advance as a success.
+                final = "cancelled"
             elif counts.get("failed"):
                 final = "failed"
             else:
@@ -484,6 +489,10 @@ class ChunkJobHandler(JobHandler):
                 "rows_total": sum(rows.values()),
                 "rows_done": rows.get("done", 0),
                 "rows_failed": rows.get("failed", 0),
+                # unprocessed input rows (cancelled chunk leaves them
+                # pending) — non-zero means the pass did not complete
+                "rows_pending": rows.get("pending", 0),
+                "rows_processing": rows.get("processing", 0),
             }
 
             # Retention for 'done' staging rows — same UoW as the parent's

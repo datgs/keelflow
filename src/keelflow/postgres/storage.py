@@ -1228,15 +1228,28 @@ class PostgresStorage(Storage):
         await cur.execute(
             "SELECT count(*) AS n FROM keelflow_dlq")
         row["dlq_depth"] = (await cur.fetchone())["n"]
+        # Liveness: a process is alive only while its heartbeat is
+        # fresher than the stale threshold (see worker.STALE_AFTER_S).
         await cur.execute(
-            "SELECT count(*) AS n FROM keelflow_process_health"
-            " WHERE kind='worker'")
-        row["workers_alive"] = (await cur.fetchone())["n"]
+            "SELECT count(*) FILTER"
+            "       (WHERE last_seen > now() - interval '30 seconds')"
+            "       AS alive,"
+            "       count(*) AS total,"
+            "       EXTRACT(EPOCH FROM (now() - min(last_seen)))"
+            "       AS oldest_age_s"
+            " FROM keelflow_process_health WHERE kind='worker'")
+        w = await cur.fetchone()
+        row["workers_alive"] = w["alive"]
+        row["workers_stale"] = w["total"] - w["alive"]
         await cur.execute(
-            "SELECT max(last_seen) AS last_seen, "
+            "SELECT count(*) FILTER"
+            "       (WHERE last_seen > now() - interval '30 seconds')"
+            "       AS alive,"
+            "       max(last_seen) AS last_seen, "
             "       EXTRACT(EPOCH FROM (now() - max(last_seen))) AS age_s"
             " FROM keelflow_process_health WHERE kind='scheduler'")
         sched = await cur.fetchone()
+        row["schedulers_alive"] = sched["alive"]
         row["scheduler_last_seen_age_s"] = sched["age_s"]
         await cur.execute(
             "SELECT count(*) AS workers FROM "

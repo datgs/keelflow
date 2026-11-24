@@ -112,7 +112,8 @@ async def env(db, kernel_kind):
         jobs = JobService(reg, kernel, PostgresStorage(DSN))
         human = HumanTaskService(reg, kernel, sm=sm)
         wf = WorkflowService(reg, jobs)
-        yield {"sm": sm, "human": human, "wf": wf, "kernel": kernel, "kind": kernel_kind}
+        yield {"sm": sm, "human": human, "wf": wf, "jobs": jobs,
+               "kernel": kernel, "kind": kernel_kind}
 
 
 async def _invoice(db, no, state="draft"):
@@ -121,6 +122,11 @@ async def _invoice(db, no, state="draft"):
         " VALUES ('invoice', %s, %s)"
         " ON CONFLICT (entity_type, entity_id) DO UPDATE SET state=%s",
         (no, state, state))
+
+
+def _ctx_cancel() -> JobContext:
+    return JobContext(actor=Actor.user("ops"),
+                      permissions=frozenset({"job.cancel"}))
 
 
 async def _state(db, no):
@@ -331,5 +337,79 @@ async def test_technical_failure_and_fix_task(env, db):
                 break
             await asyncio.sleep(0.1)
         assert await _state(db, "INV-9002") == "posted"
+    finally:
+        await w.stop(timeout=5)
+
+
+@pytest.mark.asyncio
+async def test_cancelled_run_new_run_recovery(env, db):
+    """Cancelled post.wf run → posting_failed → explicit retry_post starts
+    a NEW run (cancelled runs are not resumable) and reaches posted."""
+    await _invoice(db, "INV-9001")
+    ent = EntityRef(type="invoice", id="INV-9001")
+    async with (await _conn(False)) as c, c.transaction(), \
+            c.cursor(row_factory=dict_row) as cur:
+        await env["sm"].transition(ent, "submit", CTX["u1"], cur)
+    task = await (await db.execute(
+        "SELECT id FROM keelflow_jobs WHERE type='human.review@v1'"
+        " AND payload->>'entity_id'='INV-9001'")).fetchone()
+    await env["human"].complete_and_transition(
+        db, str(task[0]), Actor.user("fin1"), "approve", CTX["fin1"],
+        roles=["finance"])
+
+    # cancel a step job BEFORE any worker runs — after approve, the
+    # run's first step jobs are already pending
+    step_job = await (await db.execute(
+        "SELECT j.id FROM keelflow_jobs j"
+        " JOIN keelflow_step_runs sr ON sr.job_id = j.id"
+        " WHERE j.status IN ('pending','claimed')"
+        "   AND j.type NOT LIKE 'human.%'"
+        " ORDER BY j.created_at DESC LIMIT 1")).fetchone()
+    assert step_job is not None
+    await env["jobs"].cancel(str(step_job[0]), _ctx_cancel())
+    w = make_worker(env["kernel"], env["kind"], concurrency=4)
+    await w.start()
+    try:
+        for _ in range(150):
+            if await _state(db, "INV-9001") == "posting_failed":
+                break
+            await asyncio.sleep(0.1)
+        assert await _state(db, "INV-9001") == "posting_failed"
+        first_run = await (await db.execute(
+            "SELECT id, terminal_outcome FROM keelflow_workflow_runs"
+            " WHERE triggered_by_entity_id='INV-9001'")).fetchone()
+        assert first_run[1] == "cancelled"
+        # not resumable
+        import pytest as _p
+        with _p.raises(ValueError, match="not resumable"):
+            await env["wf"].resume_run(db, str(first_run[0]), CTX["fin1"])
+
+        # explicit new run via retry_post
+        async with (await _conn(False)) as c, c.transaction(), \
+                c.cursor(row_factory=dict_row) as cur:
+            await env["sm"].transition(ent, "retry_post", CTX["fin1"], cur)
+        assert await _state(db, "INV-9001") == "posting"
+        runs = await (await db.execute(
+            "SELECT id, terminal_outcome FROM keelflow_workflow_runs"
+            " WHERE triggered_by_entity_id='INV-9001' ORDER BY created_at"
+        )).fetchall()
+        assert len(runs) == 2
+
+        for _ in range(150):
+            row = await (await db.execute(
+                "SELECT id FROM keelflow_jobs WHERE type='human.gl_check@v1'"
+                " AND status='pending'")).fetchone()
+            if row:
+                break
+            await asyncio.sleep(0.1)
+        assert row is not None
+        await env["human"].complete(
+            db, str(row[0]), Actor.user("gl1"), {"decision": "approve"},
+            roles=["gl"])
+        for _ in range(150):
+            if await _state(db, "INV-9001") == "posted":
+                break
+            await asyncio.sleep(0.1)
+        assert await _state(db, "INV-9001") == "posted"
     finally:
         await w.stop(timeout=5)
