@@ -292,10 +292,29 @@ async def _drive_invoice(dsn, env, spec, rnd, stats):
             if state in ("posting_rejected", "posting_failed"):
                 try:
                     run = await (await rc.execute(
-                        "SELECT id FROM keelflow_workflow_runs"
+                        "SELECT id, terminal_outcome"
+                        " FROM keelflow_workflow_runs"
                         " WHERE triggered_by_entity_id=%s",
                         (no,))).fetchone()
-                    if run:
+                    if run and run["terminal_outcome"] == "cancelled":
+                        # cancelled runs are not resumable — the entity
+                        # has no supported recovery path (finding F1);
+                        # mark once so the driver stops thrashing
+                        if "cancel_unresumable" not in outcome["anomalies"]:
+                            outcome["anomalies"].append(
+                                "cancel_unresumable")
+                            stats["inv_cancelled_unresumable"] = \
+                                stats.get("inv_cancelled_unresumable",
+                                          0) + 1
+                    elif run:
+                        if state == "posting_failed":
+                            # the fix-task flow: gl clears the defect
+                            # flag, then the run resumes
+                            await wc.execute(
+                                "UPDATE demo_invoices"
+                                " SET fail_post=false WHERE number=%s",
+                                (no,))
+                            await wc.commit()
                         async with wc.transaction(), wc.cursor() as cur:
                             await env["wf"].resume_run(cur, str(run["id"]),
                                                        FIN_CTX)
@@ -349,10 +368,10 @@ async def _drive_invoice(dsn, env, spec, rnd, stats):
 async def _mk_invoice(wc, seq, rnd, args):
     no = f"INV-S{args.run_id}-{seq:06d}"
     await wc.execute(
-        "INSERT INTO demo_invoices (number, vendor, amount)"
-        " VALUES (%s, %s, %s)",
+        "INSERT INTO demo_invoices (number, vendor, amount, fail_post)"
+        " VALUES (%s, %s, %s, %s)",
         (no, f"Vendor-{rnd.randint(1, 40)}",
-         round(rnd.uniform(50, 5000), 2)))
+         round(rnd.uniform(50, 5000), 2), rnd.random() < 0.015))
     await wc.execute(
         "INSERT INTO keelflow_entity_state"
         " (entity_type, entity_id, state) VALUES ('invoice', %s, 'draft')"
@@ -487,13 +506,13 @@ async def _noise_supplier(wc, rnd, stats):
     await wc.execute(
         "INSERT INTO demo_suppliers (name, country, tax_id,"
         " contact_email, bank_ref, fail_sanction, status)"
-        " VALUES (%s,'DE',%s,'n@n.example','N001',false,'requested')",
+        " VALUES (%s,'DE',%s,'noise@hdwebsoft.com','N001',false,'requested')",
         (name, f"T-{name[:10]}"))
     sid = (await (await wc.execute(
         "SELECT max(id) id FROM demo_suppliers")).fetchone())["id"]
     await wc.execute(
         "UPDATE demo_suppliers SET contact_email=%s WHERE id=%s",
-        (f"upd-{uuid.uuid4().hex[:6]}@x.example", sid))
+        (f"upd-{uuid.uuid4().hex[:6]}@hdwebsoft.com", sid))
     await wc.execute("DELETE FROM demo_suppliers WHERE id=%s", (sid,))
     stats["noise_crud"] += 1
 
@@ -676,8 +695,8 @@ async def main_async(args) -> int:
                 await gen_conn.execute(
                     "INSERT INTO demo_suppliers (name, country, tax_id,"
                     " contact_email, bank_ref, fail_sanction, status)"
-                    " VALUES (%s,'DE',%s,'s@x.example','OK001',%s,"
-                    " 'requested')", (name, f"T-{name[:10]}", fail))
+                    " VALUES (%s,'DE',%s,'stress@hdwebsoft.com','OK001',%s,"
+                    " 'requested')", (name, f"T-{name[:12]}", fail))
                 sid = (await (await gen_conn.execute(
                     "SELECT max(id) id FROM demo_suppliers")).fetchone())["id"]
                 return {"sid": sid, "fail": fail}
