@@ -1,4 +1,4 @@
-"""MonitoringService.sweep — time-based retention for engine tables."""
+"""MonitoringService.purge_expired_records — time-based retention for engine tables."""
 from __future__ import annotations
 
 import os
@@ -10,6 +10,7 @@ import pytest_asyncio
 
 from keelflow.engine.monitoring import MonitoringService
 from keelflow.postgres.schema import apply_async
+from keelflow.postgres.storage import PostgresStorage
 
 DSN = os.environ.get(
     "KEELFLOW_TEST_DSN", "postgresql://postgres:postgres@localhost:5544/keelflow"
@@ -57,7 +58,7 @@ async def _count(db, table, where=""):
 
 @pytest.mark.asyncio
 async def test_sweep_terminal_jobs_cascades_and_is_idempotent(db):
-    svc = MonitoringService()
+    svc = MonitoringService(storage=PostgresStorage(DSN))
     old = await _job(db, "done", 40)
     await db.execute(
         "INSERT INTO keelflow_row_status (job_id, row_key, status)"
@@ -86,7 +87,7 @@ async def test_sweep_terminal_jobs_cascades_and_is_idempotent(db):
 async def test_sweep_children_before_parent(db):
     """A parent can't be deleted while a child job still references it —
     repeated sweeps converge child-first."""
-    svc = MonitoringService()
+    svc = MonitoringService(storage=PostgresStorage(DSN))
     parent = await _job(db, "done", 40)
     child = await _job(db, "done", 40, parent=parent)
 
@@ -103,7 +104,7 @@ async def test_sweep_children_before_parent(db):
 async def test_sweep_runs_release_step_linked_jobs(db):
     """Deleting a terminal run cascades its step_runs; the step's job then
     becomes sweepable. A job still referenced by a live run is skipped."""
-    svc = MonitoringService()
+    svc = MonitoringService(storage=PostgresStorage(DSN))
     run_id, job_id = str(uuid.uuid4()), str(uuid.uuid4())
     await db.execute(
         "INSERT INTO keelflow_workflow_runs (id, workflow, status, updated_at)"
@@ -143,7 +144,7 @@ async def test_sweep_runs_release_step_linked_jobs(db):
 
 @pytest.mark.asyncio
 async def test_sweep_outbox_archive_dlq(db):
-    svc = MonitoringService()
+    svc = MonitoringService(storage=PostgresStorage(DSN))
     await db.execute(
         "INSERT INTO keelflow_outbox (event_type, payload, status,"
         " published_at, created_at) VALUES"
@@ -175,7 +176,7 @@ async def test_sweep_outbox_archive_dlq(db):
 
 @pytest.mark.asyncio
 async def test_sweep_none_disables_everything(db):
-    svc = MonitoringService()
+    svc = MonitoringService(storage=PostgresStorage(DSN))
     await _job(db, "done", 100)
     out = await svc.purge_expired_records(db, jobs_days=None, outbox_days=None,
                           archive_days=None, dlq_days=None)

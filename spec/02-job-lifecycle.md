@@ -38,7 +38,7 @@ kernel claims job → dispatch(job_id)
   if status in (done | cancelled | failed):                       # re-delivery
       advance owning step idempotently (if any); never re-run handler
   else:
-      run handler.run(ctx, payload) with ctx.tx = dispatch cursor
+      run handler.run(ctx, payload) with ctx.uow = dispatch unit of work
       handler + job finish + advance_run in ONE TX (see 03 §dispatch TX)
       declared status := done | failed | cancelled; result := outputs
   kernel completion update (same worker TX)

@@ -185,7 +185,7 @@ async def test_happy_path_sm_to_posted(env, db):
         await env["human"].complete(
             db, str(gl_task["id"]), Actor.user("gl1"), {"decision": "approve"},
             roles=["gl"])
-        # callback fires on_done → posted, inside terminal TX
+        # callback fires on_succeeded → posted, inside terminal TX
         for _ in range(150):
             if await _state(db, "INV-9001") == "posted":
                 break

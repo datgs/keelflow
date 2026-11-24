@@ -27,8 +27,8 @@ Rules:
   `permissions` inherited.
 - **`extra` is the extension surface.** `locale`, `cost_center`,
   `job_id` (injected by dispatch). Unvalidated by engine.
-- **`ctx.tx` — handler-only, never serialized.** During dispatch the
-  engine sets `ctx.tx` to the transaction cursor that finishes the job
+- **`ctx.uow` — handler-only, never serialized.** During dispatch the
+  engine sets `ctx.uow` to the unit of work that finishes the job
   and advances the run; domain writes through it commit or roll back
   with the job outcome. Excluded from `jobs.context` JSON.
 - `ctx.require(perm)` resolves from `ctx.actor` — never thread-local.

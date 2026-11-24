@@ -99,7 +99,7 @@ Exactly-once: resuming a non-terminal run raises.
 
 A conforming dispatcher runs `handler.run`, the job finish write, and
 `advance_run` in **one transaction**; the handler's domain writes
-(`ctx.tx` cursor — never serialized into context) commit or roll back
+(`ctx.uow` — never serialized into context) commit or roll back
 with the job outcome. An exception → rollback; while kernel retries
 remain the job stays `running`; at exhaustion it is terminalized
 `failed` and the step fails (→ `on_failed`).

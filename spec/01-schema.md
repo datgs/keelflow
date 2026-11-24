@@ -21,7 +21,7 @@ normative; types adapt per DB (`jsonb`→`json`/`nvarchar(max)`…).
 
 ## Retention
 
-`MonitoringService.sweep` — **caller-invoked** (ops command or cron job),
+`MonitoringService.purge_expired_records` — **caller-invoked** (ops command or cron job),
 batched, idempotent; never implicit:
 
 - terminal `keelflow_workflow_runs` and `keelflow_jobs` past cutoff

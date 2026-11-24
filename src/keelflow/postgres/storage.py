@@ -1,9 +1,9 @@
 """Postgres implementation of the semantic Storage port.
 
 `PgSession` wraps one `psycopg.AsyncConnection`. `begin()` requires the
-connection to be idle — it raises when uncommitted work is pending so a
-forgotten write is never silently committed or discarded by a later
-scope. `UnitOfWork.nested()` maps to `conn.transaction()` which psycopg
+connection to be idle — it raises when a transaction is already pending
+so a forgotten write is never silently committed or discarded by a
+later scope. `UnitOfWork.nested()` maps to `conn.transaction()` which psycopg
 lowers to a savepoint when a transaction is already open.
 
 All SQL lives here (plus kernel adapters and `postgres/schema.py`).
@@ -18,6 +18,7 @@ from contextlib import asynccontextmanager
 from typing import Any
 
 import psycopg
+from psycopg import pq
 from psycopg.rows import dict_row
 
 from ..sdk.services import AuditEvent, JobStatus
@@ -90,10 +91,13 @@ class PgSession(Session):
                     "session already has an open UnitOfWork — "
                     "use uow.nested() for a child scope"
                 )
-            # psycopg opens an implicit TX on the first statement; an
-            # explicit rollback keeps begin() honest when the caller
-            # ran raw statements through session.native.
-            await conn.rollback()
+            # psycopg opens an implicit TX on the first statement;
+            # pending work must surface, not be discarded by begin().
+            if conn.info.transaction_status != pq.TransactionStatus.IDLE:
+                raise RuntimeError(
+                    "session has a pending transaction — commit or "
+                    "rollback the existing work before begin()"
+                )
             session._in_tx = True
             try:
                 async with conn.transaction():
@@ -109,11 +113,22 @@ class PgSession(Session):
 
         @asynccontextmanager
         async def _lock():
+            if conn.info.transaction_status != pq.TransactionStatus.IDLE:
+                raise RuntimeError(
+                    "key_lock requires an idle session — the lock is "
+                    "session-scoped and commits its own lock/unlock "
+                    "statements, so it must not join a pending transaction"
+                )
+            # Session-level advisory locks survive commits; commit right
+            # after each statement so the connection returns to IDLE and
+            # a later begin() still sees an idle session.
             await conn.execute("SELECT pg_advisory_lock(hashtext(%s))", (key,))
+            await conn.commit()
             try:
                 yield
             finally:
                 await conn.execute("SELECT pg_advisory_unlock(hashtext(%s))", (key,))
+                await conn.commit()
 
         return _lock()
 

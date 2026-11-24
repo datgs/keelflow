@@ -5,22 +5,23 @@ import json
 import os
 from typing import Any
 
-import psycopg
 from mcp.server.mcpserver import MCPServer
 
 from ..engine.audit import PostgresAuditService
 from ..engine.monitoring import MonitoringService
+from ..postgres.storage import PostgresStorage
 
 
 def make_server(dsn: str | None = None) -> MCPServer:
     """Build the MCP server. `dsn` defaults to $KEELFLOW_DSN."""
     dsn = dsn or os.environ["KEELFLOW_DSN"]
-    svc = MonitoringService()
-    audit = PostgresAuditService()
+    storage = PostgresStorage(dsn)
+    svc = MonitoringService(storage=storage)
+    audit = PostgresAuditService(storage)
     app = MCPServer("keelflow")
 
-    async def _conn():
-        return await psycopg.AsyncConnection.connect(dsn, autocommit=True)
+    async def _session():
+        return await storage.connect()
 
     async def _json(data: Any) -> str:
         return json.dumps(data, default=str)
@@ -32,43 +33,67 @@ def make_server(dsn: str | None = None) -> MCPServer:
         limit: int = 50,
     ) -> str:
         """List jobs (durable units of work). Filter by `types`, `statuses`."""
-        async with await _conn() as c:
-            return await _json(await svc.list_jobs(
-                c, types=types, statuses=statuses, limit=limit))
+        s = await _session()
+        try:
+            async with s.begin() as uow:
+                return await _json(await svc.list_jobs(
+                    uow, types=types, statuses=statuses, limit=limit))
+        finally:
+            await s.close()
 
     @app.tool()
     async def job_get(job_id: str) -> str:
         """Full detail for one job (status, payload, context, error)."""
-        async with await _conn() as c:
-            return await _json(await svc.get_job(c, job_id))
+        s = await _session()
+        try:
+            async with s.begin() as uow:
+                return await _json(await svc.get_job(uow, job_id))
+        finally:
+            await s.close()
 
     @app.tool()
     async def run_get(run_id: str) -> str:
         """Workflow run detail incl. per-step status."""
-        async with await _conn() as c:
-            return await _json(await svc.get_run(c, run_id))
+        s = await _session()
+        try:
+            async with s.begin() as uow:
+                return await _json(await svc.get_run(uow, run_id))
+        finally:
+            await s.close()
 
     @app.tool()
     async def rows_list_failed(job_id: str) -> str:
         """Failed rows for a bulk job (retry UI / debugging)."""
-        async with await _conn() as c:
-            return await _json(await svc.rows_list_failed(c, job_id))
+        s = await _session()
+        try:
+            async with s.begin() as uow:
+                return await _json(await svc.rows_list_failed(uow, job_id))
+        finally:
+            await s.close()
 
     @app.tool()
     async def audit_trace(entity_type: str, entity_id: str) -> str:
         """Audit events for an entity (in record order)."""
         from ..sdk import EntityRef
 
-        async with await _conn() as c:
-            events = await audit.trace(
-                c, EntityRef(type=entity_type, id=entity_id))
-            return await _json(events)
+        s = await _session()
+        try:
+            async with s.begin() as uow:
+                events = await audit.trace(
+                    uow, EntityRef(type=entity_type, id=entity_id))
+                return await _json(events)
+        finally:
+            await s.close()
 
     @app.tool()
     async def metrics_snapshot() -> str:
         """Queue depth, running count, 24h failures, oldest pending."""
-        async with await _conn() as c:
-            return await _json(await svc.metrics_snapshot(c))
+        s = await _session()
+        try:
+            async with s.begin() as uow:
+                return await _json(await svc.metrics_snapshot(uow))
+        finally:
+            await s.close()
 
     return app
 

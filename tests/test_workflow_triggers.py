@@ -2,7 +2,7 @@
 
 Covers the demo-suite engine prerequisites:
 - typed `triggers_workflow` persists metadata on the run;
-- on_done applies in the run's terminal transaction;
+- on_succeeded applies in the run's terminal transaction;
 - GL business reject → run 'rejected' + on_rejected action;
 - technical failure → on_failed + failure_job human task;
 - resume_run re-executes a failed/rejected run in place;
@@ -162,8 +162,8 @@ async def _wait(db, sql, args, want, timeout=15.0):
 
 
 @pytest.mark.asyncio
-async def test_trigger_metadata_and_on_done(env, db):
-    """Typed trigger persists; on_done fires in the run's terminal TX."""
+async def test_trigger_metadata_and_on_succeeded(env, db):
+    """Typed trigger persists; on_succeeded fires in the run's terminal TX."""
     env["reg"].register_state_machine(_invoice_sm(
         triggers_workflow=WorkflowTriggerSpec(
             workflow="post.wf@v1",

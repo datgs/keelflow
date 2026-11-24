@@ -57,7 +57,7 @@ CREATE TABLE IF NOT EXISTS keelflow_workflow_runs (
     -- started this run so the terminal callback can find its target.
     triggered_by_entity_type TEXT,
     triggered_by_entity_id   TEXT,
-    trigger_config           JSONB,           -- on_done/on_rejected/on_failed/failure_job
+    trigger_config           JSONB,           -- on_succeeded/on_rejected/on_failed/failure_job
     trigger_ctx              JSONB,           -- serialized initiating JobContext
     terminal_outcome         TEXT CHECK (terminal_outcome IN
                                  ('succeeded','rejected','failed','cancelled')),

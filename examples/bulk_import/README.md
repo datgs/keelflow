@@ -10,7 +10,7 @@ validation report → HITL **approve** → bulk **process** pass → finalize
 | Feature | Where |
 |---|---|
 | Bulk jobs as workflow steps | `imp.validate@v1`, `imp.process@v1` are `BulkJobHandler` types inside `imp.import@v1` — fan-in advances the run atomically |
-| Handler-staged rows | `_ImportBulk.run` stages `demo_import_raw` → `keelflow_row_status` in `ctx.tx` before partitioning (parent + chunk enqueue atomic); set-based `INSERT … SELECT` builds `data` JSONB server-side (staging guidance in `spec/04-bulk.md`) |
+| Handler-staged rows | `_ImportBulk.run` stages `demo_import_raw` → `keelflow_row_status` in `ctx.uow` before partitioning (parent + chunk enqueue atomic); set-based `INSERT … SELECT` builds `data` JSONB server-side (staging guidance in `spec/04-bulk.md`) |
 | Row-level atomicity + error queue | `atomic='row'` — bad rows → `failed` with `error`, don't block siblings; `/imports/N/errors.csv` exports them |
 | Row retention | `row_disposition='archive'` (default) — done staging rows move to `keelflow_row_archive` at fan-in, so the live table only keeps the error queue; parent `result` keeps `rows_done`/`archived_rows` totals |
 | Chunk fan-out/fan-in | `chunk_size=50` → multiple `bulk.chunk@v1` jobs + `keelflow_chunks` bookkeeping |
@@ -145,7 +145,7 @@ a 250k-row import is just one node in a workflow.
 |---|---|
 | **`BulkJobHandler`** — subclass for chunked row processing; engine fans out to `bulk.chunk` workers + fans back in | `class ValidateRowsH(_ImportBulk)` `class ProcessRowsH(_ImportBulk)` |
 | **`process_row(ctx, row, tx)`** — per-row business logic; engine owns chunking, retries, error queue | `async def process_row(self, ctx, row, tx): … if not sku: raise ValueError("missing sku")` |
-| **Stage rows before `super().run()`** — hook in `_ImportBulk.run` writes `keelflow_row_status` inside `ctx.tx`, then engine partitions; `INSERT … SELECT` builds JSONB server-side | `await cur.execute("INSERT INTO keelflow_row_status … SELECT %s, 'row-'||row_no, 'pending', jsonb_build_object(…) FROM demo_import_raw"); return await super().run(ctx, payload)` |
+| **Stage rows before `super().run()`** — hook in `_ImportBulk.run` writes `keelflow_row_status` inside `ctx.uow`, then engine partitions; `INSERT … SELECT` builds JSONB server-side | `await cur.execute("INSERT INTO keelflow_row_status … SELECT %s, 'row-'||row_no, 'pending', jsonb_build_object(…) FROM demo_import_raw"); return await super().run(ctx, payload)` |
 | **Row `data` self-contained** — chunk workers' ctx has no parent payload, so each row carries cells+mapping+import_id | `{"cells":…,"mapping":…,"import_id":…}` |
 | **`BulkJobPayload` via `${{ steps.*.outputs }}`** — feed a human step's output (mapping) into the bulk step's payload | `"mapping": "${{ steps.map.outputs.mapping }}"` |
 | **`atomic` + `chunk_size`** — engine bulk knobs on the step input | `"atomic": "row", "chunk_size": 5000` |

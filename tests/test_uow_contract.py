@@ -26,6 +26,9 @@ async def session():
     sess = await storage.connect()
     try:
         await apply_async(sess.native)
+        # DDL leaves an implicit transaction pending; commit it so the
+        # session is idle — begin() now refuses a pending transaction.
+        await sess.native.commit()
         yield sess
     finally:
         await sess.close()

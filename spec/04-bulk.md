@@ -9,7 +9,7 @@ Three levels: parent job → chunks → rows.
    same TX (durable intent).
 2. Parent handler (`BulkJobHandler.run`) partitions pending+unchunked
    rows into `keelflow_chunks` (idempotent) and enqueues one chunk job
-   per chunk — **inside its own dispatch TX** (`ctx.tx`), so rows staged
+   per chunk — **inside its own dispatch TX** (`ctx.uow`), so rows staged
    by a subclass's `run` (or by the enclosing workflow step) are
    visible and staging + partition + child enqueue commit atomically.
    A conforming implementation MUST NOT partition on a connection that
@@ -23,7 +23,7 @@ Three levels: parent job → chunks → rows.
    'pending', jsonb_build_object(…) FROM staging_table` — instead of
    fetching rows to Python and `executemany`-ing them back. Measured
    ~2× faster at 1M rows in the bulk_import benchmark; the atomicity
-   contract is unchanged because the statement still runs in `ctx.tx`.
+   contract is unchanged because the statement still runs in `ctx.uow`.
 3. Chunk handler claims chunk, resets stranded `processing` rows to
    `pending` (kill-resume), processes rows via `process_row(ctx, row, tx)`:
    - `atomic='chunk'` (default): all rows in ONE transaction; a failing

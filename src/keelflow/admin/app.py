@@ -11,22 +11,23 @@ import html
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
-import psycopg
-
 from ..engine.monitoring import MonitoringService
+from ..postgres.storage import PostgresStorage
 
 
 def make_app(dsn: str, host: str = "127.0.0.1", port: int = 8410):
     """Start the admin HTTP server (blocking). Ctrl+C to stop."""
-    svc = MonitoringService()
+    storage = PostgresStorage(dsn)
+    svc = MonitoringService(storage=storage)
 
     def q(coro):
         async def _run():
-            conn = await psycopg.AsyncConnection.connect(dsn, autocommit=True)
+            session = await storage.connect()
             try:
-                return await coro(conn)
+                async with session.begin() as uow:
+                    return await coro(uow)
             finally:
-                await conn.close()
+                await session.close()
         return asyncio.run(_run())
 
     class H(BaseHTTPRequestHandler):

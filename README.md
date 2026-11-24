@@ -62,7 +62,7 @@ permissions, and transactions.
 - an ETL/analytics orchestrator (Airflow, Dagster, Prefect) — those
   schedule data pipelines; keelflow executes domain transactions,
 - a magic-replay framework — handlers are normal functions with a
-  `ctx.tx` cursor, not rewound event histories.
+  `ctx.uow` unit of work, not rewound event histories.
 
 ## Design principles
 
@@ -71,7 +71,7 @@ permissions, and transactions.
    `tx`/`conn` and commits *with* it. Rollback → nothing leaked.
 2. **Exactly-once effects, at-least-once execution.** The kernel may
    redeliver; handlers write domain effects inside the dispatch
-   transaction (`ctx.tx`) which commits with the job finish — so
+   unit of work (`ctx.uow`) which commits with the job finish — so
    retries are safe, and idempotent-by-construction patterns (natural
    keys, upserts) cover the rest.
 3. **Delegate the boring machinery.** Claiming, leases, retries,
@@ -119,9 +119,9 @@ permissions, and transactions.
 | Retry with backoff | ✅ | per job type (`max_attempts`), kernel-tracked |
 | DAG workflows (`needs`, `if:`, `${{ }}` refs) | ✅ | parallel ready steps, code or YAML defs |
 | Human steps in a DAG | ✅ | `human.*` types park the run (`blocked`) |
-| External wait steps | ✅ | `wait.*` + `is_wait` park the run with no kernel claim; `signal`/`signal_failure` resolve atomically — provider auth + correlation stay app-owned |
+| External wait steps | ✅ | `wait.*` + `is_external_wait` park the run with no kernel claim; `signal`/`signal_failure` resolve atomically — provider auth + correlation stay app-owned |
 | Business vs technical failure | ✅ | `decision=reject` → `rejected`; retry exhaustion → `failed` |
-| Workflow triggers (SM → run → SM) | ✅ | `on_done/on_rejected/on_failed`, exactly-once callback |
+| Workflow triggers (SM → run → SM) | ✅ | `on_succeeded/on_rejected/on_failed`, exactly-once callback |
 | Resume failed/rejected runs | ✅ | `resume_run` in-place, `resume_step` |
 | Entity state machines | ✅ | guards, `creates_job`, `allowed_actions`, row-lock serialization |
 | Human task inbox | ✅ | `user:`/`role:` assignees, first-claim-wins, escalation |
@@ -133,7 +133,7 @@ permissions, and transactions.
 | Cron scheduling | ✅ | window + overlap policies |
 | Cooperative cancellation | ✅ | `JobService.cancel` (`job.cancel` perm); pre-start default + opt-in `ctx.execution.checkpoint()`; bulk chunks checkpoint per row, cascade to children |
 | Dead-letter queue | ✅ | `keelflow_dlq` + `dlq_replay` — replay resumes the owning run |
-| Retention & sweep | ✅ | `row_disposition` archive/keep/delete + `MonitoringService.sweep` (terminal jobs/runs, outbox, archive, DLQ) |
+| Retention & sweep | ✅ | `row_disposition` archive/keep/delete + `MonitoringService.purge_expired_records` (terminal jobs/runs, outbox, archive, DLQ) |
 | Idempotent enqueue | ✅ | `unique_key` dedup over non-terminal jobs |
 | Result size visibility | ✅ | `result_warning_bytes` soft + `result_max_bytes` opt-in hard cap |
 | Audit trail | ✅ | append-only, `via` actor chains |
@@ -141,7 +141,7 @@ permissions, and transactions.
 | Read-only MCP tools | ✅ | agent-inspectable jobs/runs/audit |
 | YAML definition compiler | ✅ | validated at load: cycles, unknown types, guards |
 | Language-agnostic spec | ✅ | `spec/` + conformance checklist |
-| Single-TX dispatch (`ctx.tx`) | ✅ | handler writes + finish + advance in one commit |
+| Single-TX dispatch (`ctx.uow`) | ✅ | handler writes + finish + advance in one commit |
 
 Kernel lifecycle (claim/retry/schedule) rides on **Chancy** by default;
 the `Kernel` port also ships experimental `NativeKernel` (claims

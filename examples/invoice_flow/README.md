@@ -90,7 +90,7 @@ exposes and this demo fills in:
 | Extension point | Snippet |
 |---|---|
 | **`JobHandler.run`** — your code, runs in the engine's dispatch TX | `class PostLedgerH(JobHandler): async def run(self, ctx, payload: InvPayload): …` |
-| **`ctx.tx`** — write domain rows *in the same commit* as job finish + workflow advance | `await ctx.tx.execute("INSERT INTO demo_ledger_postings … ON CONFLICT …")` |
+| **`ctx.uow`** — write domain rows *in the same commit* as job finish + workflow advance | `await ctx.uow.execute("INSERT INTO demo_ledger_postings … ON CONFLICT …")` |
 | **`JobTypeSpec` + `register_job_type`** — declare a job type + its handler | `reg.register_job_type(JobTypeSpec(type="inv.post_ledger@v1", handler=PostLedgerH, …))` |
 | **`HumanTaskOptions(assignee_role=…)`** — who may claim a human task | `human_task=HumanTaskOptions(assignee_role="gl")` |
 | **`StateMachineDefinition` / `TransitionSpec`** — entity lifecycle as data | `reg.register_state_machine(StateMachineDefinition(name="invoice@v1", … transitions=(…)))` |

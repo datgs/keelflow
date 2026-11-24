@@ -94,6 +94,7 @@ from keelflow.engine.workflow import WorkflowService
 from keelflow.engine.statemachine import EngineStateMachineService
 from keelflow.engine.human import HumanTaskService
 from keelflow.engine.audit import PostgresAuditService
+from keelflow.postgres.storage import PostgresStorage
 
 kernel = chancy.Chancy(DSN, prefix="keelflow_kernel_")
 await kernel.migrate()
@@ -101,8 +102,9 @@ await kernel.declare(chancy.Queue(
     "default", concurrency=8, executor=chancy.Chancy.Executor.Async),
     upsert=True)
 
-audit  = PostgresAuditService()
-jobs   = JobService(registry, kernel)
+storage = PostgresStorage(DSN)
+audit  = PostgresAuditService(storage)
+jobs   = JobService(registry, kernel, storage)
 wf     = WorkflowService(registry, jobs)
 sm     = EngineStateMachineService(registry, kernel, audit=audit)
 human  = HumanTaskService(registry, kernel, sm=sm)
@@ -172,14 +174,18 @@ data goes through `outputs`). `ctx.require("perm")` raises
 
 ---
 
-## 4. The handler transaction (`ctx.tx`)
+## 4. The handler unit of work (`ctx.uow`)
 
-While your handler runs, `ctx.tx` is a psycopg cursor inside **one
-transaction that also finishes the job and advances the workflow**:
+While your handler runs, `ctx.uow` is a `UnitOfWork` — **one transaction
+that also finishes the job and advances the workflow**. On the Postgres
+adapter, `ctx.uow` exposes `execute`/`cursor`/`executemany` at the
+adapter edge (`uow.native` is the psycopg connection); a domain
+repository may use them for app-owned SQL. Engine and SDK code use the
+semantic `Storage` port instead, so the contract stays backend-neutral.
 
 ```python
 async def run(self, ctx, payload):
-    await ctx.tx.execute(
+    await ctx.uow.execute(
         "INSERT INTO orders (id, status) VALUES (%s, 'placed')"
         " ON CONFLICT (id) DO NOTHING",
         (payload.order_id,),
@@ -187,26 +193,30 @@ async def run(self, ctx, payload):
     return JobResult(status="done")
 ```
 
-If the handler raises, the TX rolls back — no partial domain writes, no
-job marked done. This is how you get "job effect commits with domain
-effect" without extra plumbing. `ctx.tx` is never serialized into the
-job context.
+If the handler raises, the unit rolls back — no partial domain writes,
+no job marked done. This is how you get "job effect commits with domain
+effect" without extra plumbing. `ctx.uow` is never serialized into the
+job context; it is valid only inside `handler.run`.
 
 ---
 
 ## 5. Enqueueing
 
 ```python
-async with conn.transaction(), conn.cursor() as cur:
-    await cur.execute("UPDATE orders SET status='shipped' WHERE id=%s",
+session = await storage.connect()
+async with session.begin() as uow:
+    await uow.execute("UPDATE orders SET status='shipped' WHERE id=%s",
                       (order_id,))
     ref = await jobs.builder("mail.send@v1") \
         .payload({"to": user, "subject": "Shipped"}) \
         .context(ctx) \
         .concurrency_key(user) \
-        .enqueue(cur)
+        .enqueue(uow)
     # commit → job + domain write visible together
 ```
+
+`session.begin()` requires an idle session — it raises when a
+transaction is already pending rather than silently discarding it.
 
 `.payload` takes a dict or `BaseModel` (validated at enqueue AND at
 dispatch). `.run_at(ts)` delays. `.concurrency_key` serializes execution
@@ -576,19 +586,22 @@ transitions:
 ## 14. Ops: monitoring, admin, MCP
 
 ```python
-mon = MonitoringService()
-await mon.metrics_snapshot(conn)      # queue depth, running, failed_24h
-await mon.jobs_list(conn, statuses=["failed"])
-await mon.runs_get(conn, run_id)      # run + step details
-await mon.rows_list_failed(conn, job_id)
-await mon.retry_job(conn, job_id)     # ops retry
+mon = MonitoringService(storage=PostgresStorage(DSN))
+session = await storage.connect()
+async with session.begin() as uow:
+    await mon.metrics_snapshot(uow)      # queue depth, running, failed_24h
+    await mon.list_jobs(uow, statuses=["failed"])
+    await mon.get_run(uow, run_id)       # run + step details
+    await mon.rows_list_failed(uow, job_id)
+    await mon.retry_job(uow, job_id)     # ops retry
 
-# retention — caller-invoked, batched, idempotent; repeat until 0
-await mon.sweep(conn, jobs_days=30, outbox_days=7,
-                archive_days=90, dlq_days=90, batch=500)
+    # retention — caller-invoked, batched, idempotent; repeat until 0
+    await mon.purge_expired_records(uow, jobs_days=30, outbox_days=7,
+                                    archive_days=90, dlq_days=90, batch=500)
 ```
 
-`sweep` deletes, oldest-first and `batch` per table per call: terminal
+`purge_expired_records` deletes, oldest-first and `batch` per table per
+call: terminal
 `workflow_runs` + `jobs` (their `chunks`/`row_status`/`step_runs`
 cascade — a job still linked to a live run or child job is skipped),
 `published` outbox rows, `row_archive`, and `keelflow_dlq`. In-flight
@@ -623,7 +636,7 @@ class LoadH(JobHandler):
     async def run(self, ctx, payload):
         for batch in batches:
             await ctx.execution.checkpoint()   # raises JobCancelled
-            await ctx.tx.execute("INSERT ... ", (batch,))
+            await ctx.uow.execute("INSERT ... ", (batch,))
 ```
 
 - `checkpoint()` reads the durable flag inside the handler transaction

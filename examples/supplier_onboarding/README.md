@@ -129,9 +129,9 @@ Same seams as `invoice_flow`, plus the parts it adds — all in
 
 | Extension point | Snippet |
 |---|---|
-| **`JobHandler.run`** — subclass a shared base for a family of adapters | `class _Adapter(JobHandler): async def run(self, ctx, payload: Sup): … await _record(ctx.tx, …)` then `class SanctionScreenH(_Adapter): check_type="sanction_screen"` |
-| **`ctx.tx`** — write check results in the handler's dispatch TX | `await _record(ctx.tx, payload.supplier_id, self.check_type, result)` |
-| **`ctx.tx` for a read inside a handler** | `s = await _sup_row(ctx.tx, payload.supplier_id)` |
+| **`JobHandler.run`** — subclass a shared base for a family of adapters | `class _Adapter(JobHandler): async def run(self, ctx, payload: Sup): … await _record(ctx.uow, …)` then `class SanctionScreenH(_Adapter): check_type="sanction_screen"` |
+| **`ctx.uow`** — write check results in the handler's dispatch TX | `await _record(ctx.uow, payload.supplier_id, self.check_type, result)` |
+| **`ctx.uow` for a read inside a handler** | `s = await _sup_row(ctx.uow, payload.supplier_id)` |
 | **`StepSpec.needs` fan-out** — N siblings under one parent run in parallel | `StepSpec("sanction",…, needs=("validate",))` `media`/`credit`/`bank` likewise → all 4 run concurrently |
 | **`needs` fan-in** — a step waits on several parents | `StepSpec("risk_score",…, needs=("sanction","media","credit","bank"))` |
 | **`StepSpec.if_expr`** — conditional HITL: false → `skipped`, true → `blocked` | `if_expr="${{ steps.risk_score.outputs.risk }} == 'high'"` |
@@ -150,13 +150,13 @@ The DAG's shape is pure data (`StepSpec`/`if_expr`) — the only code is
 handler bodies:
 
 ```python
-# one base, four adapters — each writes to ctx.tx and returns outputs
+# one base, four adapters — each writes to ctx.uow and returns outputs
 class _Adapter(JobHandler):
     check_type = "base"
     async def run(self, ctx, payload: Sup) -> JobResult:
-        s = await _sup_row(ctx.tx, payload.supplier_id)
+        s = await _sup_row(ctx.uow, payload.supplier_id)
         result = await self.check(ctx, s)
-        await _record(ctx.tx, payload.supplier_id, self.check_type, result)
+        await _record(ctx.uow, payload.supplier_id, self.check_type, result)
         return JobResult(status="done", outputs=result)
 
 # conditional human gate — engine decides run-vs-skip from the expr

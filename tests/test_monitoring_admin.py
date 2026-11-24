@@ -9,6 +9,7 @@ import pytest_asyncio
 
 from keelflow.engine.monitoring import MonitoringService
 from keelflow.postgres.schema import apply_async
+from keelflow.postgres.storage import PostgresStorage
 
 DSN = os.environ.get(
     "KEELFLOW_TEST_DSN", "postgresql://postgres:postgres@localhost:5544/keelflow"
@@ -36,7 +37,7 @@ async def db():
 
 @pytest.mark.asyncio
 async def test_jobs_list_and_filter(db):
-    svc = MonitoringService()
+    svc = MonitoringService(storage=PostgresStorage(DSN))
     for i, (t, s) in enumerate([("a@v1", "done"), ("b@v1", "failed"), ("a@v1", "pending")]):
         await db.execute(
             "INSERT INTO keelflow_jobs (id, type, status, payload, context)"
@@ -51,7 +52,7 @@ async def test_jobs_list_and_filter(db):
 
 @pytest.mark.asyncio
 async def test_metrics_snapshot(db):
-    svc = MonitoringService()
+    svc = MonitoringService(storage=PostgresStorage(DSN))
     await db.execute(
         "INSERT INTO keelflow_jobs (id, type, status, payload, context)"
         " VALUES (gen_random_uuid(), 'x@v1', 'pending', '{}', '{}'),"
@@ -64,7 +65,7 @@ async def test_metrics_snapshot(db):
 
 @pytest.mark.asyncio
 async def test_rows_list_failed(db):
-    svc = MonitoringService()
+    svc = MonitoringService(storage=PostgresStorage(DSN))
     job_id = "00000000-0000-0000-0000-0000000000aa"
     await db.execute(
         "INSERT INTO keelflow_jobs (id, type, status, payload, context)"
