@@ -109,6 +109,9 @@ async def dispatch(job_id: str, step_run_id: str | None = None) -> None:
     session = await storage.connect()
     try:
         async with session.begin() as uow:
+            # worker liveness: every dispatch upserts a heartbeat row so
+            # ops can tell "no work" from "dead worker".
+            await storage.heartbeat_upsert(uow, _worker_name(), "worker")
             row = await storage.job_load(uow, job_id)
             if row is None:
                 log.error("job %s not found in keelflow_jobs", job_id)
@@ -165,6 +168,8 @@ async def dispatch(job_id: str, step_run_id: str | None = None) -> None:
             ctx = ctx_from_dict(ctx_json)
             # Handlers get job_id via extra (context stays read-only elsewhere).
             ctx.extra["job_id"] = job_id
+            from ..observability import inject_traceparent
+            inject_traceparent(ctx)
             object.__setattr__(
                 ctx, "execution",
                 ExecutionContext(
@@ -173,7 +178,8 @@ async def dispatch(job_id: str, step_run_id: str | None = None) -> None:
                         getattr(spec, "cooperative_cancel", False)),
                 ),
             )
-            jlog = _job_logger(job_id, type_name, ctx.correlation_id)
+            jlog = _job_logger(job_id, type_name, ctx.correlation_id,
+                               ctx.tenant_id)
             jlog.info("claimed")
 
             # Execution-time schema validation (payload may be from
@@ -222,12 +228,15 @@ async def dispatch(job_id: str, step_run_id: str | None = None) -> None:
                     object.__setattr__(ctx, "uow", uow)
                     ctx.execution.uow = uow
                     ctx.execution.storage = storage
-                    run = handler.run(ctx, payload)
-                    if spec.timeout_seconds:
-                        result = await asyncio.wait_for(
-                            run, timeout=spec.timeout_seconds)
-                    else:
-                        result = await run
+                    from ..observability import tracer
+                    with tracer().start_as_current_span(
+                            "keelflow.dispatch"):
+                        run = handler.run(ctx, payload)
+                        if spec.timeout_seconds:
+                            result = await asyncio.wait_for(
+                                run, timeout=spec.timeout_seconds)
+                        else:
+                            result = await run
                     object.__setattr__(ctx, "uow", None)
                     ctx.execution.uow = None
                     ctx.execution.storage = None
@@ -519,10 +528,24 @@ async def _settle_cancelled_chunk(uow, session, storage, type_name,
     await storage.chunk_cancel(uow, str(chunk_id))
     await _bulk.ChunkJobHandler()._fan_in(uow, storage, parent_id)
 
-def _job_logger(job_id: str, type_name: str, correlation_id: str) -> logging.LoggerAdapter:
-    return logging.LoggerAdapter(
-        log, {"job_id": job_id, "type": type_name, "correlation_id": correlation_id}
-    )
+_worker_id: str | None = None
+
+
+def _worker_name() -> str:
+    """Stable per-process worker identity for heartbeat rows."""
+    global _worker_id
+    if _worker_id is None:
+        import socket
+        _worker_id = f"worker-{socket.gethostname()}-{os.getpid()}"
+    return _worker_id
+
+
+def _job_logger(job_id: str, type_name: str, correlation_id: str,
+                tenant_id: str | None = None) -> logging.LoggerAdapter:
+    from ..observability import job_logger
+    return job_logger(
+        log, job_id=job_id, job_type=type_name,
+        correlation_id=correlation_id, tenant_id=tenant_id)
 
 
 if __name__ == "__main__":  # pragma: no cover

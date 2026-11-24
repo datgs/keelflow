@@ -136,6 +136,12 @@ class JobBuilder:
         job_id = uuid.uuid4()
         now = datetime.now(UTC)
 
+        # Trace context propagation: seed ctx.extra['traceparent'] so the
+        # chain carries from enqueue → dispatch → retry (and to children
+        # that inherit context).
+        from ..observability import inject_traceparent
+        inject_traceparent(self._ctx)
+
         # 1. engine-visible record — the (type, unique_key) dedup makes
         #    enqueue idempotent; a duplicate returns the live job's id
         #    without a second kernel push or outbox row.

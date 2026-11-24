@@ -83,6 +83,10 @@ async def tick(
     from .kernel import as_kernel
 
     kernel = as_kernel(kernel)
+    # liveness: a heartbeat row per scheduler process, inside the tick's
+    # uow so ops can alert on a silently dead scheduler.
+    await storage.heartbeat_upsert(
+        uow, _scheduler_name(), "scheduler")
     enqueued = 0
     for spec in _scheduled_types(registry):
         cron = spec.schedule
@@ -144,6 +148,18 @@ async def run_scheduler(
 
 
 # ── helpers ───────────────────────────────────────────────────────────────
+
+import os
+import socket
+
+_scheduler_id: str | None = None
+
+
+def _scheduler_name() -> str:
+    global _scheduler_id
+    if _scheduler_id is None:
+        _scheduler_id = f"scheduler-{socket.gethostname()}-{os.getpid()}"
+    return _scheduler_id
 
 
 def _scheduled_types(registry) -> list:

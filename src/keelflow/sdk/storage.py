@@ -514,3 +514,11 @@ class Storage(Protocol):
     ) -> list[dict[str, Any]]: ...
 
     async def dlq_get(self, uow: UnitOfWork, dlq_id: str) -> dict[str, Any] | None: ...
+
+    # ── process liveness (observability) ─────────────────────────
+
+    async def heartbeat_upsert(
+        self, uow: UnitOfWork, name: str, kind: str
+    ) -> None:
+        """Record a worker/scheduler liveness tick inside `uow`."""
+        ...

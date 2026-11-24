@@ -1209,16 +1209,35 @@ class PostgresStorage(Storage):
             """
             SELECT
                 count(*) FILTER (WHERE status='pending') AS queue_depth,
+                count(*) FILTER (WHERE status='claimed') AS claimed,
                 count(*) FILTER (WHERE status='running') AS running,
+                count(*) FILTER (WHERE status='blocked') AS waiting,
                 count(*) FILTER (WHERE status='failed'
                                  AND created_at > now() - interval '24 hours')
                     AS failed_24h,
                 EXTRACT(EPOCH FROM (now() - min(created_at)
-                    FILTER (WHERE status='pending'))) AS oldest_pending_s
+                    FILTER (WHERE status='pending'))) AS oldest_pending_s,
+                EXTRACT(EPOCH FROM avg(updated_at - created_at)
+                    FILTER (WHERE status='done'
+                            AND created_at > now() - interval '24 hours'))
+                    AS avg_done_duration_s_24h
             FROM keelflow_jobs
             """
         )
         row = await cur.fetchone()
+        await cur.execute(
+            "SELECT count(*) AS n FROM keelflow_dlq")
+        row["dlq_depth"] = (await cur.fetchone())["n"]
+        await cur.execute(
+            "SELECT count(*) AS n FROM keelflow_process_health"
+            " WHERE kind='worker'")
+        row["workers_alive"] = (await cur.fetchone())["n"]
+        await cur.execute(
+            "SELECT max(last_seen) AS last_seen, "
+            "       EXTRACT(EPOCH FROM (now() - max(last_seen))) AS age_s"
+            " FROM keelflow_process_health WHERE kind='scheduler'")
+        sched = await cur.fetchone()
+        row["scheduler_last_seen_age_s"] = sched["age_s"]
         await cur.execute(
             "SELECT count(*) AS workers FROM "
             "(SELECT 1 FROM pg_stat_activity"
@@ -1316,3 +1335,18 @@ class PostgresStorage(Storage):
             "SELECT * FROM keelflow_dlq WHERE id=%s", (dlq_id,)
         )
         return await cur.fetchone()
+
+    # ── process liveness ─────────────────────────────────────────
+
+    async def heartbeat_upsert(
+        self, uow: UnitOfWork, name: str, kind: str
+    ) -> None:
+        cur = self._cur(uow)
+        await cur.execute(
+            """
+            INSERT INTO keelflow_process_health (name, kind, last_seen)
+            VALUES (%s, %s, now())
+            ON CONFLICT (name) DO UPDATE SET last_seen = now()
+            """,
+            (name, kind),
+        )

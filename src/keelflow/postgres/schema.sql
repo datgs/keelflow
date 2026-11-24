@@ -201,3 +201,12 @@ CREATE TABLE IF NOT EXISTS keelflow_dlq (
     step_run_id UUID,
     dead_at    TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+
+
+-- Process liveness for observability: workers and schedulers upsert a
+-- heartbeat row; ops reads last_seen to tell alive from silently dead.
+CREATE TABLE IF NOT EXISTS keelflow_process_health (
+    name       TEXT PRIMARY KEY,
+    kind       TEXT NOT NULL CHECK (kind IN ('worker','scheduler')),
+    last_seen  TIMESTAMPTZ NOT NULL DEFAULT now()
+);

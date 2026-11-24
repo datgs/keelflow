@@ -251,5 +251,5 @@ uv run ruff check src tests
 uv run mypy src/keelflow
 ```
 
-Admin UI: `KEELFLOW_DSN=… uv run python -m keelflow.admin.app` →
+Admin UI (no auth — loopback/protected proxy only): `keelflow admin` →
 http://127.0.0.1:8410 (read-only + retry button; no auth — bind locally).

@@ -70,7 +70,7 @@ async def test_upgrade_from_prior_revision_preserves_data():
             # alembic recorded head
             rev = await (await conn.execute(
                 "SELECT version_num FROM alembic_version")).fetchone()
-            assert rev[0] == "0007"
+            assert rev[0] == "0008"
         finally:
             await conn.close()
 
@@ -86,6 +86,6 @@ async def test_upgrade_is_idempotent_on_head():
         try:
             rev = await (await conn.execute(
                 "SELECT version_num FROM alembic_version")).fetchone()
-            assert rev[0] == "0007"
+            assert rev[0] == "0008"
         finally:
             await conn.close()

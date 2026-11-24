@@ -608,9 +608,55 @@ cascade — a job still linked to a live run or child job is skipped),
 work, pending/failed outbox, `keelflow_audit`, and `entity_state` are
 never touched; `None` disables a category.
 
-- **SuperAdmin** (no auth — bind localhost): `python -m keelflow.admin.app`
-  → http://127.0.0.1:8410
-- **MCP read-only tools** for agents: `python -m keelflow.mcp`
+- **SuperAdmin** (no auth — loopback or an authenticating proxy with
+  write protection only): `keelflow admin` → http://127.0.0.1:8410
+- **MCP read-only tools** for agents: `keelflow mcp`
+
+## 15. CLI
+
+```bash
+keelflow init-db --dsn $KEELFLOW_DSN        # fresh DB only (tables
+                                          # exist → use upgrade-db)
+keelflow upgrade-db --dsn $KEELFLOW_DSN     # Alembic versioned upgrade
+keelflow worker --registry myapp.registry:build_registry \
+                --kernel chancy --dsn $KEELFLOW_DSN
+keelflow scheduler --registry myapp.registry:build_registry
+keelflow admin    --dsn $KEELFLOW_DSN      # no auth — see security.md
+keelflow mcp      --dsn $KEELFLOW_DSN
+```
+
+`init-db` and `upgrade-db` are deliberately separate: `init-db` refuses
+a database that already has `keelflow_jobs`; `upgrade-db` refuses a
+database with tables but no `alembic_version` until you baseline it
+(`alembic stamp …`) — a plain schema apply is never reported as a
+versioned upgrade. `--kernel sqlite` is local/proof-only.
+
+## 16. Testing
+
+Integration tests use a dedicated database — fixtures truncate
+`keelflow_*` tables. The suite defaults to
+`postgresql://…/keelflow_test` (auto-created); `KEELFLOW_TEST_DSN`
+overrides and must point at a test-named database or carry
+`KEELFLOW_TEST_ALLOW_DESTRUCTIVE=1`. `keelflow.testing.postgres_env()`
+wires registry + storage + kernel + services for app tests; migration
+rehearsals use `temp_test_db()` for throwaway databases. See
+`docs/reliability.md` for what each recovery test proves.
+
+## 17. Observability
+
+Engine logs carry structured `extra` fields (`job_id`, `job_type`,
+`run_id`, `step_id`, `correlation_id`, `tenant_id`, `worker_id`,
+`attempt`) — never payload/context. `traceparent` propagates through
+`JobContext.extra` across enqueue → dispatch → retry; spans activate
+when `keelflow[otel]` is installed (`tracer()` is a no-op otherwise).
+
+`format_metrics_prometheus(await mon.metrics_snapshot(uow))` renders
+queue depth, claimed, running, waiting (blocked human/wait steps —
+separate from stuck work), failed_24h, oldest pending, done duration,
+DLQ depth, worker liveness and scheduler heartbeat age as Prometheus
+text. Workers and schedulers upsert `keelflow_process_health` rows.
+Mount the text on your own /metrics endpoint — no built-in listener.
+
 - **Audit**: pass `PostgresAuditService` to `EngineStateMachineService`;
   every transition (including workflow-trigger callbacks) lands in
   `keelflow_audit`. `audit.trace(conn, entity)` returns the chain.
