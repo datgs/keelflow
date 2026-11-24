@@ -4,7 +4,24 @@ Date: 2026-11-24
 
 ## Status
 
-Proposed — waiting for approval to implement.
+In progress — approved 2026-11-24.
+
+Progress:
+
+- [x] T0 — guarantee matrix + recovery proofs + Alembic upgrade +
+      destructive-fixture guard + max_workers rejection + security notes
+      (commit 2989906)
+- [x] T1 — `keelflow.testing` Postgres toolkit + keelflow_test isolation
+      (commit 2989906)
+- [x] T-A1 — observability seam: log-field contract, traceparent, OTel
+      no-op tracer, extended ops_metrics_snapshot, process-heartbeat
+      table 0008, Prometheus text formatter (commit 6f3ffa8)
+- [x] T-A4 — `keelflow` CLI: worker/scheduler/admin/mcp + init-db /
+      upgrade-db fail-closed split (commit 6f3ffa8)
+- [ ] T2 — optional in-memory helpers (deferred until a proven need)
+
+Validation: `tests/` 239 passed + 3 skipped, `examples/` 39 passed,
+ruff + mypy clean.
 
 ## Outcome
 
