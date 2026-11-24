@@ -420,8 +420,14 @@ def run_worker(
             worker = injected.create_worker()
             await worker.start()
             try:
-                tasks = [worker.wait_for_shutdown(),
-                         worker_heartbeat_loop(storage)]
+                stop = asyncio.Event()
+
+                async def _watch() -> None:
+                    await worker.wait_for_shutdown()
+                    stop.set()
+
+                tasks = [_watch(), worker_heartbeat_loop(storage,
+                                                       stop=stop)]
                 if event_bus is not None:
                     from .events import dispatch_events
 
@@ -451,8 +457,14 @@ def run_worker(
             worker = kernel.create_worker()
             await worker.start()
             try:
-                tasks = [worker.wait_for_shutdown(),
-                         worker_heartbeat_loop(storage)]
+                stop = asyncio.Event()
+
+                async def _watch() -> None:
+                    await worker.wait_for_shutdown()
+                    stop.set()
+
+                tasks = [_watch(), worker_heartbeat_loop(storage,
+                                                       stop=stop)]
                 if event_bus is not None:
                     from .events import dispatch_events
 
@@ -558,8 +570,6 @@ async def worker_heartbeat_loop(
     it dispatches no jobs. Each upsert commits in its own session unit
     so a failed cycle reconnects cleanly on the next one.
     """
-    import asyncio as _aio
-
     while not (stop and stop.is_set()):
         try:
             session = await storage.connect()
@@ -571,7 +581,13 @@ async def worker_heartbeat_loop(
                 await session.close()
         except Exception:  # liveness must never kill the worker
             log.debug("worker heartbeat failed", exc_info=True)
-        await _aio.sleep(interval)
+        if stop is None:
+            await asyncio.sleep(interval)
+        else:
+            try:
+                await asyncio.wait_for(stop.wait(), timeout=interval)
+            except TimeoutError:
+                pass
 
 
 def _job_logger(job_id: str, type_name: str, correlation_id: str,

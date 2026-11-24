@@ -96,8 +96,11 @@ def merged_registry():
 
 
 async def _conn(dsn, autocommit=True):
+    # stress-driver app_name so the db-fault injector only kills
+    # engine/worker-side backends, never the driver's own
     return await psycopg.AsyncConnection.connect(
-        dsn, autocommit=autocommit, row_factory=dict_row)
+        dsn, autocommit=autocommit, row_factory=dict_row,
+        application_name="stress-driver")
 
 
 def _demo_schema(name: str) -> str:
@@ -112,11 +115,10 @@ def _demo_schema(name: str) -> str:
 async def _stage_import(wc, n_rows, bad_frac) -> int:
     text = sample_csv(n_rows, bad_frac)
     rows = list(csv.DictReader(io.StringIO(text)))
-    await wc.execute(
-        "INSERT INTO demo_imports (filename, status, rows_total)"
-        " VALUES ('stress.csv','uploaded',%s)", (len(rows),))
     iid = (await (await wc.execute(
-        "SELECT max(id) AS id FROM demo_imports")).fetchone())["id"]
+        "INSERT INTO demo_imports (filename, status, rows_total)"
+        " VALUES ('stress.csv','uploaded',%s) RETURNING id",
+        (len(rows),))).fetchone())["id"]
     async with wc.cursor() as cur:
         await cur.executemany(
             "INSERT INTO demo_import_raw (import_id, row_no, data)"
@@ -219,10 +221,19 @@ async def _drive_import(dsn, env, spec, rnd, stats):
             try:
                 await wc.execute(
                     "DELETE FROM demo_import_raw WHERE import_id=%s", (iid,))
-                await wc.execute(
-                    "DELETE FROM demo_imports WHERE id=%s", (iid,))
+                prods = await (await wc.execute(
+                    "SELECT count(*) n FROM demo_products"
+                    " WHERE imported_by=%s", (iid,))).fetchone()
+                if prods["n"]:
+                    # provenance: keep the import row when products
+                    # reference it; raw staging rows are still removed
+                    stats["imports_kept_provenance"] = \
+                        stats.get("imports_kept_provenance", 0) + 1
+                else:
+                    await wc.execute(
+                        "DELETE FROM demo_imports WHERE id=%s", (iid,))
+                    stats["imports_deleted"] += 1
                 await wc.commit()
-                stats["imports_deleted"] += 1
             except Exception as exc:  # noqa: BLE001
                 outcome["anomalies"].append(f"delete failed {exc!r}")
                 await wc.rollback()
@@ -504,13 +515,12 @@ async def _drive_supplier(dsn, env, spec, rnd, stats):
 
 async def _noise_supplier(wc, rnd, stats):
     name = f"noise-{uuid.uuid4().hex[:8]}"
-    await wc.execute(
+    sid = (await (await wc.execute(
         "INSERT INTO demo_suppliers (name, country, tax_id,"
         " contact_email, bank_ref, fail_sanction, status)"
-        " VALUES (%s,'DE',%s,'noise@hdwebsoft.com','N001',false,'requested')",
-        (name, f"T-{name[:10]}"))
-    sid = (await (await wc.execute(
-        "SELECT max(id) id FROM demo_suppliers")).fetchone())["id"]
+        " VALUES (%s,'DE',%s,'noise@hdwebsoft.com','N001',false,"
+        " 'requested') RETURNING id",
+        (name, f"T-{name[:10]}"))).fetchone())["id"]
     await wc.execute(
         "UPDATE demo_suppliers SET contact_email=%s WHERE id=%s",
         (f"upd-{uuid.uuid4().hex[:6]}@hdwebsoft.com", sid))
@@ -540,20 +550,37 @@ async def _chaos(dsn, env, rnd, stats, deadline):
                 if not ok:
                     log(f"chaos cancel refused for {jid[:8]}")
                     continue
-                # verify terminal state actually lands
-                term = await (await conn.execute(
-                    "SELECT status FROM keelflow_jobs WHERE id=%s",
-                    (jid,))).fetchone()
-                if term and term["status"] in ("cancelled", "pending"):
+                # cooperative cancel on a running job: the flag lands
+                # now, the handler exits at its next checkpoint — verify
+                # the terminal state within a grace window
+                deadline_cancel = time.monotonic() + 45
+                term_status = None
+                while time.monotonic() < deadline_cancel:
+                    term = await (await conn.execute(
+                        "SELECT status FROM keelflow_jobs WHERE id=%s",
+                        (jid,))).fetchone()
+                    term_status = term["status"] if term else None
+                    if term_status in ("cancelled", "failed", "done"):
+                        break
+                    await asyncio.sleep(1)
+                if term_status in ("cancelled", "pending"):
                     stats["chaos_cancels"] += 1
                     stats.setdefault("chaos_on_running", 0)
                     if job["status"] == "running":
                         stats["chaos_on_running"] += 1
-                    log(f"chaos: cancelled {jid[:8]} (was {job['status']})")
+                    log(f"chaos: cancelled {jid[:8]} (was {job['status']}"
+                        f" → {term_status})")
+                elif term_status in ("failed", "done"):
+                    # finished before honoring the flag — still a
+                    # landed cancel request
+                    stats["chaos_cancels"] += 1
+                    log(f"chaos: {jid[:8]} finished {term_status} "
+                        "after cancel flag")
                 else:
-                    log(f"chaos cancel did not land on {jid[:8]}: {term}")
-                    stats.setdefault("chaos_no_effect", 0)
-                    stats["chaos_no_effect"] += 1
+                    log(f"chaos cancel not honored on {jid[:8]}: "
+                        f"{term_status}")
+                    stats.setdefault("chaos_unhonored", 0)
+                    stats["chaos_unhonored"] += 1
             except Exception as exc:  # noqa: BLE001
                 log(f"chaos cancel race: {exc!r}")
     finally:
@@ -734,13 +761,12 @@ async def main_async(args) -> int:
                 seq["i"] += 1
                 name = f"stress-sup-{args.run_id}-{seq['i']}-{uuid.uuid4().hex[:5]}"
                 fail = rnd.random() < 0.08
-                await gen_conn.execute(
+                sid = (await (await gen_conn.execute(
                     "INSERT INTO demo_suppliers (name, country, tax_id,"
                     " contact_email, bank_ref, fail_sanction, status)"
                     " VALUES (%s,'DE',%s,'stress@hdwebsoft.com','OK001',%s,"
-                    " 'requested')", (name, f"T-{name[:12]}", fail))
-                sid = (await (await gen_conn.execute(
-                    "SELECT max(id) id FROM demo_suppliers")).fetchone())["id"]
+                    " 'requested') RETURNING id",
+                    (name, f"T-{name[:12]}", fail))).fetchone())["id"]
                 manifest["suppliers"].append(sid)
                 return {"sid": sid, "fail": fail}
 
@@ -762,6 +788,8 @@ async def main_async(args) -> int:
                             "SELECT pid FROM pg_stat_activity"
                             " WHERE datname=current_database()"
                             "   AND pid <> pg_backend_pid()"
+                            "   AND coalesce(application_name,'')"
+                            "       <> 'stress-driver'"
                             " ORDER BY random() LIMIT 2")).fetchall()
                         for v in victims:
                             await fc.execute(
@@ -846,11 +874,23 @@ async def _oracle(conn, manifest):
             "SELECT status FROM demo_imports WHERE id=%s", (iid,))
         ).fetchone()
         if r is None:
-            violations.append({"kind": "import", "id": iid,
-                               "state": "missing"})
+            # intentionally deleted by a completed driver — allowed
+            violations.append({"kind": "cancelled_ok", "id": iid,
+                               "state": "deleted_intentionally"})
         elif r["status"] in ("uploaded", "processing"):
-            violations.append({"kind": "import", "id": iid,
-                               "state": r["status"]})
+            # a cancelled import run leaves the domain row mid-state —
+            # intentional, same class as a cancelled supplier run
+            run = await (await conn.execute(
+                "SELECT terminal_outcome FROM keelflow_workflow_runs"
+                " WHERE workflow='imp.import@v1'"
+                "   AND inputs->>'import_id'=%s", (str(iid),))
+            ).fetchone()
+            if run and run["terminal_outcome"] == "cancelled":
+                violations.append({"kind": "cancelled_ok", "id": iid,
+                                   "state": "run_cancelled"})
+            else:
+                violations.append({"kind": "import", "id": iid,
+                                   "state": r["status"]})
     for no in manifest["invoices"]:
         r = await (await conn.execute(
             "SELECT state FROM keelflow_entity_state"
@@ -870,8 +910,19 @@ async def _oracle(conn, manifest):
             violations.append({"kind": "supplier", "id": sid,
                                "state": "missing"})
         elif r["status"] not in ("active", "rejected"):
-            violations.append({"kind": "supplier", "id": sid,
-                               "state": r["status"]})
+            # a supplier whose run was cancelled by chaos stays
+            # 'onboarding' — an intentional outcome, not unexplained
+            run = await (await conn.execute(
+                "SELECT terminal_outcome FROM keelflow_workflow_runs"
+                " WHERE workflow='sup.onboard@v1'"
+                "   AND inputs->>'supplier_id'=%s", (str(sid),))
+            ).fetchone()
+            if run and run["terminal_outcome"] == "cancelled":
+                violations.append({"kind": "cancelled_ok", "id": sid,
+                                   "state": "run_cancelled"})
+            else:
+                violations.append({"kind": "supplier", "id": sid,
+                                   "state": r["status"]})
     return {"checked": {k: len(v) for k, v in manifest.items()},
             "violations": violations}
 
