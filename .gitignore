@@ -9,3 +9,6 @@ build/
 !.env.example
 .spikes/erp_bulk_bench/logs/
 .spikes/financial_soak/logs/
+.spikes/stress_demo/*.log
+.spikes/stress_demo/*.jsonl
+.spikes/stress_demo/stress-*-report.json
