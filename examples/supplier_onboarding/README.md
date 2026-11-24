@@ -136,11 +136,11 @@ Same seams as `invoice_flow`, plus the parts it adds — all in
 | **`needs` fan-in** — a step waits on several parents | `StepSpec("risk_score",…, needs=("sanction","media","credit","bank"))` |
 | **`StepSpec.if_expr`** — conditional HITL: false → `skipped`, true → `blocked` | `if_expr="${{ steps.risk_score.outputs.risk }} == 'high'"` |
 | **skipped satisfies `needs`** — a branch you didn't take still unblocks dependents | `erp` needs `comp_review`+`credit_signoff`; only one runs, the other `skipped` → `erp` still proceeds |
-| **`TaskUiSpec(assignee_role)`** — which role may claim each human step | `ui=TaskUiSpec(assignee_role="finance")` etc. |
+| **`HumanTaskOptions(assignee_role)`** — which role may claim each human step | `human_task=HumanTaskOptions(assignee_role="finance")` etc. |
 | **Business reject via human decision** — completes the run with `terminal_outcome='rejected'` (not a job failure) | `human.*` step completed with `decision="reject"` |
 | **Actor roles for claim/completion** — app passes roles from its trusted actor map | `roles=_ACTOR_ROLES[ctx.actor.id]` — no user-supplied roles |
 | **`resume_run`** — restart a `failed` run from the point of failure | `WorkflowService.resume_run(…)` on `/resume/{run_id}` |
-| **`is_wait` wait step** — step parks `blocked`, no kernel claim, resolved by the app's own callback | `StepSpec("bank", "wait.bank_verify@v1", …)` + `JobTypeSpec(…, is_wait=True)` |
+| **`is_external_wait` wait step** — step parks `blocked`, no kernel claim, resolved by the app's own callback | `StepSpec("bank", "wait.bank_verify@v1", …)` + `JobTypeSpec(…, is_external_wait=True)` |
 | **App-owned correlation** — engine signal uses `job_id`; the app keeps `provider_ref → job_id` in its own table | `demo_bank_requests` in `schema.sql`; `send_bank_request`/`handle_bank_callback` in `app.py` |
 | **`jobs.signal` in caller TX** — domain row + wait resolution + DAG advance = one commit | `await jobs.signal(conn, job_id, result, svc_ctx)` in `handle_bank_callback` |
 

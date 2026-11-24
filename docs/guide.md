@@ -213,7 +213,7 @@ dispatch). `.run_at(ts)` delays. `.concurrency_key` serializes execution
 per key via a Postgres advisory lock — same-key jobs never run in
 parallel.
 
-`.unique_key(k)` — **idempotent enqueue**: one non-terminal job per
+`.deduplication_key(k)` — **idempotent enqueue**: one non-terminal job per
 `(type, unique_key)`. A duplicate (UI double-click, retry, replay)
 returns the *existing* job's `JobRef` — no second kernel job or outbox
 row, so intent stays exactly-once. The key frees once the job is
@@ -262,7 +262,7 @@ person completes the task — no kernel claim involved:
 ```python
 JobTypeSpec(type="human.gl_check@v1", input_schema=ReviewPayload,
             handler=_NoopH, is_human=True,
-            ui=TaskUiSpec(assignee_role="gl"))
+            human_task=HumanTaskOptions(assignee_role="gl"))
 ```
 
 `human.complete` writes `result` into the step outputs →
@@ -271,14 +271,14 @@ JobTypeSpec(type="human.gl_check@v1", input_schema=ReviewPayload,
 
 ### External-wait steps in a DAG
 
-A step whose type is registered with `is_wait=True` (`wait.*` namespace)
+A step whose type is registered with `is_external_wait=True` (`wait.*` namespace)
 parks the run `blocked` the same way — but it is resolved by your
 application, not by a person and not by a worker. There is no kernel
 job: a wait step consumes zero worker capacity for as long as it waits.
 
 ```python
 JobTypeSpec(type="wait.bank_verify@v1", input_schema=Sup,
-            is_wait=True)                      # no handler
+            is_external_wait=True)                      # no handler
 StepSpec("bank", "wait.bank_verify@v1", input=i, needs=("validate",))
 ```
 
@@ -331,7 +331,7 @@ registry.register_state_machine(StateMachineDefinition(
                        guard={"permission": "inv.approve"},
                        triggers_workflow=WorkflowTriggerSpec(
                            workflow="post.wf@v1",
-                           on_done="posted",
+                           on_succeeded="posted",
                            on_rejected="posting_rejected",
                            on_failed="posting_failed",
                            failure_job="human.posting_fix@v1")),
@@ -567,7 +567,7 @@ transitions:
     action: approve
     triggers_workflow:
       workflow: post.wf@v1
-      on_done: posted
+      on_succeeded: posted
       on_rejected: posting_rejected
       on_failed: posting_failed
       failure_job: human.posting_fix@v1

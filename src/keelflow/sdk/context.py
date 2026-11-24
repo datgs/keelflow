@@ -23,8 +23,9 @@ class JobCancelled(BaseException):
 class ExecutionContext:
     """Worker-injected runtime for the current dispatch.
 
-    Engine-owned, never serialized into `jobs.context`. `tx` is the
-    handler-transaction cursor (also available as `ctx.tx`).
+    Engine-owned, never serialized into `jobs.context`. `uow` is the
+    handler's unit of work (also available as `ctx.uow`) and `storage`
+    the engine's semantic storage adapter.
 
     `checkpoint()` lets a handler cooperatively stop at a safe point:
     if the job's `cancel_requested` flag is set it raises
@@ -35,7 +36,8 @@ class ExecutionContext:
 
     job_id: str
     cooperative_cancel: bool = False
-    tx: Any = None
+    uow: Any = None
+    storage: Any = None
 
     async def checkpoint(self) -> None:
         """Observe a cancellation request at a safe point in the handler.
@@ -51,14 +53,9 @@ class ExecutionContext:
                 "ctx.execution.checkpoint() requires the job type to opt in "
                 "via JobTypeSpec(cooperative_cancel=True)"
             )
-        if self.tx is None:
+        if self.uow is None or self.storage is None:
             raise RuntimeError("checkpoint() is only valid inside the handler transaction")
-        cur = await self.tx.execute(
-            "SELECT cancel_requested FROM keelflow_jobs WHERE id=%s",
-            (self.job_id,),
-        )
-        row = await cur.fetchone()
-        if row and row[0]:
+        if await self.storage.job_cancel_requested(self.uow, self.job_id):
             raise JobCancelled(self.job_id)
 
 
@@ -77,9 +74,9 @@ class JobContext:
     permissions: frozenset[str] = frozenset()
     request_id: str | None = None
     extra: dict[str, Any] = field(default_factory=dict)
-    # In-run cursor set by the dispatcher when the handler executes inside
-    # the finish TX. Never serialized (excluded from ctx_to_dict).
-    tx: Any = field(default=None, repr=False, compare=False)
+    # In-run unit of work set by the dispatcher when the handler executes
+    # inside the finish TX. Never serialized (excluded from ctx_to_dict).
+    uow: Any = field(default=None, repr=False, compare=False)
     # Worker-injected execution runtime (job id, checkpoint API). Set by
     # dispatch before handler.run; never serialized.
     execution: Any = field(default=None, repr=False, compare=False)

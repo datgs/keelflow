@@ -26,6 +26,7 @@ from keelflow.engine.registry import InMemoryRegistry
 from keelflow.engine.statemachine import EngineStateMachineService
 from keelflow.engine.workflow import WorkflowService
 from keelflow.postgres.schema import apply_async
+from keelflow.postgres.storage import PostgresStorage
 from keelflow.sdk import (
     Actor,
     EntityRef,
@@ -108,7 +109,7 @@ async def env(db):
             is_human=True))
         reg.register_job_type(JobTypeSpec(
             type="human.fix@v1", input_schema=P, handler=OkH, is_human=True))
-        jobs = JobService(reg, kernel)
+        jobs = JobService(reg, kernel, PostgresStorage(DSN))
         worker_mod.configure(registry=reg, dsn=DSN, kernel=kernel)
         sm = EngineStateMachineService(reg, kernel)
         await sm.ensure_schema(db)
@@ -166,7 +167,7 @@ async def test_trigger_metadata_and_on_done(env, db):
     env["reg"].register_state_machine(_invoice_sm(
         triggers_workflow=WorkflowTriggerSpec(
             workflow="post.wf@v1",
-            on_done="posted",
+            on_succeeded="posted",
             on_rejected="posting_rejected",
             on_failed="posting_failed",
             failure_job="human.fix@v1",
@@ -186,7 +187,7 @@ async def test_trigger_metadata_and_on_done(env, db):
     )).fetchone()
     assert run is not None
     assert run[1] == "inv-t1"
-    assert run[2]["on_done"] == "posted"
+    assert run[2]["on_succeeded"] == "posted"
     assert run[2]["failure_job"] == "human.fix@v1"
 
     w = Worker(env["kernel"], shutdown_timeout=5)
@@ -216,7 +217,7 @@ async def test_business_reject_outcome(env, db):
     env["reg"].register_state_machine(_invoice_sm(
         triggers_workflow=WorkflowTriggerSpec(
             workflow="post.wf@v1",
-            on_done="posted",
+            on_succeeded="posted",
             on_rejected="posting_rejected",
             on_failed="posting_failed",
         )))
@@ -307,7 +308,7 @@ async def test_technical_failure_callback(env, db):
     env["reg"].register_state_machine(_invoice_sm(
         triggers_workflow=WorkflowTriggerSpec(
             workflow="post.wf@v1",
-            on_done="posted",
+            on_succeeded="posted",
             on_failed="posting_failed",
             failure_job="human.fix@v1",
         )))

@@ -1,7 +1,25 @@
 # Backend-Neutral Storage And Transaction Ports
 
-**Status**: proposed — waiting approval to execute  
+**Status**: completed 2026-11-23  
 **Date**: 2026-11-23
+
+## Result
+
+Completed. Engine and SDK persistence now sit behind one semantic
+`Storage` port (`sdk/storage.py`) with `PostgresStorage`
+(`postgres/storage.py`) as the sole implementation; transaction
+boundaries are `Session.begin() -> UnitOfWork` with `nested()`
+savepoints — the SQL-shaped `ctx.tx`/`Transaction` contract is removed.
+Validation: `tests/` 208 passed + 3 skipped (sqlite skips),
+`examples/` 39 passed, `uv run ruff check src examples tests` clean,
+`uv run mypy src/keelflow` clean (39 files), `git diff --check` clean.
+Conformance proofs: `tests/test_storage_contract.py` (15) and
+`tests/test_storage_boundary.py` (3). Approved renames shipped:
+`on_succeeded`, `purge_expired_records`, `deduplication_key`,
+`HumanTaskOptions`/`human_task`, `is_external_wait`, `list_jobs`/
+`get_job`/`get_run`/`list_runs`. PostgreSQL remains the only storage
+backend; a future adapter registers by implementing the same contract
+and reusing the conformance suite.
 
 ## Outcome
 
@@ -280,8 +298,37 @@ matching SDK and example contract together, not only individual SQL files.
   gate: psycopg conn via `uow.native` + dict_row cursor works for chancy;
   native flag push works; sqlite consumes `uow.native` aiosqlite conn
   (verified at T2 signature flip, trivially satisfied).
-- [ ] T2 PostgreSQL extraction and example migration.
-- [ ] T3 behavior-level conformance suite.
+- [x] T2 PostgreSQL extraction and example migration — all engine files
+  (worker, enqueue, bulk, workflow, statemachine, human, audit, events,
+  scheduler, monitoring) take `(uow, storage)` and call ~55 semantic
+  `PostgresStorage` ops; `PgSession`/`PgUnitOfWork` own boundaries;
+  `nested_scope()` bridges savepoint use; `uow.__getattr__` delegates
+  `execute`/`cursor`/`executemany` to the psycopg conn so handlers keep a
+  familiar execute surface while repos migrate. `ctx.tx → ctx.uow`;
+  `Transaction` protocol removed from `sdk.services`; SQL guard added.
+  Fixed during the sweep: `job_finish`/`on_job_finished` ran outside the
+  `session.begin()` uow (job stuck `running`); `dict_row` cursor needed
+  for named-column reads; `_fan_in` used `session.begin()` inside an
+  open uow (nested_scope now); `executemany` shim on the uow delegation.
+  Mid-sweep renames (user-approved, no aliases): `on_succeeded`,
+  `purge_expired_records`, `deduplication_key`, `HumanTaskOptions`/
+  `human_task`, `is_external_wait`, `list_jobs`/`get_job`/`get_run`/
+  `list_runs`. Results: `tests/` 200 pass + 3 skip (all adapters incl.
+  sqlite), `examples/` 39 pass, ruff clean, mypy clean.
+- [x] T3 behavior-level conformance suite — `tests/test_storage_contract.py`
+  15 proofs (ops never commit, cross-session visibility, savepoint child-
+  only rollback, non-idle begin() rejection, dedup, cancel fence on
+  mark_running, finish terminal write, run/step round-trip, trigger
+  callback lock, entity ensure/transition, audit trace, outbox
+  claim/settle/dedup, DLQ, bulk partition/counts, archive idempotency) +
+  `tests/test_storage_boundary.py` static guard (no driver imports in
+  engine/sdk outside `*_kernel.py`; no engine-table SQL statements in
+  engine/sdk; SDK has zero driver imports). Admin/MCP ops tooling keeps
+  direct psycopg reads — documented adapter edge, not core.
+
+**Remaining**: schedule `test_kernel_contract` + stress scripts under
+`--kernel=all` for the periodic sweep; conformance-suite reuse gate for a
+second adapter ships with that adapter's plan.
 
 ## Decisions
 
@@ -311,6 +358,14 @@ matching SDK and example contract together, not only individual SQL files.
   T2's mechanical sweep (keeping T1 mypy-green); `push_ex(uow, spec)`
   target recorded — adapters narrow `uow.native` (chancy needs a
   `dict_row` cursor, sqlite uses `.execute`).
+- 2026-11-23 (T2): `PgUnitOfWork`/`Session` tolerates legacy psycopg
+  handles (bare conn / cursor / AsyncTransaction) via unwrap — pragmatic
+  bridge while callers migrate, documented as adapter edge, not a second
+  public contract. Kernel `_cur()`/`_conn()` helpers do the same for the
+  native edge.
+- 2026-11-23 (T2): `admin/` and `mcp/` keep direct psycopg connections
+  for read queries — ops tooling is Postgres-specific by design; the
+  boundary guard covers engine/sdk core only.
 
 ## Validation Strategy
 

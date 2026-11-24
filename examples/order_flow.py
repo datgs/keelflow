@@ -23,6 +23,7 @@ from keelflow.engine.human import HumanTaskService
 from keelflow.engine.registry import InMemoryRegistry
 from keelflow.engine.statemachine import EngineStateMachineService
 from keelflow.postgres.schema import apply_async
+from keelflow.postgres.storage import PostgresStorage
 from keelflow.sdk import (
     Actor,
     EntityRef,
@@ -96,7 +97,7 @@ async def main() -> None:
             initial="draft",
         ))
 
-        jobs = JobService(reg, kernel)
+        jobs = JobService(reg, kernel, PostgresStorage(DSN))
         worker_mod.configure(registry=reg, dsn=DSN, kernel=kernel)
         sm = EngineStateMachineService(reg, kernel)
         human = HumanTaskService(reg, kernel)

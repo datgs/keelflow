@@ -1,7 +1,7 @@
 """Registry + definitions for the invoice_flow demo.
 
 Job types:
-  inv.post_ledger@v1      domain write inside the handler TX (ctx.tx)
+  inv.post_ledger@v1      domain write inside the handler TX (ctx.uow)
   inv.record_posting@v1   domain write inside the handler TX
   human.review@v1         finance review (creates_job on submit)
   human.gl_check@v1       GL check step in post.wf@v1 (role:gl)
@@ -20,13 +20,13 @@ from pydantic import BaseModel, Field
 
 from keelflow.engine.registry import InMemoryRegistry
 from keelflow.sdk import (
+    HumanTaskOptions,
     JobHandler,
     JobResult,
     JobTypeSpec,
     RetryPolicy,
     StateMachineDefinition,
     StepSpec,
-    TaskUiSpec,
     TransitionSpec,
     WorkflowDefinition,
     WorkflowTriggerSpec,
@@ -61,7 +61,7 @@ class ReviewPayload(BaseModel):
 
 
 class PostLedgerH(JobHandler):
-    """Insert the ledger posting inside the dispatch TX (ctx.tx).
+    """Insert the ledger posting inside the dispatch TX (ctx.uow).
 
     Idempotent by invoice_no UNIQUE — a retry upserts the same row.
     `fail_post` flag on the invoice (or payload) simulates a technical
@@ -83,7 +83,7 @@ class PostLedgerH(JobHandler):
             raise RuntimeError(
                 f"ledger post simulated failure ({payload.invoice_no})")
         # domain write in the SAME TX as job finish + workflow advance
-        await ctx.tx.execute(
+        await ctx.uow.execute(
             "INSERT INTO demo_ledger_postings"
             " (invoice_no, amount, posted_by)"
             " VALUES (%s, %s, %s)"
@@ -98,7 +98,7 @@ class PostLedgerH(JobHandler):
 class RecordPostingH(JobHandler):
     async def run(self, ctx, payload: InvPayload):
         ref = f"JV-{uuid.uuid5(uuid.NAMESPACE_DNS, payload.invoice_no)}"
-        await ctx.tx.execute(
+        await ctx.uow.execute(
             "INSERT INTO demo_gl_records (invoice_no, journal_ref, recorded_by)"
             " VALUES (%s, %s, %s)"
             " ON CONFLICT (invoice_no) DO NOTHING",
@@ -129,15 +129,15 @@ def build_registry() -> InMemoryRegistry:
     reg.register_job_type(JobTypeSpec(
         type="human.review@v1", input_schema=ReviewPayload,
         handler=_NoopH, is_human=True,
-        ui=TaskUiSpec(assignee_role="finance")))
+        human_task=HumanTaskOptions(assignee_role="finance")))
     reg.register_job_type(JobTypeSpec(
         type="human.gl_check@v1", input_schema=ReviewPayload,
         handler=_NoopH, is_human=True,
-        ui=TaskUiSpec(assignee_role="gl")))
+        human_task=HumanTaskOptions(assignee_role="gl")))
     reg.register_job_type(JobTypeSpec(
         type="human.posting_fix@v1", input_schema=ReviewPayload,
         handler=_NoopH, is_human=True,
-        ui=TaskUiSpec(assignee_role="gl")))
+        human_task=HumanTaskOptions(assignee_role="gl")))
 
     reg.register_state_machine(StateMachineDefinition(
         name="invoice@v1", entity="invoice",
@@ -157,7 +157,7 @@ def build_registry() -> InMemoryRegistry:
                 guard={"permission": "inv.approve"},
                 triggers_workflow=WorkflowTriggerSpec(
                     workflow="post.wf@v1",
-                    on_done="posted",
+                    on_succeeded="posted",
                     on_rejected="posting_rejected",
                     on_failed="posting_failed",
                     failure_job="human.posting_fix@v1")),

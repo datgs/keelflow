@@ -12,13 +12,24 @@ import pytest_asyncio
 
 from keelflow.engine.events import OutboxEventBus, dispatch_once
 from keelflow.postgres.schema import apply_async
+from keelflow.postgres.storage import PostgresStorage
 from keelflow.sdk import DomainEvent
 
 DSN = os.environ.get(
     "KEELFLOW_TEST_DSN", "postgresql://postgres:postgres@localhost:5544/keelflow"
 )
 
+STORAGE = PostgresStorage(DSN)
+
 RECEIVED: list[tuple[str, dict]] = []
+
+
+async def _dispatch(bus) -> int:
+    sess = await STORAGE.connect()
+    try:
+        return await dispatch_once(sess, STORAGE, bus)
+    finally:
+        await sess.close()
 
 
 async def handler_ok(event, ctx):
@@ -51,7 +62,7 @@ async def db():
 
 @pytest.mark.asyncio
 async def test_publish_inside_tx_and_dispatch(db):
-    bus = OutboxEventBus()
+    bus = OutboxEventBus(STORAGE)
     bus.subscribe("order.paid@v1", handler_ok)
 
     async with (
@@ -64,7 +75,7 @@ async def test_publish_inside_tx_and_dispatch(db):
                 cur,
             )
 
-    n = await dispatch_once(db, bus)
+    n = await _dispatch(bus)
     assert n == 1
     assert RECEIVED == [("ok", {"order_id": "o-1"})]
     row = await (await db.execute(
@@ -75,7 +86,7 @@ async def test_publish_inside_tx_and_dispatch(db):
 
 @pytest.mark.asyncio
 async def test_rollback_produces_no_event(db):
-    bus = OutboxEventBus()
+    bus = OutboxEventBus(STORAGE)
     bus.subscribe("order.paid@v1", handler_ok)
 
     async with await _conn(autocommit=False) as conn:
@@ -86,7 +97,7 @@ async def test_rollback_produces_no_event(db):
                 )
                 raise RuntimeError("abort")
 
-    assert await dispatch_once(db, bus) == 0
+    assert await _dispatch(bus) == 0
     assert RECEIVED == []
     assert (await (await db.execute(
         "SELECT count(*) FROM keelflow_outbox"
@@ -97,7 +108,7 @@ async def test_rollback_produces_no_event(db):
 async def test_at_least_once_dedup_per_subscriber(db):
     """Simulate crash: handler succeeds, mark-published fails → redispatch
     must not re-deliver to the same subscriber."""
-    bus = OutboxEventBus()
+    bus = OutboxEventBus(STORAGE)
     bus.subscribe("e.t@v1", handler_ok)
 
     async with (
@@ -117,14 +128,14 @@ async def test_at_least_once_dedup_per_subscriber(db):
         (row[0], key),
     )
     # row still pending → dispatch again; subscriber must not re-fire.
-    n = await dispatch_once(db, bus)
+    n = await _dispatch(bus)
     assert n == 1  # marked published
     assert RECEIVED == [("ok", {"a": 1})]  # handler ran only once
 
 
 @pytest.mark.asyncio
 async def test_failed_subscriber_marks_event_failed(db):
-    bus = OutboxEventBus()
+    bus = OutboxEventBus(STORAGE)
     bus.subscribe("e.f@v1", handler_flaky)
 
     async with (
@@ -134,7 +145,7 @@ async def test_failed_subscriber_marks_event_failed(db):
     ):
             await bus.publish(DomainEvent(type="e.f@v1", payload={}), cur)
 
-    n = await dispatch_once(db, bus)
+    n = await _dispatch(bus)
     assert n == 0
     row = await (await db.execute(
         "SELECT status, attempts FROM keelflow_outbox"

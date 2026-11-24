@@ -25,6 +25,7 @@ from datetime import UTC, datetime, timedelta
 
 import pytest
 import pytest_asyncio
+
 from conftest import (
     CONTRACT_FUNC,
     DSN,
@@ -33,7 +34,6 @@ from conftest import (
     make_worker,
     open_kernel,
 )
-
 from keelflow.engine.kernel import as_kernel
 
 # ── backend fixtures ────────────────────────────────────────────────────

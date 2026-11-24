@@ -25,6 +25,7 @@ from keelflow.engine.enqueue import EnqueueError, JobService
 from keelflow.engine.registry import InMemoryRegistry
 from keelflow.engine.workflow import WorkflowService
 from keelflow.postgres.schema import apply_async
+from keelflow.postgres.storage import PostgresStorage
 from keelflow.sdk import (
     Actor,
     JobContext,
@@ -87,8 +88,8 @@ async def env(db):
         reg.register_job_type(JobTypeSpec(
             type="t.ok@v1", input_schema=In, handler=OkH))
         reg.register_job_type(JobTypeSpec(
-            type="wait.vendor@v1", input_schema=In, is_wait=True))
-        jobs = JobService(reg, kernel)
+            type="wait.vendor@v1", input_schema=In, is_external_wait=True))
+        jobs = JobService(reg, kernel, PostgresStorage(DSN))
         worker_mod.configure(registry=reg, dsn=DSN, kernel=kernel)
         yield {"reg": reg, "jobs": jobs,
                "wf": WorkflowService(reg, jobs), "kernel": kernel}
@@ -126,15 +127,15 @@ async def test_is_wait_registration_rules():
     reg = InMemoryRegistry()
     with pytest.raises(ValueError, match="wait\\."):
         reg.register_job_type(JobTypeSpec(
-            type="ext.vendor@v1", input_schema=In, is_wait=True))
+            type="ext.vendor@v1", input_schema=In, is_external_wait=True))
     with pytest.raises(ValueError, match="both"):
         reg.register_job_type(JobTypeSpec(
             type="wait.bad@v1", input_schema=In,
-            is_wait=True, is_human=True))
+            is_external_wait=True, is_human=True))
     with pytest.raises(ValueError, match="handler"):
         reg.register_job_type(JobTypeSpec(
             type="wait.bad2@v1", input_schema=In,
-            is_wait=True, handler=OkH))
+            is_external_wait=True, handler=OkH))
 
 
 @pytest.mark.asyncio

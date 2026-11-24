@@ -27,7 +27,7 @@ Anything else → `DefinitionError` at load.
   in `tx`.
 - `advance_run` (called on each step completion): for every `pending`
   step whose `needs` are all `done` and whose `if:` is true, enqueue its
-  job — for human and `is_wait` types, insert job row only (no kernel
+  job — for human and `is_external_wait` types, insert job row only (no kernel
   claim) and mark step `blocked`; wait steps additionally emit a
   metadata-only `wait.opened` outbox event (`job_id`, `type`, `step_id`,
   `run_id`).
@@ -74,7 +74,7 @@ A state-machine transition MAY declare a typed trigger:
 ```yaml
 triggers_workflow:
   workflow: post.wf@v1
-  on_done: posted            # SM action on terminal_outcome=succeeded
+  on_succeeded: posted            # SM action on terminal_outcome=succeeded
   on_rejected: posting_rejected
   on_failed: posting_failed  # technical failure (retry exhausted)
   failure_job: human.fix@v1  # optional human task spawned on failed

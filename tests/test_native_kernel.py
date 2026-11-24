@@ -22,6 +22,7 @@ from keelflow.engine.enqueue import JobService
 from keelflow.engine.native_kernel import NativeKernel
 from keelflow.engine.registry import InMemoryRegistry
 from keelflow.postgres.schema import apply_async
+from keelflow.postgres.storage import PostgresStorage
 from keelflow.sdk import (
     Actor,
     JobContext,
@@ -117,7 +118,7 @@ async def env(db, reg):
         lease_seconds=1.0, heartbeat_interval=0.2)
     await w.start()
     yield {"kernel": kernel, "worker": w,
-           "jobs": JobService(reg, kernel), "reg": reg}
+           "jobs": JobService(reg, kernel, PostgresStorage(DSN)), "reg": reg}
     await w.stop(timeout=2)
     worker_mod.configure(registry=None, kernel=None)
 

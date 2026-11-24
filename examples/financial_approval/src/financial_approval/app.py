@@ -24,6 +24,7 @@ from keelflow.engine.diagram import workflow_svg
 from keelflow.engine.enqueue import JobService
 from keelflow.engine.human import HumanTaskService
 from keelflow.engine.workflow import WorkflowService
+from keelflow.postgres.storage import PostgresStorage
 from keelflow.sdk import Actor, JobContext
 
 from .registry import PERMISSIONS, build_registry
@@ -78,7 +79,7 @@ async def _lifespan(app: FastAPI):
                      eager_polling=True),
         upsert=True)
     app.state.registry = registry
-    app.state.jobs = JobService(registry, kernel)
+    app.state.jobs = JobService(registry, kernel, PostgresStorage(DSN))
     app.state.wf = WorkflowService(registry, app.state.jobs)
     app.state.human = HumanTaskService(registry, kernel)
     async with kernel:
@@ -163,8 +164,8 @@ async def request_detail(request: Request, rid: int):
                 if s["type"].startswith("human."):
                     spec = app.state.registry.job_type(s["type"])
                     meta[s["type"]] = {
-                        "assignee": getattr(spec.ui, "assignee_role", None)
-                        if spec.ui else None}
+                        "assignee": getattr(spec.human_task, "assignee_role", None)
+                        if spec.human_task else None}
             wf_diagram = workflow_svg(
                 app.state.registry.workflow("fin.pay_run@v1"),
                 step_status={s["step_id"]: s["status"]

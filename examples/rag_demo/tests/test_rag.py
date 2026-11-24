@@ -24,6 +24,7 @@ from keelflow.engine.human import HumanTaskService
 from keelflow.engine.monitoring import MonitoringService
 from keelflow.engine.workflow import WorkflowService
 from keelflow.postgres.schema import apply_async
+from keelflow.postgres.storage import PostgresStorage
 from keelflow.sdk import Actor, JobContext
 
 DSN = os.environ.get(
@@ -104,7 +105,7 @@ async def env(db, kernel_kind):
         await declare_default_queue(kernel, kernel_kind, concurrency=4)
         reg = build_registry()
         worker_mod.configure(registry=reg, dsn=DSN, kernel=kernel)
-        jobs = JobService(reg, kernel)
+        jobs = JobService(reg, kernel, PostgresStorage(DSN))
         wf = WorkflowService(reg, jobs)
         human = HumanTaskService(reg, kernel)
         mon = MonitoringService(jobs)

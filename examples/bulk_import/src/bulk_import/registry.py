@@ -27,11 +27,11 @@ from keelflow.engine.bulk import BulkJobHandler, BulkJobPayload
 from keelflow.engine.registry import InMemoryRegistry
 from keelflow.sdk import (
     BatchRowResult,
+    HumanTaskOptions,
     JobHandler,
     JobResult,
     JobTypeSpec,
     StepSpec,
-    TaskUiSpec,
     WorkflowDefinition,
 )
 
@@ -99,7 +99,7 @@ class PreviewH(JobHandler):
     """Detect headers + row count from staged raw rows → feeds human.map."""
 
     async def run(self, ctx, payload: ImpId) -> JobResult:
-        cur = _dict_cur(ctx.tx)
+        cur = _dict_cur(ctx.uow)
         await cur.execute(
             "SELECT data FROM demo_import_raw WHERE import_id=%s"
             " ORDER BY row_no LIMIT 1", (payload.import_id,))
@@ -121,7 +121,7 @@ class _ImportBulk(BulkJobHandler):
     whose ctx has no parent payload — can process them self-contained."""
 
     async def run(self, ctx, payload: ImpBulk) -> JobResult:
-        cur = _dict_cur(ctx.tx)
+        cur = _dict_cur(ctx.uow)
         job_id = ctx.extra["job_id"]
         # Set-based staging: one INSERT … SELECT builds the JSONB `data`
         # payload server-side (cells + mapping + import_id) instead of
@@ -236,7 +236,7 @@ class FinalizeH(JobHandler):
 
     async def run(self, ctx, payload: FinalPayload) -> JobResult:
         status = "imported" if payload.decision == "approve" else "aborted"
-        await ctx.tx.execute(
+        await ctx.uow.execute(
             "UPDATE demo_imports SET status=%s WHERE id=%s",
             (status, payload.import_id))
         return JobResult(status="done", outputs={"status": status})
@@ -265,10 +265,10 @@ def build_registry() -> InMemoryRegistry:
         handler=FinalizeH))
     r.register_job_type(JobTypeSpec(
         type="human.map@v1", input_schema=ImpId, handler=_NoopH,
-        is_human=True, ui=TaskUiSpec(assignee_role="operations")))
+        is_human=True, human_task=HumanTaskOptions(assignee_role="operations")))
     r.register_job_type(JobTypeSpec(
         type="human.approve@v1", input_schema=ImpId, handler=_NoopH,
-        is_human=True, ui=TaskUiSpec(assignee_role="reviewer")))
+        is_human=True, human_task=HumanTaskOptions(assignee_role="reviewer")))
 
     i = {"import_id": "${{ inputs.import_id }}"}
     b = {"import_id": "${{ inputs.import_id }}",

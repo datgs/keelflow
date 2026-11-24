@@ -28,6 +28,7 @@ from keelflow.engine.human import HumanTaskService
 from keelflow.engine.registry import InMemoryRegistry
 from keelflow.engine.workflow import WorkflowService
 from keelflow.postgres.schema import apply_async
+from keelflow.postgres.storage import PostgresStorage
 from keelflow.sdk import (
     Actor,
     JobContext,
@@ -99,11 +100,11 @@ async def env(db):
             type="m.boom@v1", input_schema=In, handler=AlwaysFailH,
             retry=RetryPolicy(max_attempts=1)))
         reg.register_job_type(JobTypeSpec(
-            type="wait.vendor@v1", input_schema=In, is_wait=True))
+            type="wait.vendor@v1", input_schema=In, is_external_wait=True))
         reg.register_job_type(JobTypeSpec(
             type="human.gate@v1", input_schema=In,
             handler=OkH, is_human=True))
-        jobs = JobService(reg, kernel)
+        jobs = JobService(reg, kernel, PostgresStorage(DSN))
         worker_mod.configure(registry=reg, dsn=DSN, kernel=kernel)
         yield {"reg": reg, "jobs": jobs, "kernel": kernel,
                "wf": WorkflowService(reg, jobs),

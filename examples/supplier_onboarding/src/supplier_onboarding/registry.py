@@ -21,12 +21,12 @@ from pydantic import BaseModel
 
 from keelflow.engine.registry import InMemoryRegistry
 from keelflow.sdk import (
+    HumanTaskOptions,
     JobHandler,
     JobResult,
     JobTypeSpec,
     RetryPolicy,
     StepSpec,
-    TaskUiSpec,
     WorkflowDefinition,
 )
 
@@ -81,11 +81,11 @@ class ValidateIntakeH(JobHandler):
     """Normalize + basic sanity (mock). Sets status → onboarding."""
 
     async def run(self, ctx, payload: Sup) -> JobResult:
-        s = await _sup_row(ctx.tx, payload.supplier_id)
+        s = await _sup_row(ctx.uow, payload.supplier_id)
         if not s or "@" not in s["contact_email"]:
             return JobResult(status="failed",
                              outputs={"reason": "invalid contact email"})
-        await ctx.tx.execute(
+        await ctx.uow.execute(
             "UPDATE demo_suppliers SET status='onboarding'"
             " WHERE id=%s AND status='requested'", (payload.supplier_id,))
         return JobResult(status="done", outputs={
@@ -98,9 +98,9 @@ class _Adapter(JobHandler):
     check_type = "base"
 
     async def run(self, ctx, payload: Sup) -> JobResult:
-        s = await _sup_row(ctx.tx, payload.supplier_id)
+        s = await _sup_row(ctx.uow, payload.supplier_id)
         result = await self.check(ctx, s)
-        await _record(ctx.tx, payload.supplier_id, self.check_type, result)
+        await _record(ctx.uow, payload.supplier_id, self.check_type, result)
         return JobResult(status="done", outputs=result)
 
 
@@ -145,8 +145,8 @@ class RiskScoreH(JobHandler):
     """Fan-in: combines parallel check outputs → low|medium|high."""
 
     async def run(self, ctx, payload: Sup) -> JobResult:
-        cur = ctx.tx.connection.cursor(row_factory=dict_row) if hasattr(
-            ctx.tx, "connection") else ctx.tx
+        cur = ctx.uow.connection.cursor(row_factory=dict_row) if hasattr(
+            ctx.uow, "connection") else ctx.uow
         await cur.execute(
             "SELECT check_type, result FROM demo_check_results"
             " WHERE supplier_id=%s", (payload.supplier_id,))
@@ -158,7 +158,7 @@ class RiskScoreH(JobHandler):
               or not r["bank_verify"]["verified"]
               or r["adverse_media"]["articles"] > 0):
             risk = "medium"
-        await ctx.tx.execute(
+        await ctx.uow.execute(
             "UPDATE demo_suppliers SET risk=%s WHERE id=%s",
             (risk, payload.supplier_id))
         return JobResult(status="done", outputs={
@@ -169,9 +169,9 @@ class ErpVendorCreateH(JobHandler):
     """Mock ERP vendor provisioning — vendor_no natural key → idempotent."""
 
     async def run(self, ctx, payload: Sup) -> JobResult:
-        s = await _sup_row(ctx.tx, payload.supplier_id)
+        s = await _sup_row(ctx.uow, payload.supplier_id)
         vendor_no = f"V-{payload.supplier_id:05d}"
-        await ctx.tx.execute(
+        await ctx.uow.execute(
             "INSERT INTO demo_vendor_accounts"
             " (supplier_id, vendor_no, legal_name, tax_id)"
             " VALUES (%s, %s, %s, %s)"
@@ -182,10 +182,10 @@ class ErpVendorCreateH(JobHandler):
 
 class PaymentTermsH(JobHandler):
     async def run(self, ctx, payload: Sup) -> JobResult:
-        s = await _sup_row(ctx.tx, payload.supplier_id)
+        s = await _sup_row(ctx.uow, payload.supplier_id)
         terms = "NET30" if _h("pt", s["name"]) % 2 == 0 else "NET45"
         vendor_no = f"V-{payload.supplier_id:05d}"
-        await ctx.tx.execute(
+        await ctx.uow.execute(
             "UPDATE demo_vendor_accounts SET payment_terms=%s"
             " WHERE vendor_no=%s", (terms, vendor_no))
         return JobResult(status="done", outputs={"terms": terms})
@@ -194,7 +194,7 @@ class PaymentTermsH(JobHandler):
 class ProvisionAccessH(JobHandler):
     async def run(self, ctx, payload: Sup) -> JobResult:
         vendor_no = f"V-{payload.supplier_id:05d}"
-        await ctx.tx.execute(
+        await ctx.uow.execute(
             "UPDATE demo_vendor_accounts SET bank_verified=true"
             " WHERE vendor_no=%s", (vendor_no,))
         return JobResult(status="done",
@@ -204,10 +204,10 @@ class ProvisionAccessH(JobHandler):
 class FinalActivateH(JobHandler):
     async def run(self, ctx, payload: Sup) -> JobResult:
         vendor_no = f"V-{payload.supplier_id:05d}"
-        await ctx.tx.execute(
+        await ctx.uow.execute(
             "UPDATE demo_vendor_accounts SET activated_at=now()"
             " WHERE vendor_no=%s", (vendor_no,))
-        await ctx.tx.execute(
+        await ctx.uow.execute(
             "UPDATE demo_suppliers SET status='active' WHERE id=%s",
             (payload.supplier_id,))
         return JobResult(status="done", outputs={"vendor_no": vendor_no,
@@ -223,12 +223,12 @@ class _NoopH(JobHandler):
 def build_registry() -> InMemoryRegistry:
     r = InMemoryRegistry()
 
-    def j(type_: str, handler, *, human=False, wait=False, ui=None,
+    def j(type_: str, handler, *, human=False, wait=False, human_task=None,
           attempts=3):
         r.register_job_type(JobTypeSpec(
             type=type_, input_schema=Sup, handler=handler,
             retry=RetryPolicy(max_attempts=attempts, base_seconds=5),
-            is_human=human, is_wait=wait, ui=ui))
+            is_human=human, is_external_wait=wait, human_task=human_task))
 
     j("sup.validate@v1", ValidateIntakeH)
     j("sup.sanction_screen@v1", SanctionScreenH, attempts=4)
@@ -243,11 +243,11 @@ def build_registry() -> InMemoryRegistry:
 
     # conditional human steps — `if:` guards decide at advance time
     j("human.comp_review@v1", _NoopH, human=True,
-      ui=TaskUiSpec(assignee_role="compliance"))
+      human_task=HumanTaskOptions(assignee_role="compliance"))
     j("human.credit_signoff@v1", _NoopH, human=True,
-      ui=TaskUiSpec(assignee_role="finance"))
+      human_task=HumanTaskOptions(assignee_role="finance"))
     j("human.bank_conf@v1", _NoopH, human=True,
-      ui=TaskUiSpec(assignee_role="finance"))
+      human_task=HumanTaskOptions(assignee_role="finance"))
 
     i = {"supplier_id": "${{ inputs.supplier_id }}"}
     r.register_workflow(WorkflowDefinition(

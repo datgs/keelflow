@@ -11,6 +11,18 @@ from typing import Any
 from .kernel import DEFAULT_QUEUE, KernelJobSpec, KernelWorker
 
 
+def _cur(uow):
+    """Chancy needs a dict_row cursor on the uow's psycopg connection.
+
+    A caller-supplied cursor is swapped for a dict_row cursor on the
+    same connection — `client.push_ex` reads columns by name."""
+    from psycopg.rows import dict_row
+
+    native = getattr(uow, "native", uow)  # tests may pass a raw conn
+    conn = getattr(native, "connection", native)  # cursor/tx → conn
+    return conn.cursor(row_factory=dict_row)
+
+
 class ChancyKernel:
     """Kernel backed by a `chancy.Chancy` client (production default)."""
 
@@ -25,15 +37,15 @@ class ChancyKernel:
 
     # ── dispatch push ───────────────────────────────────────────────────
 
-    async def push_ex(self, cursor, spec: KernelJobSpec):
-        return await self.client.push_ex(cursor, _to_chancy_job(spec))
+    async def push_ex(self, uow, spec: KernelJobSpec):
+        return await self.client.push_ex(_cur(uow), _to_chancy_job(spec))
 
-    async def push_many_ex(self, cursor, specs: list[KernelJobSpec]):
+    async def push_many_ex(self, uow, specs: list[KernelJobSpec]):
         return await self.client.push_many_ex(
-            cursor, [_to_chancy_job(s) for s in specs])
+            _cur(uow), [_to_chancy_job(s) for s in specs])
 
-    async def notify_pushed(self, cursor, queue: str = DEFAULT_QUEUE) -> None:
-        await self.client.notify(cursor, "queue.pushed", {"q": queue})
+    async def notify_pushed(self, uow, queue: str = DEFAULT_QUEUE) -> None:
+        await self.client.notify(_cur(uow), "queue.pushed", {"q": queue})
 
     # ── lifecycle ───────────────────────────────────────────────────────
 

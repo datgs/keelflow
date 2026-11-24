@@ -10,13 +10,14 @@ import os
 import psycopg
 import pytest
 import pytest_asyncio
-from conftest import declare_default_queue, make_worker, open_kernel
 from pydantic import BaseModel
 
+from conftest import declare_default_queue, make_worker, open_kernel
 from keelflow.engine import worker as worker_mod
 from keelflow.engine.enqueue import JobService
 from keelflow.engine.registry import InMemoryRegistry
 from keelflow.postgres.schema import apply_async
+from keelflow.postgres.storage import PostgresStorage
 from keelflow.sdk import (
     Actor,
     JobContext,
@@ -105,7 +106,7 @@ async def service(kernel):
         )
     )
     worker_mod.configure(registry=reg, dsn=DSN, kernel=kernel)
-    return JobService(reg, kernel)
+    return JobService(reg, kernel, PostgresStorage(DSN))
 
 
 async def _enqueue(service, type_name: str, payload: dict) -> str:

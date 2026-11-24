@@ -11,7 +11,7 @@ items. (Python reference: `tests/` in `keelflow` —
 | 3 | Bulk throughput | ≥10k rows/s engine overhead for noop handler at 100k rows; all row statuses observable |
 | 4 | Ordering safety | Parallel chunks on disjoint `concurrency_key`s; serialized execution on same key |
 | 5 | Workflow DAG | `needs`, `if:` guards, output refs, resume-from-failed-step, human-step parking, external `wait.*` steps (no kernel claim, app-resolved signal), bulk parent as a step (fan-in advances the run atomically) |
-| 5a | Trigger callback | `triggers_workflow` on_done fires atomically with run terminalization; `decision=reject` → outcome `rejected` + `on_rejected`; step failure → `on_failed` + `failure_job`; `resume_run` re-executes in place; callback exactly-once |
+| 5a | Trigger callback | `triggers_workflow` on_succeeded fires atomically with run terminalization; `decision=reject` → outcome `rejected` + `on_rejected`; step failure → `on_failed` + `failure_job`; `resume_run` re-executes in place; callback exactly-once |
 | 6 | Module boundary | Engine exposes only service interfaces + `keelflow_*` schema — host owns domain isolation |
 | 7 | RBAC | `perm:own`/`perm:all` scope enforcement; `via` chain in audit actor; transition guard `permission` enforced; unknown `guard.permission` fails at `register_state_machine` (permission catalog via `register_permission`) |
 | 8 | Key-serialized execution | Two jobs with same `concurrency_key` never run in parallel; different keys run freely |

@@ -108,7 +108,7 @@ def test_checkpoint_requires_opt_in_and_tx():
         exc = ExecutionContext(job_id="j1", cooperative_cancel=False)
         with pytest.raises(RuntimeError, match="cooperative_cancel"):
             await exc.checkpoint()
-        exc2 = ExecutionContext(job_id="j1", cooperative_cancel=True, tx=None)
+        exc2 = ExecutionContext(job_id="j1", cooperative_cancel=True, uow=None)
         with pytest.raises(RuntimeError, match="handler transaction"):
             await exc2.checkpoint()
 

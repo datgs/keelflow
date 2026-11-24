@@ -30,13 +30,13 @@ from keelflow.engine.bulk import BulkJobHandler, BulkJobPayload
 from keelflow.engine.bulk import register as register_bulk
 from keelflow.engine.registry import InMemoryRegistry
 from keelflow.sdk import (
+    HumanTaskOptions,
     JobContext,
     JobHandler,
     JobResult,
     JobTypeSpec,
     RetryPolicy,
     StepSpec,
-    TaskUiSpec,
     WorkflowDefinition,
 )
 
@@ -147,7 +147,7 @@ class SplitH(JobHandler):
     """Stage doc chunks into demo_rag_chunks (pending)."""
 
     async def run(self, ctx: JobContext, payload: DocId) -> JobResult:
-        cur = _dict_cur(ctx.tx)
+        cur = _dict_cur(ctx.uow)
         where = "status='pending'" if payload.doc_id is None else "id=%s"
         args = () if payload.doc_id is None else (payload.doc_id,)
         await cur.execute(
@@ -173,7 +173,7 @@ class EmbedRowsH(BulkJobHandler):
     the row error queue without blocking the rest."""
 
     async def run(self, ctx: JobContext, payload: IndexBulk) -> JobResult:
-        cur = _dict_cur(ctx.tx)
+        cur = _dict_cur(ctx.uow)
         job_id = ctx.extra["job_id"]
         await cur.execute(
             "SELECT id, doc_id, text FROM demo_rag_chunks"
@@ -207,7 +207,7 @@ class MarkDocsH(JobHandler):
     """Mark docs indexed after the embed pass."""
 
     async def run(self, ctx: JobContext, payload: DocId) -> JobResult:
-        cur = _dict_cur(ctx.tx)
+        cur = _dict_cur(ctx.uow)
         await cur.execute(
             "UPDATE demo_rag_docs SET status='indexed'"
             " WHERE status='pending'")
@@ -220,7 +220,7 @@ class RetrieveH(JobHandler):
     """Cosine top-3 over demo_rag_chunks.embedding (toy ANN)."""
 
     async def run(self, ctx: JobContext, payload: QId) -> JobResult:
-        cur = _dict_cur(ctx.tx)
+        cur = _dict_cur(ctx.uow)
         await cur.execute(
             "SELECT q FROM demo_rag_questions WHERE id=%s",
             (payload.question_id,))
@@ -248,7 +248,7 @@ class GenerateH(JobHandler):
     RetryPolicy backoff in the job spec."""
 
     async def run(self, ctx: JobContext, payload: QId) -> JobResult:
-        cur = _dict_cur(ctx.tx)
+        cur = _dict_cur(ctx.uow)
         # chunks come via run inputs — fetch the run's retrieve outputs
         await cur.execute(
             "SELECT sr.outputs FROM keelflow_step_runs sr"
@@ -287,7 +287,7 @@ class ReviewCompleteH(JobHandler):
     the human-complete TX via on_job_finished outputs."""
 
     async def run(self, ctx: JobContext, payload: PubIn) -> JobResult:
-        cur = _dict_cur(ctx.tx)
+        cur = _dict_cur(ctx.uow)
         await cur.execute(
             "SELECT outputs FROM keelflow_step_runs sr"
             " JOIN keelflow_workflow_runs r ON r.id=sr.run_id"
@@ -308,7 +308,7 @@ class ReviewCompleteH(JobHandler):
 
 class PublishH(JobHandler):
     async def run(self, ctx: JobContext, payload: PubIn) -> JobResult:
-        cur = _dict_cur(ctx.tx)
+        cur = _dict_cur(ctx.uow)
         await cur.execute(
             "UPDATE demo_rag_questions SET status='answered' WHERE id=%s",
             (payload.question_id,))
@@ -348,7 +348,7 @@ def build_registry() -> InMemoryRegistry:
     r.register_job_type(JobTypeSpec(
         type="human.review@v1", input_schema=QId, handler=_NoopH,
         is_human=True,
-        ui=TaskUiSpec(assignee_role="reviewer", due_in_seconds=300)))
+        human_task=HumanTaskOptions(assignee_role="reviewer", due_in_seconds=300)))
 
     r.register_workflow(WorkflowDefinition(
         name="rag.index@v1",

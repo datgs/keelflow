@@ -36,15 +36,27 @@ import uuid
 from datetime import UTC, datetime
 from typing import Any, Literal
 
-import psycopg
-from psycopg.rows import dict_row
 from pydantic import BaseModel
 
-from ..sdk import BatchRowResult, JobCancelled, JobContext, JobResult
+from ..sdk import (
+    BatchRowResult,
+    JobCancelled,
+    JobContext,
+    JobInsert,
+    JobResult,
+)
 from ..sdk.handler import JobHandler
 from ..sdk.specs import JobStatus, RetryPolicy
+from ..sdk.uow import nested_scope
 from . import worker as _worker
-from .worker import DSN_ENV, _get_registry
+from .worker import _get_registry
+
+
+def _storage_or_default():
+    """Resolve storage outside dispatch (direct handler calls/tests)."""
+    from .worker import _get_storage
+
+    return _get_storage()
 
 log = logging.getLogger("keelflow.bulk")
 
@@ -109,26 +121,27 @@ class BulkJobHandler(JobHandler):
         """
         raise NotImplementedError
 
-    async def _own_type(self, cur, job_id) -> str:
+    async def _own_type(self, uow, storage, job_id) -> str:
         """Resolve this handler's own registered job type from its job row."""
-        await cur.execute("SELECT type FROM keelflow_jobs WHERE id=%s", (job_id,))
-        return (await cur.fetchone())["type"]
+        return await storage.job_type_of(uow, job_id)
 
     async def run(self, ctx: JobContext, payload: BaseModel) -> JobResult:
         """Partition pending rows into chunks + enqueue chunk jobs.
 
-        Runs on ctx.tx — the handler's own dispatch transaction — so rows
-        staged by a subclass's `run` (or pre-staged by the caller) are
-        visible, and partition + chunk enqueue commit atomically with the
-        job finish. A separate connection would see a stale snapshot.
+        Runs on ctx.uow — the handler's own dispatch unit of work — so
+        rows staged by a subclass's `run` (or pre-staged by the caller)
+        are visible, and partition + chunk enqueue commit atomically
+        with the job finish. A separate session would see a stale
+        snapshot.
         """
         job_id = ctx.extra["job_id"]  # injected by dispatch
         assert isinstance(payload, BulkJobPayload)
         kernel = _worker._kernel_client
+        storage = (ctx.execution.storage if ctx.execution is not None
+                   else _storage_or_default())
+        uow = ctx.uow
         if kernel is None:
             raise RuntimeError("no kernel client configured; run via worker")
-        cur = (ctx.tx.connection.cursor(row_factory=dict_row)
-               if hasattr(ctx.tx, "connection") else ctx.tx)
 
         size = max(1, payload.chunk_size)
 
@@ -137,60 +150,20 @@ class BulkJobHandler(JobHandler):
         # between this count and the partition statement simply stay
         # unchunked (same eventual behavior as the previous loop, which
         # also only saw its snapshot of claimed ids).
-        await cur.execute(
-            "SELECT count(*) FROM keelflow_row_status"
-            " WHERE job_id=%s AND status='pending' AND chunk_id IS NULL",
-            (job_id,),
-        )
-        n_pending = (await cur.fetchone())["count"]
+        n_pending = await storage.bulk_pending_count(uow, job_id)
         if n_pending == 0:
             return JobResult(status="done", outputs={"chunks": 0})
         n_chunks = -(-n_pending // size)
         chunk_ids = [uuid.uuid4() for _ in range(n_chunks)]
 
-        # Set-based partition — one statement claims the pending,
-        # unchunked rows (same SKIP LOCKED contract as before), numbers
-        # them in id order, inserts the pre-generated chunks, and stamps
-        # each claimed row with its chunk id. The chunk table is passed
-        # via unnest so the row→chunk join can hash (joining through a
-        # data-modifying CTE forces a nested loop — measured ~4x slower).
-        await cur.execute(
-            """
-            WITH claimed AS (
-                SELECT id FROM keelflow_row_status
-                WHERE job_id=%s AND status='pending' AND chunk_id IS NULL
-                ORDER BY id
-                FOR UPDATE SKIP LOCKED
-            ),
-            numbered AS (
-                SELECT id,
-                       (row_number() OVER () - 1) / %s AS ci
-                FROM claimed
-            ),
-            cids(idx, cid) AS (
-                SELECT * FROM unnest(%s::int[], %s::uuid[])
-            ),
-            ins AS (
-                INSERT INTO keelflow_chunks (id, job_id, idx, status)
-                SELECT cid, %s, idx, 'pending' FROM cids
-                RETURNING id
-            ),
-            upd AS (
-                UPDATE keelflow_row_status rs SET chunk_id = c.cid
-                FROM numbered n JOIN cids c ON c.idx = n.ci
-                WHERE rs.id = n.id
-                RETURNING rs.id
-            )
-            SELECT (SELECT count(*) FROM upd) AS n_rows,
-                   (SELECT count(*) FROM ins) AS n_chunks
-            """,
-            (job_id, size, list(range(n_chunks)), chunk_ids, job_id),
-        )
-        part = await cur.fetchone()
-        n_rows = int(part["n_rows"])
-        if int(part["n_chunks"]) != n_chunks:
+        # Set-based partition — claims the pending, unchunked rows,
+        # numbers them in id order, inserts the pre-generated chunks,
+        # and stamps each claimed row with its chunk id.
+        n_rows, n_chunks_created = await storage.bulk_partition(
+            uow, job_id, size, chunk_ids)
+        if n_chunks_created != n_chunks:
             raise RuntimeError(
-                f"partition inserted {part['n_chunks']} chunks,"
+                f"partition inserted {n_chunks_created} chunks,"
                 f" expected {n_chunks}")
         # Rows claimed but not mapped (ci beyond the chunk list — can
         # only happen if pending rows appeared between the count and
@@ -208,53 +181,40 @@ class BulkJobHandler(JobHandler):
         # work for a cancelled parent. Retry budget comes from the
         # parent job type's registered RetryPolicy — the app tunes
         # chunk retry behavior on its own bulk type.
-        await cur.execute(
-            "SELECT cancel_requested FROM keelflow_jobs WHERE id=%s",
-            (job_id,),
-        )
-        parent_cancel = (await cur.fetchone())["cancel_requested"]
+        parent_cancel = await storage.job_parent_cancel_flag(uow, job_id)
         try:
             parent_spec = _get_registry().job_type(
-                await self._own_type(cur, job_id))
+                await self._own_type(uow, storage, job_id))
             chunk_max_attempts = (
                 parent_spec.retry.max_attempts if parent_spec.retry else 3)
         except KeyError:
             chunk_max_attempts = 3
 
-        # Build all child jobs in one pass — identical per-job rows,
-        # inserted as one multi-row INSERT via unnest.
+        # Build all child jobs in one pass — identical per-job rows.
         now = datetime.now(UTC)
         child_ids = [uuid.uuid4() for _ in chunk_ids]
-        payloads, contexts, kernel_jobs = [], [], []
+        inserts, kernel_jobs = [], []
         for child_id, chunk_id in zip(child_ids, chunk_ids):
             child_ctx = _child_ctx(ctx, child_id)
-            child_payload = ChunkPayload(
-                parent_job_id=job_id, chunk_id=str(chunk_id)
-            ).model_dump(mode="json")
-            payloads.append(json.dumps(child_payload))
-            contexts.append(json.dumps(_ctx_d(child_ctx)))
+            inserts.append(JobInsert(
+                id=str(child_id), type=CHUNK_TYPE,
+                payload=ChunkPayload(
+                    parent_job_id=job_id,
+                    chunk_id=str(chunk_id)).model_dump(mode="json"),
+                context=_ctx_d(child_ctx),
+                max_attempts=chunk_max_attempts,
+                run_at=now,
+                parent_job_id=str(job_id),
+                cancel_requested=parent_cancel,
+            ))
             kernel_jobs.append(_chunk_dispatch_spec(child_id, str(chunk_id)))
-        await cur.execute(
-            """
-            INSERT INTO keelflow_jobs
-                (id, type, status, payload, context, attempts,
-                 max_attempts, run_at, parent_job_id,
-                 cancel_requested, created_at, updated_at)
-            SELECT j.id, %s, 'pending', j.payload::jsonb,
-                   j.context::jsonb, 0, %s, %s, %s, %s, %s, %s
-            FROM unnest(%s::uuid[], %s::text[], %s::text[])
-                 AS j(id, payload, context)
-            """,
-            (CHUNK_TYPE, chunk_max_attempts, now, job_id,
-             parent_cancel, now, now,
-             child_ids, payloads, contexts),
-        )
+        await storage.job_insert_many(uow, inserts)
         # push_many_ex inserts one kernel row per job (Chancy 0.26),
         # but sends a single queue notification at the end. A set-based
         # direct insert was measured to save only ~1.3s at 1M rows —
         # not worth coupling to the kernel table schema; see
         # docs/plans/completed/bulk-kernel-batch-inserts.md.
-        await kernel.push_many_ex(cur, kernel_jobs)
+        await kernel.push_many_ex(uow, kernel_jobs)
 
         # parent stays running until fan-in (dispatch honors marker)
         return JobResult(
@@ -269,103 +229,98 @@ class ChunkJobHandler(JobHandler):
 
     async def run(self, ctx: JobContext, payload: BaseModel) -> JobResult:
         assert isinstance(payload, ChunkPayload)
-        dsn = os.environ[DSN_ENV]
         registry = _get_registry()
-        conn = await psycopg.AsyncConnection.connect(dsn)
+        storage = (ctx.execution.storage if ctx.execution is not None
+                   else _storage_or_default())
+        session = await storage.connect()
         processed = failed_rows = 0
         try:
             # claim the chunk; reset rows stranded in 'processing' by a dead
             # worker (row-atomic resume).
-            async with conn.cursor(row_factory=dict_row) as cur:
-                await cur.execute(
-                    "UPDATE keelflow_chunks SET status='running',"
-                    " claimed_by=%s, lease_until=now() + interval '15 minutes',"
-                    " attempts=attempts+1, updated_at=now() WHERE id=%s",
-                    (os.environ.get("KEELFLOW_WORKER_ID", "worker-0"),
-                     payload.chunk_id),
-                )
-                await cur.execute(
-                    "UPDATE keelflow_row_status SET status='pending'"
-                    " WHERE chunk_id=%s AND status='processing'",
-                    (payload.chunk_id,),
-                )
-            await conn.commit()
+            async with session.begin() as uow:
+                await storage.chunk_claim(
+                    uow, str(payload.chunk_id),
+                    os.environ.get("KEELFLOW_WORKER_ID", "worker-0"))
+                await storage.rows_reset_processing(
+                    uow, str(payload.chunk_id))
 
-            parent_type, atomic = await self._parent_type(conn, payload.parent_job_id)
-            spec = registry.job_type(parent_type)
-            parent_handler: BulkJobHandler = spec.handler()  # type: ignore[misc]
+            async with session.begin() as uow:
+                parent_type, atomic = await self._parent_type(
+                    uow, storage, payload.parent_job_id)
+                spec = registry.job_type(parent_type)
+                parent_handler: BulkJobHandler = spec.handler()  # type: ignore[misc]
 
-            # Handler selection (spec/04): atomic='chunk' uses the
-            # set-based process_batch when the handler overrides it;
-            # atomic='row' always uses process_row. A batch-only handler
-            # (no process_row override) with atomic='row' is a config
-            # error — the whole-batch commit semantics cannot hold.
-            has_batch = (type(parent_handler).process_batch
-                         is not BulkJobHandler.process_batch)
-            has_row = (type(parent_handler).process_row
-                       is not BulkJobHandler.process_row)
-            if atomic == "row" and has_batch and not has_row:
-                raise ValueError(
-                    f"bulk handler {type(parent_handler).__name__} only"
-                    " implements process_batch, which requires"
-                    " atomic='chunk' (the batch commits per chunk);"
-                    " either implement process_row or set atomic='chunk'")
-            use_batch = atomic == "chunk" and has_batch
+                # Handler selection (spec/04): atomic='chunk' uses the
+                # set-based process_batch when the handler overrides it;
+                # atomic='row' always uses process_row. A batch-only
+                # handler (no process_row override) with atomic='row' is
+                # a config error — the whole-batch commit semantics
+                # cannot hold.
+                has_batch = (type(parent_handler).process_batch
+                             is not BulkJobHandler.process_batch)
+                has_row = (type(parent_handler).process_row
+                           is not BulkJobHandler.process_row)
+                if atomic == "row" and has_batch and not has_row:
+                    raise ValueError(
+                        f"bulk handler {type(parent_handler).__name__} only"
+                        " implements process_batch, which requires"
+                        " atomic='chunk' (the batch commits per chunk);"
+                        " either implement process_row or set"
+                        " atomic='chunk'")
+                use_batch = atomic == "chunk" and has_batch
 
-            while True:
-                rows = await self._fetch_rows(conn, payload.chunk_id)
-                if not rows:
-                    break
-                if use_batch:
-                    done_n, failed_n = await self._process_batch_atomic(
-                        conn, ctx, parent_handler, rows, payload.chunk_id
-                    )
-                    processed += done_n
-                    failed_rows += failed_n
-                    break  # whole chunk in one tx
-                elif atomic == "chunk":
-                    await self._process_chunk_atomic(
-                        conn, ctx, parent_handler, rows, payload.chunk_id
-                    )
-                    break  # whole batch in one tx
-                else:
-                    for row in rows:
-                        # Cooperative cancel checkpoint — direct
-                        # handler.run calls (unit tests) have no
-                        # ctx.execution injected; only dispatched jobs
-                        # of an opted-in spec observe the flag.
-                        if ctx.execution is not None:
-                            await ctx.execution.checkpoint()
-                        ok = await self._process_one_row(
-                            conn, ctx, parent_handler, row
+                while True:
+                    rows = await storage.rows_fetch_pending(
+                        uow, str(payload.chunk_id))
+                    if not rows:
+                        break
+                    if use_batch:
+                        done_n, failed_n = await self._process_batch_atomic(
+                            uow, ctx, parent_handler, rows,
+                            payload.chunk_id,
                         )
-                        processed += int(ok)
-                        failed_rows += int(not ok)
+                        processed += done_n
+                        failed_rows += failed_n
+                        break  # whole chunk in one tx
+                    elif atomic == "chunk":
+                        await self._process_chunk_atomic(
+                            session, uow, ctx, parent_handler, rows,
+                            payload.chunk_id,
+                        )
+                        break  # whole batch in one tx
+                    else:
+                        for row in rows:
+                            # Cooperative cancel checkpoint — direct
+                            # handler.run calls (unit tests) have no
+                            # ctx.execution injected; only dispatched jobs
+                            # of an opted-in spec observe the flag.
+                            if ctx.execution is not None:
+                                await ctx.execution.checkpoint()
+                            ok = await self._process_one_row(
+                                uow, ctx, parent_handler, row
+                            )
+                            processed += int(ok)
+                            failed_rows += int(not ok)
 
-            await self._mark_chunk(conn, payload.chunk_id, "done",
-                                   {"processed": processed, "failed": failed_rows})
-            await self._fan_in(conn, payload.parent_job_id)
+                await storage.chunk_mark(
+                    uow, str(payload.chunk_id), "done",
+                    {"processed": processed, "failed": failed_rows})
+            await self._fan_in(session, storage, payload.parent_job_id)
             return JobResult(status="done", outputs={
                 "processed": processed, "failed_rows": failed_rows})
         except JobCancelled:
-            # Settle bookkeeping outside the rolled-back handler TX so
+            # Settle bookkeeping outside the rolled-back handler UoW so
             # fan-in can terminalize the parent; dispatch then records
             # the job itself as cancelled.
             log.info("chunk %s cancelled at checkpoint", payload.chunk_id)
-            await conn.rollback()
-            await conn.execute(
-                "UPDATE keelflow_chunks SET status='cancelled',"
-                " result=%s, updated_at=now() WHERE id=%s",
-                (json.dumps({"processed": processed,
-                             "failed": failed_rows}),
-                 payload.chunk_id),
-            )
-            await conn.commit()
-            await self._fan_in(conn, payload.parent_job_id)
+            async with session.begin() as uow:
+                await storage.chunk_mark(
+                    uow, str(payload.chunk_id), "cancelled",
+                    {"processed": processed, "failed": failed_rows})
+            await self._fan_in(session, storage, payload.parent_job_id)
             raise
         except Exception as exc:
             log.exception("chunk %s failed", payload.chunk_id)
-            await conn.rollback()
             # Defer chunk-failure + fan-in to retry exhaustion: a
             # transient callback/database failure rolls back and is
             # retried via the kernel redelivery (the engine job stays
@@ -376,14 +331,12 @@ class ChunkJobHandler(JobHandler):
             own_job_id = ctx.extra.get("job_id")
             exhausted = True
             if own_job_id:
-                async with conn.cursor(row_factory=dict_row) as xcur:
-                    await xcur.execute(
-                        "SELECT attempts >= max_attempts AS done_att"
-                        " FROM keelflow_jobs WHERE id=%s", (own_job_id,))
-                    xrow = await xcur.fetchone()
-                    exhausted = bool(xrow and xrow["done_att"])
+                async with session.begin() as uow:
+                    att = await storage.job_attempts(uow, own_job_id)
+                    exhausted = bool(att and att[0] >= att[1])
             if exhausted:
-                await self._safe_mark_failed(conn, payload.chunk_id,
+                await self._safe_mark_failed(session, storage,
+                                             payload.chunk_id,
                                              payload.parent_job_id, str(exc))
             else:
                 log.info(
@@ -391,32 +344,21 @@ class ChunkJobHandler(JobHandler):
                     " scheduled by kernel", payload.chunk_id, exc)
             raise
         finally:
-            await conn.close()
+            await session.close()
 
     # ── internals ─────────────────────────────────────────────────────
 
-    async def _parent_type(self, conn, parent_job_id) -> tuple[str, str]:
-        cur = await conn.execute(
-            "SELECT type, payload FROM keelflow_jobs WHERE id=%s", (parent_job_id,)
-        )
-        row = await cur.fetchone()
+    async def _parent_type(self, uow, storage, parent_job_id) -> tuple[str, str]:
+        row = await storage.job_load(uow, parent_job_id)
         if row is None:
             raise KeyError(f"parent job {parent_job_id} not found")
-        payload = row[1] if not isinstance(row[1], str) else json.loads(row[1])
-        return row[0], payload.get("atomic", "chunk")
-
-    async def _fetch_rows(self, conn, chunk_id) -> list[dict[str, Any]]:
-        async with conn.cursor(row_factory=dict_row) as cur:
-            await cur.execute(
-                "SELECT id, row_key, data FROM keelflow_row_status"
-                " WHERE chunk_id=%s AND status='pending'"
-                " ORDER BY id",
-                (chunk_id,),
-            )
-            return await cur.fetchall()
+        payload = row["payload"]
+        if isinstance(payload, str):
+            payload = json.loads(payload)
+        return row["type"], payload.get("atomic", "chunk")
 
     async def _process_batch_atomic(
-        self, conn, ctx, handler, rows, chunk_id
+        self, uow, ctx, handler, rows, chunk_id
     ) -> tuple[int, int]:
         """Set-based path: one callback + all row-state flips in ONE tx.
 
@@ -428,10 +370,12 @@ class ChunkJobHandler(JobHandler):
         Cancellation is observed at the checkpoint before the transaction
         starts — a committed TX cannot be interrupted mid-flight.
         """
+        storage = (ctx.execution.storage if ctx.execution is not None
+                   else _storage_or_default())
         if ctx.execution is not None:
             await ctx.execution.checkpoint()
-        async with conn.transaction(), conn.cursor(row_factory=dict_row) as cur:
-            results = await handler.process_batch(ctx, rows, cur)
+        async with nested_scope(uow) as nuow:
+            results = await handler.process_batch(ctx, rows, nuow)
             if not isinstance(results, list) or not all(
                 isinstance(r, BatchRowResult) for r in results
             ):
@@ -454,116 +398,77 @@ class ChunkJobHandler(JobHandler):
                     "process_batch returned unknown row_ids"
                     f" {sorted(unknown)[:5]}")
             done_ids = [r.row_id for r in results if r.error is None]
-            err_rows = [(r.row_id, r.error or "unknown error")
-                        for r in results if r.error is not None]
+            err_rows = {r.row_id: (r.error or "unknown error")
+                        for r in results if r.error is not None}
             if done_ids:
-                await cur.execute(
-                    "UPDATE keelflow_row_status SET status='done',"
-                    " updated_at=now() WHERE id = ANY(%s)",
-                    (done_ids,),
-                )
-            for rid, err in err_rows:
-                await cur.execute(
-                    "UPDATE keelflow_row_status SET status='failed',"
-                    " error=%s, updated_at=now() WHERE id=%s",
-                    (err, rid),
-                )
+                await storage.rows_mark(nuow, done_ids, "done")
+            if err_rows:
+                await storage.rows_mark(
+                    nuow, list(err_rows), "failed", error_by_id=err_rows)
         return len(done_ids), len(err_rows)
 
     async def _process_chunk_atomic(
-        self, conn, ctx, handler, rows, chunk_id
+        self, session, uow, ctx, handler, rows, chunk_id
     ) -> None:
+        storage = ctx.execution.storage
         failing: tuple | None = None
         try:
-            async with conn.transaction(), conn.cursor(row_factory=dict_row) as cur:
+            async with nested_scope(uow) as nuow:
                 for row in rows:
-                    await cur.execute(
-                        "UPDATE keelflow_row_status SET status='processing',"
-                        " updated_at=now() WHERE id=%s",
-                        (row["id"],),
-                    )
+                    await storage.rows_mark(nuow, [row["id"]], "processing")
                     try:
-                        await handler.process_row(ctx, row, cur)
+                        await handler.process_row(ctx, row, nuow)
                     except Exception as exc:
                         failing = (row["id"], str(exc))
                         raise
-                    await cur.execute(
-                        "UPDATE keelflow_row_status SET status='done',"
-                        " updated_at=now() WHERE id=%s",
-                        (row["id"],),
-                    )
+                    await storage.rows_mark(nuow, [row["id"]], "done")
         finally:
             if failing is not None:
-                # record the failing row outside the rolled-back tx so the
-                # error queue still shows which row failed (design §3.2).
-                async with conn.cursor() as cur:
-                    await cur.execute(
-                        "UPDATE keelflow_row_status SET status='failed',"
-                        " error=%s, updated_at=now() WHERE id=%s",
-                        (failing[1], failing[0]),
-                    )
-                await conn.commit()
+                # record the failing row outside the rolled-back scope so
+                # the error queue still shows which row failed (§3.2).
+                async with session.begin() as fuow:
+                    await storage.rows_mark(
+                        fuow, [failing[0]], "failed",
+                        error_by_id={failing[0]: failing[1]})
 
-    async def _process_one_row(self, conn, ctx, handler, row) -> bool:
-        async with conn.transaction(), conn.cursor(row_factory=dict_row) as cur:
-            await cur.execute(
-                "UPDATE keelflow_row_status SET status='processing',"
-                " updated_at=now() WHERE id=%s",
-                (row["id"],),
-            )
+    async def _process_one_row(self, uow, ctx, handler, row) -> bool:
+        storage = (ctx.execution.storage if ctx.execution is not None
+                   else _storage_or_default())
+        async with nested_scope(uow) as nuow:
+            await storage.rows_mark(nuow, [row["id"]], "processing")
             try:
-                await handler.process_row(ctx, row, cur)
+                await handler.process_row(ctx, row, nuow)
             except Exception as exc:  # noqa: BLE001 - row-level error queue entry
-                await cur.execute(
-                    "UPDATE keelflow_row_status SET status='failed',"
-                    " error=%s, updated_at=now() WHERE id=%s",
-                    (str(exc), row["id"]),
-                )
+                await storage.rows_mark(
+                    nuow, [row["id"]], "failed",
+                    error_by_id={row["id"]: str(exc)})
                 return False
-            await cur.execute(
-                "UPDATE keelflow_row_status SET status='done',"
-                " updated_at=now() WHERE id=%s",
-                (row["id"],),
-            )
+            await storage.rows_mark(nuow, [row["id"]], "done")
             return True
 
-    async def _mark_chunk(self, conn, chunk_id, status, result=None) -> None:
-        await conn.execute(
-            "UPDATE keelflow_chunks SET status=%s, result=%s, updated_at=now()"
-            " WHERE id=%s",
-            (status, json.dumps(result) if result else None, chunk_id),
-        )
-        await conn.commit()
-
-    async def _fan_in(self, conn, parent_job_id) -> None:
+    async def _fan_in(self, scope, storage, parent_job_id) -> None:
         """Last chunk to settle flips the parent job to its final status.
 
-        If the parent belongs to a workflow step, also advance the run —
-        same transaction, so step completion and downstream enqueue are
-        atomic with the parent's final status.
+        `scope` is a Session (opens its own unit) or an open UnitOfWork
+        (joins as a nested scope) — the caller decides which transaction
+        this bookkeeping commits with. If the parent belongs to a
+        workflow step, the run advance lands in the same transaction.
         """
+        from ..sdk.uow import nested_scope
         from . import workflow as _wf
         from .worker import _kernel_client
 
-        async with conn.transaction(), conn.cursor(row_factory=dict_row) as cur:
-            await cur.execute(
-                "SELECT status, count(*) FROM keelflow_chunks"
-                " WHERE job_id=%s GROUP BY status",
-                (parent_job_id,),
-            )
-            counts = {r["status"]: r["count"] for r in await cur.fetchall()}
+        boundary = (scope.begin() if hasattr(scope, "begin")
+                    else nested_scope(scope))
+        async with boundary as uow:
+            counts = await storage.chunk_counts(uow, parent_job_id)
             if counts.get("pending") or counts.get("claimed") or counts.get("running"):
                 return  # still in flight
 
             # Two chunks can settle near-simultaneously; serialize on the
             # parent row so only the first fan-in computes the summary and
             # moves rows — later ones see the terminal status and return.
-            await cur.execute(
-                "SELECT status, cancel_requested FROM keelflow_jobs"
-                " WHERE id=%s FOR UPDATE",
-                (parent_job_id,),
-            )
-            pj = await cur.fetchone()
+            pj = await storage.job_lock(uow, parent_job_id)
             if pj is None or pj["status"] in ("done", "failed", "cancelled"):
                 return
             if pj["cancel_requested"]:
@@ -573,12 +478,7 @@ class ChunkJobHandler(JobHandler):
             else:
                 final = "done"
 
-            await cur.execute(
-                "SELECT status, count(*) FROM keelflow_row_status"
-                " WHERE job_id=%s GROUP BY status",
-                (parent_job_id,),
-            )
-            rows = {r["status"]: r["count"] for r in await cur.fetchall()}
+            rows = await storage.row_counts(uow, parent_job_id)
             summary = {
                 "chunks": counts,
                 "rows_total": sum(rows.values()),
@@ -586,85 +486,52 @@ class ChunkJobHandler(JobHandler):
                 "rows_failed": rows.get("failed", 0),
             }
 
-            # Retention for 'done' staging rows — same TX as the parent's
+            # Retention for 'done' staging rows — same UoW as the parent's
             # terminal write, so a rollback loses neither the rows nor the
             # step-finish hook. Old jobs lacking the payload field default
             # to 'archive'.
-            await cur.execute(
-                "SELECT COALESCE(payload->>'row_disposition','archive') AS d"
-                " FROM keelflow_jobs WHERE id=%s",
-                (parent_job_id,),
-            )
-            mode = (await cur.fetchone())["d"] or "archive"
+            mode = await storage.row_disposition(uow, parent_job_id)
             done_rows = rows.get("done", 0)
-            moved = {"archive": 0, "delete": 0}
+            archived = deleted = 0
             if done_rows and mode == "archive":
-                await cur.execute(
-                    "WITH done AS (SELECT id, row_key, chunk_id, data"
-                    " FROM keelflow_row_status"
-                    " WHERE job_id=%s AND status='done'),"
-                    " archived AS ("
-                    " INSERT INTO keelflow_row_archive"
-                    "     (job_id, row_id, row_key, chunk_id, data)"
-                    " SELECT %s, id, row_key, chunk_id, data FROM done"
-                    " ON CONFLICT (job_id, row_id) DO NOTHING"
-                    " RETURNING row_id"
-                    " )"
-                    " DELETE FROM keelflow_row_status r USING done"
-                    " WHERE r.id = done.id"
-                    " RETURNING r.id",
-                    (parent_job_id, parent_job_id),
-                )
-                moved["archive"] = cur.rowcount
+                archived = await storage.rows_archive_done(
+                    uow, parent_job_id)
             elif done_rows and mode == "delete":
-                await cur.execute(
-                    "DELETE FROM keelflow_row_status"
-                    " WHERE job_id=%s AND status='done'",
-                    (parent_job_id,),
-                )
-                moved["delete"] = cur.rowcount
+                deleted = await storage.rows_delete_done(uow, parent_job_id)
             summary["row_disposition"] = mode
-            summary["archived_rows"] = moved["archive"]
-            summary["deleted_rows"] = moved["delete"]
+            summary["archived_rows"] = archived
+            summary["deleted_rows"] = deleted
             summary["kept_rows"] = done_rows if mode == "keep" else 0
 
-            await cur.execute(
-                "UPDATE keelflow_jobs SET status=%s, updated_at=now(),"
-                " result = COALESCE(result,'{}'::jsonb) || %s::jsonb"
-                " WHERE id=%s RETURNING result",
-                (final, json.dumps(summary), parent_job_id),
-            )
-            result = (await cur.fetchone())["result"] or {}
+            result = await storage.job_result_merge(
+                uow, parent_job_id, final, summary)
 
-            # workflow step link — advance the run in the same TX
-            await cur.execute(
-                "SELECT id FROM keelflow_step_runs WHERE job_id=%s",
-                (parent_job_id,),
-            )
-            step = await cur.fetchone()
+            # workflow step link — advance the run in the same UoW
+            step = await storage.step_run_by_job(uow, parent_job_id)
             if step and _kernel_client is not None:
                 registry = _get_registry()
                 await _wf.on_job_finished(
-                    conn, _kernel_client, registry, parent_job_id,
-                    str(step["id"]), JobStatus(final), result,
+                    uow, storage, _kernel_client, registry, parent_job_id,
+                    step, JobStatus(final), result,
                 )
-        await conn.commit()
 
-    async def _safe_mark_failed(self, conn, chunk_id, parent_job_id, error) -> None:
+    async def _safe_mark_failed(
+        self, scope, storage, chunk_id, parent_job_id, error
+    ) -> None:
+        from ..sdk.uow import nested_scope
+
         try:
-            await conn.rollback()
-            await conn.execute(
-                "UPDATE keelflow_chunks SET status='failed',"
-                " result=%s, updated_at=now() WHERE id=%s",
-                (json.dumps({"error": error}), chunk_id),
-            )
-            await conn.commit()
-            await self._fan_in(conn, parent_job_id)
+            boundary = (scope.begin() if hasattr(scope, "begin")
+                        else nested_scope(scope))
+            async with boundary as uow:
+                await storage.chunk_mark(
+                    uow, str(chunk_id), "failed", {"error": error})
+            await self._fan_in(scope, storage, parent_job_id)
         except Exception:
             log.exception("could not mark chunk %s failed", chunk_id)
 
 
-async def progress(conn, job_id) -> dict[str, Any]:
+async def progress(uow, storage, job_id) -> dict[str, Any]:
     """Live progress snapshot for a bulk parent job.
 
     Engine-owned counters surfaced as one dict so apps can render
@@ -677,21 +544,11 @@ async def progress(conn, job_id) -> dict[str, Any]:
     have been archived or deleted (see `row_disposition`) — counters
     are then read from the parent's fan-in summary in `jobs.result`.
     """
-    async with conn.cursor(row_factory=dict_row) as cur:
-        await cur.execute(
-            "SELECT status, created_at, updated_at, result"
-            " FROM keelflow_jobs WHERE id=%s", (job_id,))
-        job = await cur.fetchone()
-        if job is None:
-            raise KeyError(f"bulk job {job_id} not found")
-        await cur.execute(
-            "SELECT status, count(*) AS n FROM keelflow_row_status"
-            " WHERE job_id=%s GROUP BY status", (job_id,))
-        rows = {r["status"]: int(r["n"]) for r in await cur.fetchall()}
-        await cur.execute(
-            "SELECT status, count(*) AS n FROM keelflow_chunks"
-            " WHERE job_id=%s GROUP BY status", (job_id,))
-        chunks = {r["status"]: int(r["n"]) for r in await cur.fetchall()}
+    job = await storage.job_load(uow, job_id)
+    if job is None:
+        raise KeyError(f"bulk job {job_id} not found")
+    rows = await storage.row_counts(uow, job_id)
+    chunks = await storage.chunk_counts(uow, job_id)
 
     finished = job["status"] in ("done", "failed", "cancelled")
     result = job["result"] or {}

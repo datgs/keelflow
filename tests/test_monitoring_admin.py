@@ -43,9 +43,9 @@ async def test_jobs_list_and_filter(db):
             " VALUES (gen_random_uuid(), %s, %s, '{}', '{}')",
             (t, s),
         )
-    res = await svc.jobs_list(db, types=["a@v1"])
+    res = await svc.list_jobs(db, types=["a@v1"])
     assert {r["type"] for r in res["items"]} == {"a@v1"}
-    res = await svc.jobs_list(db, statuses=["failed"])
+    res = await svc.list_jobs(db, statuses=["failed"])
     assert [r["status"] for r in res["items"]] == ["failed"]
 
 

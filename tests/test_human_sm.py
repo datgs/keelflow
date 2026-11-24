@@ -16,6 +16,7 @@ from keelflow.engine.registry import InMemoryRegistry
 from keelflow.engine.statemachine import EngineStateMachineService
 from keelflow.engine.workflow import WorkflowService
 from keelflow.postgres.schema import apply_async
+from keelflow.postgres.storage import PostgresStorage
 from keelflow.sdk import (
     Actor,
     JobContext,
@@ -80,7 +81,7 @@ async def env(db):
         reg.register_job_type(JobTypeSpec(type="wf.step@v1", input_schema=P, handler=H))
         reg.register_job_type(JobTypeSpec(
             type="human.review@v1", input_schema=P, handler=H, is_human=True))
-        jobs = JobService(reg, kernel)
+        jobs = JobService(reg, kernel, PostgresStorage(DSN))
         worker_mod.configure(registry=reg, dsn=DSN, kernel=kernel)
         sm = EngineStateMachineService(reg, kernel)
         await sm.ensure_schema(db)

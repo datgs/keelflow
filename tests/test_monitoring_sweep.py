@@ -69,7 +69,7 @@ async def test_sweep_terminal_jobs_cascades_and_is_idempotent(db):
     await _job(db, "running", 40)      # in flight — kept
     await _job(db, "pending", 40)      # never touched
 
-    out = await svc.sweep(db, jobs_days=30)
+    out = await svc.purge_expired_records(db, jobs_days=30)
     assert out["jobs"] == 1
     assert await _count(db, "keelflow_row_status") == 0      # cascaded
     assert await _count(db, "keelflow_chunks") == 0
@@ -78,7 +78,7 @@ async def test_sweep_terminal_jobs_cascades_and_is_idempotent(db):
     assert await _count(db, "keelflow_jobs",
                         "WHERE status IN ('running','pending')") == 2
 
-    again = await svc.sweep(db, jobs_days=30)                # idempotent
+    again = await svc.purge_expired_records(db, jobs_days=30)                # idempotent
     assert all(v == 0 for v in again.values())
 
 
@@ -90,9 +90,9 @@ async def test_sweep_children_before_parent(db):
     parent = await _job(db, "done", 40)
     child = await _job(db, "done", 40, parent=parent)
 
-    out = await svc.sweep(db, jobs_days=30, batch=1)
+    out = await svc.purge_expired_records(db, jobs_days=30, batch=1)
     assert out["jobs"] == 1                                   # one per batch
-    await svc.sweep(db, jobs_days=30)
+    await svc.purge_expired_records(db, jobs_days=30)
     assert await _count(db, "keelflow_jobs") == 0
     assert not await (
         await db.execute("SELECT 1 FROM keelflow_jobs WHERE id=%s",
@@ -117,7 +117,7 @@ async def test_sweep_runs_release_step_linked_jobs(db):
         "INSERT INTO keelflow_step_runs (run_id, step_id, type, status, job_id)"
         " VALUES (%s, 's1', 'x@v1', 'done', %s)", (run_id, job_id))
 
-    out = await svc.sweep(db, jobs_days=30)
+    out = await svc.purge_expired_records(db, jobs_days=30)
     assert out["workflow_runs"] == 1
     assert out["jobs"] == 1
     assert await _count(db, "keelflow_step_runs") == 0
@@ -136,7 +136,7 @@ async def test_sweep_runs_release_step_linked_jobs(db):
     await db.execute(
         "INSERT INTO keelflow_step_runs (run_id, step_id, type, status, job_id)"
         " VALUES (%s, 's1', 'x@v1', 'done', %s)", (run_id2, job_id2))
-    out = await svc.sweep(db, jobs_days=30)
+    out = await svc.purge_expired_records(db, jobs_days=30)
     assert out["jobs"] == 0 and out["workflow_runs"] == 0
     assert await _count(db, "keelflow_jobs") == 1
 
@@ -164,7 +164,7 @@ async def test_sweep_outbox_archive_dlq(db):
         " now() - make_interval(days => 120))",
         (uuid.uuid4(),))
 
-    out = await svc.sweep(db, outbox_days=7, archive_days=90, dlq_days=90,
+    out = await svc.purge_expired_records(db, outbox_days=7, archive_days=90, dlq_days=90,
                           jobs_days=None)
     assert out["outbox"] == 1        # only old + published
     assert out["row_archive"] == 1
@@ -177,7 +177,7 @@ async def test_sweep_outbox_archive_dlq(db):
 async def test_sweep_none_disables_everything(db):
     svc = MonitoringService()
     await _job(db, "done", 100)
-    out = await svc.sweep(db, jobs_days=None, outbox_days=None,
+    out = await svc.purge_expired_records(db, jobs_days=None, outbox_days=None,
                           archive_days=None, dlq_days=None)
     assert out == {}
     assert await _count(db, "keelflow_jobs") == 1

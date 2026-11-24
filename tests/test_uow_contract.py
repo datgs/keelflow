@@ -7,8 +7,6 @@ real Postgres DSN (same KEELFLOW_TEST_DSN as the suite).
 """
 from __future__ import annotations
 
-import asyncio
-import json
 import uuid
 
 import pytest
@@ -115,7 +113,7 @@ async def test_nested_scope_rolls_back_only_child(session):
     async with session.begin() as uow:
         await storage.job_insert(uow, _job(uid))
         try:
-            async with uow.nested() as child:
+            async with uow.nested():
                 await uow.native.execute(
                     "INSERT INTO uow_probe (id, sku) VALUES (%s, %s)",
                     (uuid.UUID(uid), "child"))
@@ -180,8 +178,9 @@ async def test_kernel_push_rolls_back_with_storage_write(session):
 def _chancy_job(spec):
     """Mirror of chancy_kernel._to_chancy_job — kernel adapter detail,
     exercised here to prove the uow carries the same transaction."""
-    import chancy
     from datetime import UTC, datetime
+
+    import chancy
 
     return chancy.Job(
         func=spec.func,

@@ -41,6 +41,19 @@ from .kernel import DEFAULT_QUEUE, KernelJobSpec
 log = logging.getLogger("keelflow.native_kernel")
 
 
+def _cur(uow):
+    """Cursor over the unit of work's native psycopg connection.
+
+    Test fixtures may still hand in a bare conn/cursor/transaction —
+    fall back to the object itself or its connection's cursor."""
+    native = getattr(uow, "native", uow)
+    if isinstance(native, psycopg.AsyncConnection):
+        return native.cursor()
+    if isinstance(native, psycopg.AsyncTransaction):
+        return native.connection.cursor()
+    return native  # already a cursor
+
+
 class NativeKernel:
     """Kernel port implemented directly on `keelflow_jobs`."""
 
@@ -52,14 +65,15 @@ class NativeKernel:
 
     # ── dispatch push ───────────────────────────────────────────────────
 
-    async def push_ex(self, cursor, spec: KernelJobSpec):
+    async def push_ex(self, uow, spec: KernelJobSpec):
         """Make the engine row claimable: bump run_at / reset lease.
 
         `unique_key` dedup mirrors chancy's ON CONFLICT no-op: if another
         active row already carries the key this update matches nothing.
         """
+        cursor = _cur(uow)
         await self._push_one(cursor, spec)
-        await self.notify_pushed(cursor)
+        await self.notify_pushed(uow)
 
     async def _push_one(self, cursor, spec: KernelJobSpec) -> None:
         job_id = spec.kwargs["job_id"]
@@ -95,14 +109,15 @@ class NativeKernel:
                 (job_id,),
             )
 
-    async def push_many_ex(self, cursor, specs: list[KernelJobSpec]):
+    async def push_many_ex(self, uow, specs: list[KernelJobSpec]):
+        cursor = _cur(uow)
         for spec in specs:
             await self._push_one(cursor, spec)
-        await self.notify_pushed(cursor)
+        await self.notify_pushed(uow)
 
-    async def notify_pushed(self, cursor, queue: str = DEFAULT_QUEUE) -> None:
-        await cursor.execute("SELECT pg_notify('keelflow_dispatch', %s)",
-                             (queue,))
+    async def notify_pushed(self, uow, queue: str = DEFAULT_QUEUE) -> None:
+        await _cur(uow).execute("SELECT pg_notify('keelflow_dispatch', %s)",
+                                (queue,))
 
     # ── lifecycle ───────────────────────────────────────────────────────
 

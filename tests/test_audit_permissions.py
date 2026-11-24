@@ -10,6 +10,7 @@ import pytest_asyncio
 from keelflow.engine.audit import PostgresAuditService
 from keelflow.engine.permissions import DefaultPermissionService
 from keelflow.postgres.schema import apply_async
+from keelflow.postgres.storage import PostgresStorage
 from keelflow.sdk import Actor, AuditEvent, EntityRef, JobContext
 
 DSN = os.environ.get(
@@ -139,7 +140,7 @@ def test_scope_own_vs_all():
 
 @pytest.mark.asyncio
 async def test_audit_record_and_trace(db):
-    svc = PostgresAuditService()
+    svc = PostgresAuditService(PostgresStorage(DSN))
     async with (
         await _conn(autocommit=False) as conn,
         conn.transaction(),
@@ -167,7 +168,7 @@ async def test_audit_record_and_trace(db):
 
 @pytest.mark.asyncio
 async def test_audit_rolls_back_with_tx(db):
-    svc = PostgresAuditService()
+    svc = PostgresAuditService(PostgresStorage(DSN))
     async with await _conn(autocommit=False) as conn:
         with pytest.raises(RuntimeError):
             async with conn.transaction(), conn.cursor() as cur:

@@ -3,8 +3,8 @@
 Job types declare `schedule: CronSpec` (cron expression + timezone +
 optional window + overlap policy). `run_scheduler` loops registered
 scheduled types, computes the next fire time, adjusts for `window`, and
-enqueues a job whose `unique_key` is `cron:<type>:<iso-fire-time>` — so a
-scheduler crash/restart can never double-enqueue the same slot.
+enqueues a job whose `unique_key` is `cron:<type>:<iso-fire-time>` — so
+a scheduler crash/restart can never double-enqueue the same slot.
 
 Overlap policies (design decision #10):
 - `skip` (default): do nothing if the type's previous job is still
@@ -14,21 +14,23 @@ Overlap policies (design decision #10):
   enqueue. A pending job is cancelled outright; a claimed/running job
   is flagged `cancel_requested` and runs to completion — this is a
   drain, not a force-kill.
+
+Each job type's work (overlap check → insert → kernel push → outbox
+event) commits in its own unit of work.
 """
 from __future__ import annotations
 
 import asyncio
-import json
 import logging
 import uuid
 from datetime import UTC, datetime, timedelta
 from datetime import time as dtime
 from zoneinfo import ZoneInfo
 
-import psycopg
 from croniter import croniter
 
-from ..sdk import Actor, JobContext, Registry
+from ..sdk import Actor, JobContext, JobInsert, Registry, Storage
+from .context import ctx_to_dict
 
 log = logging.getLogger("keelflow.scheduler")
 
@@ -68,11 +70,14 @@ def _apply_window(fire: datetime, window: str | None, tz) -> datetime:
     return candidate
 
 
-async def tick(conn, registry: Registry, kernel, *, now: datetime | None = None) -> int:
+async def tick(
+    uow, storage: Storage, registry: Registry, kernel,
+    *, now: datetime | None = None,
+) -> int:
     """Enqueue due scheduled jobs for all registered scheduled types.
 
     Returns number of jobs enqueued. Intended to be called in a loop
-    (`run_scheduler`) or from tests.
+    (`run_scheduler`) or from tests. All writes join `uow`.
     """
     now = now or datetime.now(UTC)
     from .kernel import as_kernel
@@ -88,13 +93,8 @@ async def tick(conn, registry: Registry, kernel, *, now: datetime | None = None)
 
         # overlap policy vs previous job for this type
         if cron.overlap != "queue":
-            cur = await conn.execute(
-                "SELECT id, status FROM keelflow_jobs"
-                " WHERE type=%s AND status IN ('pending','claimed','running')"
-                " ORDER BY created_at DESC LIMIT 1",
-                (spec.type,),
-            )
-            live = await cur.fetchone()
+            live_jobs = await storage.jobs_live_by_type(uow, spec.type)
+            live = live_jobs[0] if live_jobs else None
             if live and cron.overlap == "skip":
                 continue
             if live and cron.overlap == "kill_previous":
@@ -102,62 +102,45 @@ async def tick(conn, registry: Registry, kernel, *, now: datetime | None = None)
                 # dispatch can run them; claimed/running jobs only get
                 # the flag and run to completion (cancel does not
                 # interrupt an in-flight handler).
-                await conn.execute(
-                    "UPDATE keelflow_jobs SET"
-                    " status = CASE WHEN status = 'pending'"
-                    "               THEN 'cancelled' ELSE status END,"
-                    " cancel_requested=true, updated_at=now() WHERE id=%s",
-                    (live[0],),
-                )
+                await storage.job_cancel_request(uow, live["id"])
 
         job_id = uuid.uuid4()
         ctx = JobContext(actor=Actor.system("scheduler"))
-        from psycopg.rows import dict_row
-
-        from .context import ctx_to_dict
-
-        async with conn.cursor(row_factory=dict_row) as cursor:
-            await cursor.execute(
-                """
-                INSERT INTO keelflow_jobs
-                    (id, type, status, payload, context, max_attempts, run_at,
-                     created_at, updated_at)
-                VALUES (%s,%s,'pending','{}',%s,%s,%s,%s,%s)
-                """,
-                (
-                    job_id, spec.type, json.dumps(ctx_to_dict(ctx)),
-                    spec.retry.max_attempts if spec.retry else 3,
-                    fire, now, now,
-                ),
-            )
-            await kernel.push_ex(
-                cursor,
-                _kernel_job(job_id, spec.type, fire, unique_key),
-            )
-            await cursor.execute(
-                "INSERT INTO keelflow_outbox (event_type, payload) VALUES"
-                " ('job.scheduled', %s)",
-                (json.dumps({"job_id": str(job_id), "type": spec.type}),),
-            )
-        await conn.commit()
+        await storage.job_insert(uow, JobInsert(
+            id=str(job_id), type=spec.type, payload={},
+            context=ctx_to_dict(ctx),
+            max_attempts=spec.retry.max_attempts if spec.retry else 3,
+            run_at=fire,
+        ))
+        await kernel.push_ex(
+            uow,
+            _kernel_job(job_id, spec.type, fire, unique_key),
+        )
+        await storage.outbox_insert(uow, "job.scheduled", {
+            "job_id": str(job_id), "type": spec.type})
         enqueued += 1
     return enqueued
 
 
 async def run_scheduler(
-    dsn: str, registry: Registry, kernel, *, interval: float = 30.0, stop=None
+    storage: Storage, registry: Registry, kernel,
+    *, interval: float = 30.0, stop=None, session=None,
 ) -> None:
-    conn = await psycopg.AsyncConnection.connect(dsn)
+    own = session is None
+    if session is None:
+        session = await storage.connect()
     try:
         while not (stop and stop.is_set()):
             try:
-                n = await tick(conn, registry, kernel)
+                async with session.begin() as uow:
+                    n = await tick(uow, storage, registry, kernel)
             except Exception:
                 log.exception("scheduler tick failed")
                 n = 0
             await asyncio.sleep(interval if n == 0 else 0)
     finally:
-        await conn.close()
+        if own:
+            await session.close()
 
 
 # ── helpers ───────────────────────────────────────────────────────────────

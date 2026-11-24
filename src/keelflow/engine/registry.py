@@ -41,15 +41,15 @@ class InMemoryRegistry(Registry):
         return frozenset(self._permissions)
 
     def register_job_type(self, spec: JobTypeSpec) -> None:
-        if spec.is_wait and not spec.type.startswith("wait."):
+        if spec.is_external_wait and not spec.type.startswith("wait."):
             raise ValueError(
-                f"is_wait type {spec.type!r} must use the 'wait.' namespace")
-        if spec.is_wait and spec.is_human:
+                f"is_external_wait type {spec.type!r} must use the 'wait.' namespace")
+        if spec.is_external_wait and spec.is_human:
             raise ValueError(
-                f"type {spec.type!r} cannot be both is_wait and is_human")
-        if spec.is_wait and spec.handler is not None:
+                f"type {spec.type!r} cannot be both is_external_wait and is_human")
+        if spec.is_external_wait and spec.handler is not None:
             raise ValueError(
-                f"is_wait type {spec.type!r} must not declare a handler"
+                f"is_external_wait type {spec.type!r} must not declare a handler"
                 " — it is resolved by signal, not dispatched")
         self._job_types[spec.type] = spec
 

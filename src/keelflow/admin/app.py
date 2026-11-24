@@ -114,7 +114,7 @@ def make_app(dsn: str, host: str = "127.0.0.1", port: int = 8410):
         def _jobs(self, qs):
             types = qs.get("type", [None])[0]
             statuses = qs.get("status", [None])[0]
-            res = q(lambda c: svc.jobs_list(
+            res = q(lambda c: svc.list_jobs(
                 c, types=[types] if types else None,
                 statuses=[statuses] if statuses else None, limit=100,
             ))
@@ -133,7 +133,7 @@ def make_app(dsn: str, host: str = "127.0.0.1", port: int = 8410):
             )
 
         def _job(self, jid):
-            r = q(lambda c: svc.job_get(c, jid))
+            r = q(lambda c: svc.get_job(c, jid))
             if not r:
                 return "<p>not found</p>"
             kv = "".join(
@@ -148,7 +148,7 @@ def make_app(dsn: str, host: str = "127.0.0.1", port: int = 8410):
             )
 
         def _runs(self):
-            rows = q(svc.runs_list)
+            rows = q(svc.list_runs)
             return self._table(
                 [{**r, "id": str(r["id"])} for r in rows],
                 ["id", "workflow", "status", "created_at"],
@@ -156,7 +156,7 @@ def make_app(dsn: str, host: str = "127.0.0.1", port: int = 8410):
             )
 
         def _run(self, rid):
-            r = q(lambda c: svc.runs_get(c, rid))
+            r = q(lambda c: svc.get_run(c, rid))
             if not r:
                 return "<p>not found</p>"
             steps = [

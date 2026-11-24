@@ -177,7 +177,7 @@ def _parse_trigger(tw: Any, name: str, i: int) -> WorkflowTriggerSpec | None:
     if isinstance(tw, str):
         return WorkflowTriggerSpec(workflow=tw)
     if isinstance(tw, dict):
-        unknown = set(tw) - {"workflow", "on_done", "on_rejected",
+        unknown = set(tw) - {"workflow", "on_succeeded", "on_rejected",
                              "on_failed", "failure_job"}
         if unknown:
             raise DefinitionError(
@@ -190,7 +190,7 @@ def _parse_trigger(tw: Any, name: str, i: int) -> WorkflowTriggerSpec | None:
             )
         return WorkflowTriggerSpec(
             workflow=tw["workflow"],
-            on_done=tw.get("on_done"),
+            on_succeeded=tw.get("on_succeeded"),
             on_rejected=tw.get("on_rejected"),
             on_failed=tw.get("on_failed"),
             failure_job=tw.get("failure_job"),

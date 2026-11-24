@@ -4,7 +4,7 @@ Invoice lifecycle exercising **state machine + human-in-the-loop + DAG
 workflow + workflow triggers** in one flow:
 
 ```
-draft ──submit──► in_review ──approve──► posting ──on_done──► posted
+draft ──submit──► in_review ──approve──► posting ──on_succeeded──► posted
    │                │                      │
    │                │ creates_job:         │ triggers post.wf@v1:
    │                │ human.review@v1      │  ledger → record → gl_check(human)
@@ -92,10 +92,10 @@ exposes and this demo fills in:
 | **`JobHandler.run`** — your code, runs in the engine's dispatch TX | `class PostLedgerH(JobHandler): async def run(self, ctx, payload: InvPayload): …` |
 | **`ctx.tx`** — write domain rows *in the same commit* as job finish + workflow advance | `await ctx.tx.execute("INSERT INTO demo_ledger_postings … ON CONFLICT …")` |
 | **`JobTypeSpec` + `register_job_type`** — declare a job type + its handler | `reg.register_job_type(JobTypeSpec(type="inv.post_ledger@v1", handler=PostLedgerH, …))` |
-| **`TaskUiSpec(assignee_role=…)`** — who may claim a human task | `ui=TaskUiSpec(assignee_role="gl")` |
+| **`HumanTaskOptions(assignee_role=…)`** — who may claim a human task | `human_task=HumanTaskOptions(assignee_role="gl")` |
 | **`StateMachineDefinition` / `TransitionSpec`** — entity lifecycle as data | `reg.register_state_machine(StateMachineDefinition(name="invoice@v1", … transitions=(…)))` |
 | **`creates_job`** — transition spawns a human task | `TransitionSpec("draft","in_review","submit", creates_job="human.review@v1")` |
-| **`triggers_workflow` + `WorkflowTriggerSpec`** — SM transition kicks a DAG, outcome maps back | `triggers_workflow=WorkflowTriggerSpec(workflow="post.wf@v1", on_done="posted", on_rejected=…, failure_job=…)` |
+| **`triggers_workflow` + `WorkflowTriggerSpec`** — SM transition kicks a DAG, outcome maps back | `triggers_workflow=WorkflowTriggerSpec(workflow="post.wf@v1", on_succeeded="posted", on_rejected=…, failure_job=…)` |
 | **`WorkflowDefinition` / `StepSpec` + `needs`/`input` refs** — a DAG of steps | `StepSpec(id="gl_check", type="human.gl_check@v1", input={"journal_ref": "${{ steps.record.outputs.journal_ref }}"}, needs=("record",))` |
 | **`human.*` step type** — step that blocks until a person acts in the Inbox | `StepSpec(id="gl_check", type="human.gl_check@v1", …)` |
 | **`roles` argument** — pass trusted actor roles to task claim/completion | `roles=roles_for(request)` — the engine checks the assigned role; do not pass user-controlled role claims |

@@ -122,23 +122,9 @@ class RunFilter:
     cursor: str | None = None
 
 
-# ── TX abstraction ─────────────────────────────────────────────────────
-
-
-class Transaction(Protocol):
-    """A caller-owned transaction/connection passed to engine writes.
-
-    Concrete: a psycopg3 ``AsyncConnection`` or ``AsyncCursor``. Engine
-    writes participate in the caller's transaction — commit makes intent
-    visible, rollback discards it.
-    """
-
-    async def execute(self, query: str, params: tuple | None = None): ...
-
-    def cursor(self, *args: Any, **kwargs: Any): ...
-
-
 # ── Service contracts ──────────────────────────────────────────────────
+# Transaction boundaries are `keelflow.sdk.uow.UnitOfWork` — the SDK no
+# longer exposes an execute()/cursor()-shaped TX type.
 
 
 class JobBuilder(Protocol):
@@ -149,7 +135,7 @@ class JobBuilder(Protocol):
     def run_at(self, ts: datetime) -> JobBuilder: ...
     def concurrency_key(self, key: str) -> JobBuilder: ...
     def assignee(self, actor: Actor | str) -> JobBuilder: ...
-    async def enqueue(self, tx: Transaction) -> JobRef: ...
+    async def enqueue(self, uow) -> JobRef: ...
 
 
 class JobService(Protocol):
@@ -171,7 +157,7 @@ class JobService(Protocol):
 
 class WorkflowService(Protocol):
     async def start(
-        self, name: str, inputs: dict, ctx: JobContext, tx: Transaction
+        self, name: str, inputs: dict, ctx: JobContext, uow
     ) -> RunRef: ...
     async def get_run(self, run_id: str) -> WorkflowRun: ...
     async def list_runs(self, f: RunFilter) -> Page[WorkflowRun]: ...
@@ -185,13 +171,13 @@ class EventHandler(Protocol):
 class EventBus(Protocol):
     """Transactional outbox — publish inside the same TX as the data change."""
 
-    async def publish(self, event: DomainEvent, tx: Transaction) -> None: ...
+    async def publish(self, event: DomainEvent, uow) -> None: ...
     def subscribe(self, event_type: str, handler: EventHandler) -> None: ...
 
 
 class StateMachineService(Protocol):
     async def transition(
-        self, entity: EntityRef, action: str, ctx: JobContext, tx: Transaction
+        self, entity: EntityRef, action: str, ctx: JobContext, uow
     ) -> None: ...
     async def current(self, entity: EntityRef) -> str: ...
     async def allowed_actions(
@@ -208,7 +194,7 @@ class PermissionService(Protocol):
 
 
 class AuditService(Protocol):
-    async def record(self, event: AuditEvent, tx: Transaction) -> None: ...
+    async def record(self, event: AuditEvent, uow) -> None: ...
     async def trace(self, entity: EntityRef) -> list[AuditEvent]: ...
 
 

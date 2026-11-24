@@ -27,15 +27,16 @@ from keelflow.engine.monitoring import MonitoringService
 from keelflow.engine.registry import InMemoryRegistry
 from keelflow.engine.workflow import WorkflowService
 from keelflow.postgres.schema import apply_async
+from keelflow.postgres.storage import PostgresStorage
 from keelflow.sdk import (
     Actor,
+    HumanTaskOptions,
     JobContext,
     JobHandler,
     JobResult,
     JobTypeSpec,
     RetryPolicy,
     StepSpec,
-    TaskUiSpec,
     WorkflowDefinition,
 )
 
@@ -108,7 +109,7 @@ class CheckpointH(JobHandler):
         type(self).last = self
 
     async def run(self, ctx, payload: In):
-        await ctx.tx.execute(
+        await ctx.uow.execute(
             "INSERT INTO keelflow_outbox (event_type, payload)"
             " VALUES ('probe.cancel', '{}')")
         async with await psycopg.AsyncConnection.connect(
@@ -194,8 +195,8 @@ async def env(db):
         reg.register_job_type(JobTypeSpec(
             type="human.review@v1", input_schema=In, handler=OkH,
             is_human=True,
-            ui=TaskUiSpec(assignee_role="finance", due_in_seconds=60)))
-        jobs = JobService(reg, kernel)
+            human_task=HumanTaskOptions(assignee_role="finance", due_in_seconds=60)))
+        jobs = JobService(reg, kernel, PostgresStorage(DSN))
         worker_mod.configure(registry=reg, dsn=DSN, kernel=kernel)
         wf = WorkflowService(reg, jobs)
         human = HumanTaskService(reg, kernel)
@@ -476,15 +477,16 @@ async def test_cancel_wins_start_race_handler_never_runs(env, db, monkeypatch):
     and the handler must never be invoked."""
     CALLS.clear()
     ref = await _enqueue_ok(env)
-    orig = worker_mod._transition_to_running
+    from keelflow.postgres.storage import PostgresStorage
+    orig = PostgresStorage.job_mark_running
 
-    async def injected(conn, job_id):
+    async def injected(self, uow, job_id):
         await db.execute(
             "UPDATE keelflow_jobs SET cancel_requested=true WHERE id=%s",
             (ref.id,))
-        return await orig(conn, job_id)
+        return await orig(self, uow, job_id)
 
-    monkeypatch.setattr(worker_mod, "_transition_to_running", injected)
+    monkeypatch.setattr(PostgresStorage, "job_mark_running", injected)
     await worker_mod.dispatch(ref.id)
     row = await (await db.execute(
         "SELECT status, cancel_requested FROM keelflow_jobs WHERE id=%s",
@@ -764,7 +766,7 @@ async def test_outbox_bad_subscriber_does_not_block_others(db):
     async def good(event, ctx):
         calls.append(event.payload)
 
-    bus = OutboxEventBus()
+    bus = OutboxEventBus(PostgresStorage(DSN))
     bus.subscribe("e.t@v1", bad)
     bus.subscribe("e.t@v1", good)
 
@@ -775,6 +777,8 @@ async def test_outbox_bad_subscriber_does_not_block_others(db):
     ):
             await bus.publish(DomainEvent(type="e.t@v1", payload={"a": 1}), cur)
 
-    n = await dispatch_once(db, bus)
+    sess = await PostgresStorage(DSN).connect()
+    n = await dispatch_once(sess, PostgresStorage(DSN), bus)
+    await sess.close()
     assert n == 0  # event stays 'failed' — one subscriber raised
     assert calls == [{"a": 1}]  # but the good subscriber still ran

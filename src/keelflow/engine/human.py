@@ -1,21 +1,19 @@
-"""Human task layer (T11) — Inbox data API over the jobs table.
+"""Human task layer (T11) — Inbox data API over the jobs store.
 
-Human jobs (`human.*`) live in `keelflow_jobs` like machine jobs but are
+Human jobs (`human.*`) live in the same store as machine jobs but are
 claimed/completed by people instead of workers. `assignee` is `user:<id>`
 or `role:<name>`; `claimed_by` records the first user to open the task
-(`FOR UPDATE` + null check — first claim wins).
+(first claim wins, guarded by the job row lock).
 
 `complete` writes the result and, if the job came from a workflow step,
 unblocks the run via `workflow.on_job_finished`.
 """
 from __future__ import annotations
 
-import json
 from typing import Any
 
-from psycopg.rows import dict_row
-
-from ..sdk import Actor, JobStatus
+from ..sdk import Actor, JobStatus, Storage
+from ..sdk.uow import nested_scope
 from .workflow import on_job_finished
 
 
@@ -36,52 +34,40 @@ def _check_assignee(assignee: str | None, actor: Actor,
 
 
 class HumanTaskService:
-    """Inbox queries + claim/complete. All methods take an open conn.
+    """Inbox queries + claim/complete.
 
     `complete` handles two task kinds:
     - workflow-step tasks (`human.*` inside a DAG): completing advances
       the run via `workflow.on_job_finished`.
     - SM-created tasks (`creates_job` on a transition): payload carries
       `sm_actions` → `complete_and_transition` completes the task *and*
-      applies the mapped SM transition in the same TX.
+      applies the mapped SM transition in the same UoW.
     """
 
-    def __init__(self, registry, kernel=None, sm=None) -> None:
+    def __init__(self, registry, kernel=None, sm=None,
+                 storage: Storage | None = None) -> None:
         from .kernel import as_kernel
 
         self._registry = registry
         self._kernel = as_kernel(kernel) if kernel is not None else None
         self._sm = sm  # EngineStateMachineService, for complete_and_transition
+        self._storage = storage
 
-    async def my_tasks(self, conn, actor: Actor, roles: list[str] | None = None) -> list[dict[str, Any]]:
+    def _store(self) -> Storage:
+        if self._storage is None:
+            from .worker import _get_storage
+
+            self._storage = _get_storage()
+        return self._storage
+
+    async def my_tasks(self, uow, actor: Actor,
+                       roles: list[str] | None = None) -> list[dict[str, Any]]:
         """Open tasks assigned to this user or any of their roles."""
-        roles = roles or []
-        async with conn.cursor(row_factory=dict_row) as cur:
-            await cur.execute(
-                """
-                SELECT id, type, status, payload, assignee, claimed_by,
-                       due_at, created_at
-                FROM keelflow_jobs
-                WHERE type LIKE 'human.%%'
-                  AND status IN ('pending','claimed')
-                  AND (
-                        claimed_by = %s
-                     OR assignee = %s
-                     OR assignee = ANY(%s)
-                     OR (assignee IS NULL AND claimed_by IS NULL)
-                  )
-                ORDER BY created_at
-                """,
-                (
-                    f"user:{actor.id}",
-                    f"user:{actor.id}",
-                    [f"role:{r}" for r in roles],
-                ),
-            )
-            return await cur.fetchall()
+        return await self._store().tasks_open_for(
+            uow, actor.id, roles or [])
 
     async def claim(
-        self, conn, job_id: str, actor: Actor,
+        self, uow, job_id: str, actor: Actor,
         roles: list[str] | None = None,
     ) -> None:
         """First claim wins, subject to the task's assignee.
@@ -89,17 +75,13 @@ class HumanTaskService:
         `assignee=user:X` → only X may claim; `assignee=role:R` → the
         actor must hold role R (pass `roles`); unassigned tasks are
         claimable by anyone. Raises PermissionError on a role mismatch
-        or when already claimed by someone else.
+        or when already claimed by someone else. Writes join the
+        caller's unit of work.
         """
         roles = roles or []
-        async with conn.transaction(), conn.cursor(
-                row_factory=dict_row) as cur:
-            await cur.execute(
-                "SELECT type, status, claimed_by, assignee FROM keelflow_jobs"
-                " WHERE id=%s FOR UPDATE",
-                (job_id,),
-            )
-            row = await cur.fetchone()
+        storage = self._store()
+        async with nested_scope(uow) as nuow:
+            row = await storage.job_lock(nuow, job_id)
             if row is None:
                 raise KeyError(f"job {job_id} not found")
             _check_human_job(row["type"])
@@ -110,29 +92,22 @@ class HumanTaskService:
                 raise PermissionError(
                     f"task already claimed by {row['claimed_by']}")
             _check_assignee(row["assignee"], actor, roles)
-            await cur.execute(
-                "UPDATE keelflow_jobs SET status='claimed', claimed_by=%s,"
-                " updated_at=now() WHERE id=%s",
-                (who, job_id),
-            )
+            await storage.task_update(
+                nuow, job_id, status="claimed", claimed_by=who)
 
     async def complete(
-        self, conn, job_id: str, actor: Actor,
+        self, uow, job_id: str, actor: Actor,
         result: dict[str, Any] | None = None, *,
         roles: list[str] | None = None,
     ) -> None:
         """Complete a workflow-step human task; unblocks the owning run.
 
-        Caller owns the TX — the job update and the run advance commit
-        together.
+        The job update and the run advance commit together in the
+        caller's unit of work.
         """
-        async with conn.transaction(), conn.cursor(row_factory=dict_row) as cur:
-            await cur.execute(
-                "SELECT type, status, claimed_by, assignee FROM keelflow_jobs"
-                " WHERE id=%s FOR UPDATE",
-                (job_id,),
-            )
-            row = await cur.fetchone()
+        storage = self._store()
+        async with nested_scope(uow) as nuow:
+            row = await storage.job_lock(nuow, job_id)
             if row is None:
                 raise KeyError(f"job {job_id} not found")
             _check_human_job(row["type"])
@@ -144,26 +119,20 @@ class HumanTaskService:
                     f"task claimed by {row['claimed_by']}, cannot complete as {who}"
                 )
             _check_assignee(row["assignee"], actor, roles or [])
-            await cur.execute(
-                "UPDATE keelflow_jobs SET status='done', result=%s,"
-                " updated_at=now() WHERE id=%s",
-                (json.dumps(result or {}), job_id),
-            )
-            # link back to the workflow step, if any — inside the TX so
+            await storage.task_update(
+                nuow, job_id, status="done", result=result or {})
+            # link back to the workflow step, if any — inside the UoW so
             # task completion + run advance commit together
-            await cur.execute(
-                "SELECT id FROM keelflow_step_runs WHERE job_id=%s", (job_id,)
-            )
-            step = await cur.fetchone()
+            step = await storage.step_run_by_job(nuow, job_id)
             if step and self._kernel is not None:
                 await on_job_finished(
-                    conn, self._kernel, self._registry, str(job_id),
-                    str(step["id"]), JobStatus.DONE, result or {},
+                    nuow, storage, self._kernel, self._registry, job_id,
+                    step, JobStatus.DONE, result or {},
                 )
 
     async def complete_and_transition(
         self,
-        conn,
+        uow,
         job_id: str,
         actor: Actor,
         decision: str,
@@ -176,17 +145,15 @@ class HumanTaskService:
 
         The task's payload `sm_actions` maps decisions to SM actions, e.g.
         `{"approve": "approve", "reject": "reject"}`. The task completes
-        and the transition applies in one TX: a rejection can't leave the
+        and the transition applies in one UoW: a rejection can't leave the
         task 'done' while the entity stays in its old state. `roles` must
         come from the application's trusted actor-to-role mapping.
         """
-        async with conn.transaction(), conn.cursor(row_factory=dict_row) as cur:
-            await cur.execute(
-                "SELECT type, status, claimed_by, assignee, payload FROM keelflow_jobs"
-                " WHERE id=%s FOR UPDATE",
-                (job_id,),
-            )
-            row = await cur.fetchone()
+        import json
+
+        storage = self._store()
+        async with nested_scope(uow) as nuow:
+            row = await storage.job_lock(nuow, job_id)
             if row is None:
                 raise KeyError(f"job {job_id} not found")
             _check_human_job(row["type"])
@@ -207,23 +174,21 @@ class HumanTaskService:
                 raise ValueError(
                     f"decision {decision!r} not allowed; valid: {sorted(sm_actions)}"
                 )
-            await cur.execute(
-                "UPDATE keelflow_jobs SET status='done', result=%s,"
-                " updated_at=now() WHERE id=%s",
-                (json.dumps({"decision": decision, "note": note}), job_id),
-            )
+            await storage.task_update(
+                nuow, job_id, status="done",
+                result={"decision": decision, "note": note})
             from ..sdk import EntityRef
-
             entity = EntityRef(
                 type=payload["entity_type"], id=payload["entity_id"])
             if self._sm is None:
                 from .statemachine import EngineStateMachineService
 
-                self._sm = EngineStateMachineService(self._registry, self._kernel)
-            await self._sm.transition(entity, action, ctx, cur)
+                self._sm = EngineStateMachineService(
+                    self._registry, self._kernel, storage=storage)
+            await self._sm.transition(entity, action, ctx, nuow)
 
     async def release(
-        self, conn, job_id: str, actor: Actor,
+        self, uow, job_id: str, actor: Actor,
         roles: list[str] | None = None,
     ) -> None:
         """Release a claimed task back to pending (claimer went away).
@@ -232,14 +197,9 @@ class HumanTaskService:
         should use escalate_overdue. Raises PermissionError on a
         claim-owner mismatch.
         """
-        async with conn.transaction(), conn.cursor(
-                row_factory=dict_row) as cur:
-            await cur.execute(
-                "SELECT type, status, claimed_by FROM keelflow_jobs"
-                " WHERE id=%s FOR UPDATE",
-                (job_id,),
-            )
-            row = await cur.fetchone()
+        storage = self._store()
+        async with nested_scope(uow) as nuow:
+            row = await storage.job_lock(nuow, job_id)
             if row is None:
                 raise KeyError(f"job {job_id} not found")
             _check_human_job(row["type"])
@@ -250,26 +210,12 @@ class HumanTaskService:
                 raise PermissionError(
                     f"task claimed by {row['claimed_by']}, cannot release as {who}"
                 )
-            await cur.execute(
-                "UPDATE keelflow_jobs SET status='pending', claimed_by=NULL,"
-                " updated_at=now() WHERE id=%s",
-                (job_id,),
-            )
+            await storage.task_update(
+                nuow, job_id, status="pending", clear_claim=True)
 
-    async def escalate_overdue(self, conn, *, older_than_days: int, to_role: str) -> int:
+    async def escalate_overdue(
+        self, uow, *, older_than_days: int, to_role: str
+    ) -> int:
         """Requeue pending human tasks older than N days to a manager role."""
-        async with conn.cursor() as cur:
-            await cur.execute(
-                """
-                UPDATE keelflow_jobs SET assignee=%s, claimed_by=NULL,
-                       status='pending', updated_at=now()
-                WHERE type LIKE 'human.%%' AND status IN ('pending','claimed')
-                  AND (
-                        (due_at IS NOT NULL AND due_at < now())
-                     OR (due_at IS NULL
-                         AND created_at < now() - %s * interval '1 day')
-                  )
-                """,
-                (f"role:{to_role}", int(older_than_days)),
-            )
-            return cur.rowcount
+        return await self._store().tasks_escalate_overdue(
+            uow, older_than_days, to_role)

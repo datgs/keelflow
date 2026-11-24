@@ -19,7 +19,6 @@ State model (`keelflow_workflow_runs` / `keelflow_step_runs`):
 from __future__ import annotations
 
 import ast
-import json
 import logging
 import re
 import uuid
@@ -30,14 +29,15 @@ from ..sdk import (
     Actor,
     EntityRef,
     JobContext,
+    JobInsert,
     JobStatus,
     Registry,
     RunRef,
     StepSpec,
-    Transaction,
+    Storage,
 )
-from .context import ctx_to_dict
-from .enqueue import _as_cursor
+from ..sdk.uow import nested_scope
+from .context import ctx_from_dict, ctx_to_dict
 
 log = logging.getLogger("keelflow.workflow")
 
@@ -56,50 +56,26 @@ class WorkflowService:
         self._jobs = job_service  # engine.enqueue.JobService (for kernel client)
 
     async def start(
-        self, name: str, inputs: dict, ctx: JobContext, tx: Transaction
+        self, name: str, inputs: dict, ctx: JobContext, uow
     ) -> RunRef:
         defn = self._registry.workflow(name)  # KeyError → unknown
-        cursor = _as_cursor(tx)
+        storage = self._jobs.storage
         run_id = uuid.uuid4()
-        await cursor.execute(
-            "INSERT INTO keelflow_workflow_runs (id, workflow, status, inputs)"
-            " VALUES (%s, %s, %s, %s)",
-            (run_id, name, JobStatus.RUNNING.value, json.dumps(inputs)),
-        )
-        for step in defn.steps:
-            await cursor.execute(
-                "INSERT INTO keelflow_step_runs (id, run_id, step_id, type, status)"
-                " VALUES (%s, %s, %s, %s, %s)",
-                (
-                    uuid.uuid4(),
-                    run_id,
-                    step.id,
-                    step.type,
-                    JobStatus.PENDING.value,
-                ),
-            )
-        await advance_run(cursor, run_id, self._registry, self._jobs.kernel, ctx)
+        await storage.run_insert(
+            uow, str(run_id), name, inputs)
+        await storage.step_runs_insert(
+            uow, str(run_id),
+            [(s.id, s.type) for s in defn.steps])
+        await advance_run(uow, storage, run_id, self._registry,
+                          self._jobs.kernel, ctx)
         return RunRef(id=str(run_id))
 
-    async def get_run(self, conn, run_id: str) -> dict[str, Any] | None:
-        from psycopg.rows import dict_row
-
-        # Normalize to dict_row regardless of caller's connection factory.
-        cur = (conn.connection.cursor(row_factory=dict_row)
-               if hasattr(conn, "connection")
-               else conn.cursor(row_factory=dict_row))
-        row = await (await cur.execute(
-            "SELECT id, workflow, status, inputs, terminal_outcome"
-            " FROM keelflow_workflow_runs WHERE id=%s",
-            (run_id,),
-        )).fetchone()
+    async def get_run(self, uow, run_id: str) -> dict[str, Any] | None:
+        storage = self._jobs.storage
+        row = await storage.run_get(uow, run_id)
         if row is None:
             return None
-        rows = await (await cur.execute(
-            "SELECT step_id, type, status, job_id, outputs, attempts"
-            " FROM keelflow_step_runs WHERE run_id=%s ORDER BY created_at",
-            (run_id,),
-        )).fetchall()
+        rows = await storage.steps_get(uow, run_id)
         defn = self._registry.workflow(row["workflow"])
         needs_by_id = {s.id: list(s.needs) for s in defn.steps}
         steps = [
@@ -122,60 +98,40 @@ class WorkflowService:
         }
 
     async def resume_step(
-        self, conn, run_id: str, step_id: str, ctx: JobContext
+        self, uow, run_id: str, step_id: str, ctx: JobContext
     ) -> None:
         """Re-enqueue a failed step's job (same step_run, attempts + 1).
 
-        Caller owns the transaction (writes through conn's open TX).
+        Writes participate in the caller's unit of work — the caller
+        commits.
         """
-        cur = await conn.execute(
-            "SELECT id, type, status FROM keelflow_step_runs"
-            " WHERE run_id=%s AND step_id=%s",
-            (run_id, step_id),
-        )
-        row = await cur.fetchone()
+        storage = self._jobs.storage
+        row = await storage.step_run_for_update(uow, run_id, step_id)
         if row is None:
             raise KeyError(f"no step_run {step_id} in run {run_id}")
-        step_run_id, _type, status = row
-        if status not in (JobStatus.FAILED.value, JobStatus.DONE.value):
-            raise ValueError(f"step {step_id} is {status}, not resumable")
+        step_run_id = row["id"]
+        if row["status"] not in (JobStatus.FAILED.value, JobStatus.DONE.value):
+            raise ValueError(
+                f"step {step_id} is {row['status']}, not resumable")
 
-        from psycopg.rows import dict_row
-
-        async with conn.cursor(row_factory=dict_row) as cursor:
-            await cursor.execute(
-                "UPDATE keelflow_step_runs SET status=%s, job_id=NULL,"
-                " attempts=attempts+1, updated_at=now() WHERE id=%s",
-                (JobStatus.PENDING.value, step_run_id),
-            )
-            await cursor.execute(
-                "UPDATE keelflow_workflow_runs SET status=%s,"
-                " terminal_outcome=NULL, callback_state='pending',"
-                " updated_at=now() WHERE id=%s",
-                (JobStatus.RUNNING.value, run_id),
-            )
-            await advance_run(cursor, uuid.UUID(str(run_id)), self._registry,
-                              self._jobs.kernel, ctx)
+        await storage.step_reset(uow, str(step_run_id))
+        await storage.run_reopen(uow, run_id)
+        await advance_run(uow, storage, uuid.UUID(str(run_id)),
+                          self._registry, self._jobs.kernel, ctx)
 
     async def resume_run(
-        self, conn, run_id: str, ctx: JobContext
+        self, uow, run_id: str, ctx: JobContext
     ) -> None:
         """Resume a failed or rejected run — continue from the broken step.
 
         Same run ID; successful siblings stay done. Idempotent: calling on
         a non-terminal run is a no-op; calling twice on a terminal run
-        fails the second time (run already 'running').
+        fails the second time (run already 'running'). Writes participate
+        in the caller's unit of work — the caller commits.
         """
-        from psycopg.rows import dict_row
-
-        async with conn.transaction(), conn.cursor(row_factory=dict_row) as cur:
-            await cur.execute(
-                "SELECT status, terminal_outcome, triggered_by_entity_type,"
-                " triggered_by_entity_id FROM keelflow_workflow_runs"
-                " WHERE id=%s FOR UPDATE",
-                (run_id,),
-            )
-            run = await cur.fetchone()
+        storage = self._jobs.storage
+        async with nested_scope(uow) as nuow:
+            run = await storage.run_get(nuow, run_id, for_update=True)
             if run is None:
                 raise KeyError(f"run {run_id} not found")
             outcome = run["terminal_outcome"]
@@ -185,43 +141,25 @@ class WorkflowService:
                     " not resumable"
                 )
             # resume the offending step: rejected human step or failed step
-            await cur.execute(
-                "SELECT id, step_id FROM keelflow_step_runs"
-                " WHERE run_id=%s AND (status='failed' OR"
-                " (status='done' AND outputs->>'decision'='reject'))",
-                (run_id,),
-            )
-            targets = await cur.fetchall()
+            targets = await storage.steps_resumable(nuow, run_id)
             if not targets:
                 raise ValueError(f"run {run_id}: no resumable step")
             for t in targets:
-                await cur.execute(
-                    "UPDATE keelflow_step_runs SET status='pending', job_id=NULL,"
-                    " attempts=attempts+1, updated_at=now() WHERE id=%s",
-                    (t["id"],),
-                )
-            await cur.execute(
-                "UPDATE keelflow_workflow_runs SET status='running',"
-                " terminal_outcome=NULL, callback_state='pending',"
-                " updated_at=now() WHERE id=%s",
-                (run_id,),
-            )
-            await advance_run(cur, uuid.UUID(str(run_id)), self._registry,
-                              self._jobs.kernel, ctx)
+                await storage.step_reset(nuow, str(t["id"]))
+            await storage.run_reopen(nuow, run_id)
+            await advance_run(nuow, storage, uuid.UUID(str(run_id)),
+                              self._registry, self._jobs.kernel, ctx)
             # entity back to posting/in-progress state via SM (internal)
             et = run["triggered_by_entity_type"]
             ei = run["triggered_by_entity_id"]
             if et and ei:
                 sm_svc = self._sm_service()
-                cur2 = await cur.execute(
-                    "SELECT state FROM keelflow_entity_state"
-                    " WHERE entity_type=%s AND entity_id=%s", (et, ei))
-                es = await cur2.fetchone()
-                back_action = self._resume_action(
-                    et, es["state"] if es else None)
+                es = await storage.entity_state(nuow, et, ei)
+                back_action = self._resume_action(et, es)
                 if back_action:
                     await sm_svc._internal_transition(
-                        cur, EntityRef(type=et, id=ei), back_action, ctx)
+                        nuow, storage, EntityRef(type=et, id=ei),
+                        back_action, ctx)
 
 
     def _sm_service(self):
@@ -256,7 +194,8 @@ class WorkflowService:
 
 
 async def advance_run(
-    cursor,
+    uow,
+    storage: Storage,
     run_id,
     registry: Registry,
     kernel,
@@ -264,18 +203,18 @@ async def advance_run(
 ) -> None:
     """Enqueue jobs for steps whose needs are satisfied; close the run out.
 
-    Must be called inside a transaction on `cursor`. Idempotent — a step_run
+    Must be called inside an open unit of work. Idempotent — a step_run
     with a job_id already attached is never re-enqueued.
     """
     # Lock the run row first: parallel step completions each call this in
     # their own TX — without the lock the second advance reads a stale
     # snapshot (sees the sibling still 'running'), enqueues nothing, and
     # nobody ever re-advances the run. Serializes single-writer per run.
-    run_row = await _fetch_run(cursor, run_id, for_update=True)
+    run_row = await storage.run_get(uow, run_id, for_update=True)
     if run_row is None or run_row["status"] != JobStatus.RUNNING.value:
         return
     defn = registry.workflow(run_row["workflow"])
-    step_runs = await _fetch_steps(cursor, run_id)
+    step_runs = await storage.steps_get(uow, run_id)
 
     # Definition drift: the workflow def was edited without a version
     # bump while this run was in flight (Temporal's classic versioning
@@ -283,7 +222,7 @@ async def advance_run(
     # forever (removed step) or silently short-circuiting (added step).
     defn_ids = {s.id for s in defn.steps}
     if {s["step_id"] for s in step_runs} != defn_ids:
-        await _finish_run(cursor, run_id, registry, "failed", step_runs)
+        await _finish_run(uow, storage, run_id, registry, "failed", step_runs)
         return
 
     # terminal state check — 'cancelled' steps can't satisfy their
@@ -293,14 +232,14 @@ async def advance_run(
               if s["status"] in ("pending", "claimed", "running", "blocked")]
     failed = [s for s in step_runs if s["status"] == "failed"]
     if failed:
-        await _finish_run(cursor, run_id, registry, "failed", step_runs)
+        await _finish_run(uow, storage, run_id, registry, "failed", step_runs)
         return
     if any(s["status"] == "cancelled" for s in step_runs):
-        await _finish_run(cursor, run_id, registry, "cancelled", step_runs)
+        await _finish_run(uow, storage, run_id, registry, "cancelled", step_runs)
         return
     if not active:
         outcome = _terminal_outcome(step_runs)
-        await _finish_run(cursor, run_id, registry, outcome, step_runs)
+        await _finish_run(uow, storage, run_id, registry, outcome, step_runs)
         return
     # human steps park the run without a machine job to wait on — still
     # 'running' while any human step is pending.
@@ -320,54 +259,51 @@ async def advance_run(
         # savepoint: a deterministic failure marks the step failed, which
         # fails the run but stays resumable via resume_step.
         try:
-            async with cursor.connection.transaction():
+            async with nested_scope(uow) as nuow:
                 # if: guard — false means skip the step entirely.
                 if spec_step.if_expr is not None and not eval_guard(
                     spec_step.if_expr, run_row["inputs"], step_runs, registry
                 ):
-                    await _set_step_status(cursor, sr["id"], "skipped")
+                    await storage.step_set_status(nuow, str(sr["id"]), "skipped")
                     done_ids.add(spec_step.id)
                     skipped_ids.add(sr["id"])
                     continue
                 spec = registry.job_type(spec_step.type)
-                if spec.is_wait:
+                if spec.is_external_wait:
                     await _enqueue_wait_step(
-                        cursor, sr, spec_step, spec, run_row, step_runs,
+                        nuow, storage, sr, spec_step, spec, run_row, step_runs,
                         parent_ctx)
                 elif spec_step.type.startswith("human."):
                     await _enqueue_human_step(
-                        cursor, sr, spec_step, spec, run_row, step_runs,
+                        nuow, storage, sr, spec_step, spec, run_row, step_runs,
                         parent_ctx, kernel)
                 else:
                     await _enqueue_step(
-                        cursor, sr, spec_step, spec, run_row, step_runs,
+                        nuow, storage, sr, spec_step, spec, run_row, step_runs,
                         parent_ctx, kernel)
         except Exception as exc:
             log.exception(
                 "advance %s: step %s failed to start", run_id, spec_step.id)
-            await cursor.execute(
-                "UPDATE keelflow_step_runs SET status='failed',"
-                " outputs=%s, updated_at=now() WHERE id=%s",
-                (json.dumps({"error": str(exc)}), sr["id"]),
-            )
+            await storage.step_fail(uow, str(sr["id"]), str(exc))
             sr["status"] = "failed"
 
     # Re-check: a pass that only marked guard-false steps 'skipped' may
     # leave every step terminal while nothing was enqueued — without this,
     # such a run would stay 'running' forever.
     if any(s["status"] == "failed" for s in step_runs):
-        await _finish_run(cursor, run_id, registry, "failed", step_runs)
+        await _finish_run(uow, storage, run_id, registry, "failed", step_runs)
     elif not any(
         s["status"] in ("pending", "claimed", "running", "blocked")
         for s in step_runs
         if s["id"] not in skipped_ids
     ):
-        await _finish_run(cursor, run_id, registry,
+        await _finish_run(uow, storage, run_id, registry,
                           _terminal_outcome(step_runs), step_runs)
 
 
 async def on_job_finished(
-    conn,
+    uow,
+    storage: Storage,
     kernel,
     registry: Registry,
     job_id: str,
@@ -378,33 +314,26 @@ async def on_job_finished(
     """Hook from worker.dispatch / human.complete: record step outcome and
     advance the run.
 
-    Caller owns the transaction — this function only writes through the
-    connection's current TX. Commit is the caller's responsibility
-    (worker finish TX or human.complete TX), so step bookkeeping commits
-    atomically with the job status.
+    Caller owns the unit of work — this function only writes through it.
+    Commit is the caller's responsibility (worker finish UoW or
+    human.complete UoW), so step bookkeeping commits atomically with the
+    job status.
     """
     if not step_run_id:
         return
-    from psycopg.rows import dict_row
-
-    async with conn.cursor(row_factory=dict_row) as cursor:
-        sr_status = (
-            "done" if status == JobStatus.DONE else
-            "failed" if status == JobStatus.FAILED else
-            JobStatus.CANCELLED.value
-        )
-        await cursor.execute(
-            "UPDATE keelflow_step_runs SET status=%s, outputs=%s,"
-            " outputs_bytes=%s, updated_at=now() WHERE id=%s",
-            (sr_status, json.dumps(outputs),
-             len(json.dumps(outputs).encode()), step_run_id),
-        )
-        row = await (await cursor.execute(
-            "SELECT run_id FROM keelflow_step_runs WHERE id=%s", (step_run_id,)
-        )).fetchone()
-        if row:
-            parent_ctx = await _run_ctx(cursor, row["run_id"])
-            await advance_run(cursor, row["run_id"], registry, kernel, parent_ctx)
+    sr_status = (
+        "done" if status == JobStatus.DONE else
+        "failed" if status == JobStatus.FAILED else
+        JobStatus.CANCELLED.value
+    )
+    await storage.step_settle(uow, str(step_run_id), sr_status, outputs)
+    sr = await storage.step_run_get(uow, str(step_run_id))
+    if sr:
+        ctx_d = await storage.run_parent_ctx(uow, sr["run_id"])
+        parent_ctx = ctx_from_dict(ctx_d) if ctx_d else JobContext(
+            actor=Actor.system())
+        await advance_run(uow, storage, sr["run_id"], registry, kernel,
+                          parent_ctx)
 
 
 def _postgres_audit():
@@ -433,11 +362,12 @@ def _terminal_outcome(step_runs: list[dict]) -> str:
 
 
 async def _finish_run(
-    cursor, run_id, registry: Registry, outcome: str, step_runs
+    uow, storage: Storage, run_id, registry: Registry, outcome: str,
+    step_runs,
 ) -> None:
     """Terminalize the run and fire the workflow trigger callback.
 
-    Inside the caller's TX: set status + terminal_outcome, then apply the
+    Inside the caller's UoW: set status + terminal_outcome, then apply the
     configured SM transition on the entity that triggered the run.
     Callback failure propagates → the terminal update rolls back → kernel
     or caller retry replays it (idempotent because callback_state stays
@@ -448,32 +378,24 @@ async def _finish_run(
         "rejected": JobStatus.DONE.value,
         "cancelled": JobStatus.CANCELLED.value,
     }.get(outcome, JobStatus.FAILED.value)
-    await cursor.execute(
-        "UPDATE keelflow_workflow_runs SET status=%s, terminal_outcome=%s,"
-        " updated_at=now() WHERE id=%s",
-        (status, outcome, run_id),
-    )
-    await _run_trigger_callback(cursor, run_id, registry, outcome)
+    await storage.run_finish(uow, run_id, status, outcome)
+    await _run_trigger_callback(uow, storage, run_id, registry, outcome)
 
 
-async def _run_trigger_callback(cursor, run_id, registry, outcome: str) -> None:
+async def _run_trigger_callback(
+    uow, storage: Storage, run_id, registry, outcome: str
+) -> None:
     """Apply the trigger's SM callback transition for the outcome.
 
     Exactly-once: guarded by callback_state 'pending' → 'done' in the
     same TX; a rolled-back TX leaves it pending → retried on next advance.
     """
-    await cursor.execute(
-        "SELECT triggered_by_entity_type, triggered_by_entity_id,"
-        " trigger_config, trigger_ctx, callback_state"
-        " FROM keelflow_workflow_runs WHERE id=%s FOR UPDATE",
-        (run_id,),
-    )
-    run = await cursor.fetchone()
+    run = await storage.trigger_callback_lock(uow, run_id)
     if not run or run["callback_state"] != "pending":
         return
     config = run["trigger_config"] or {}
     action = {
-        "succeeded": config.get("on_done"),
+        "succeeded": config.get("on_succeeded"),
         "rejected": config.get("on_rejected"),
         "failed": config.get("on_failed"),
         # a cancelled run is a terminal failure from the entity's
@@ -483,7 +405,6 @@ async def _run_trigger_callback(cursor, run_id, registry, outcome: str) -> None:
 
     if action and run["triggered_by_entity_type"]:
         from ..sdk import EntityRef
-        from .context import ctx_from_dict
         from .statemachine import EngineStateMachineService
 
         ctx_d = run["trigger_ctx"] or {}
@@ -495,19 +416,17 @@ async def _run_trigger_callback(cursor, run_id, registry, outcome: str) -> None:
         )
         sm_svc = EngineStateMachineService(registry,
                                            audit=_postgres_audit())
-        await sm_svc._internal_transition(cursor, entity, action, ctx)
+        await sm_svc._internal_transition(uow, storage, entity, action, ctx)
         # optional failure-side human task
         if outcome == "failed" and config.get("failure_job"):
-            await _spawn_failure_task(cursor, registry, config["failure_job"],
-                                      entity, ctx)
-    await cursor.execute(
-        "UPDATE keelflow_workflow_runs SET callback_state='done', updated_at=now()"
-        " WHERE id=%s",
-        (run_id,),
-    )
+            await _spawn_failure_task(uow, storage, registry,
+                                      config["failure_job"], entity, ctx)
+    await storage.run_mark_callback_done(uow, run_id)
 
 
-async def _spawn_failure_task(cursor, registry, type_name, entity, ctx) -> None:
+async def _spawn_failure_task(
+    uow, storage: Storage, registry, type_name, entity, ctx
+) -> None:
     """Create the configured human fix-up task on run failure."""
     spec = registry.job_type(type_name)
     job_id = uuid.uuid4()
@@ -518,59 +437,46 @@ async def _spawn_failure_task(cursor, registry, type_name, entity, ctx) -> None:
         extra={"job_id": str(job_id)},
     )
     now = datetime.now(UTC)
-    await cursor.execute(
-        "INSERT INTO keelflow_jobs (id, type, status, payload, context,"
-        " max_attempts, run_at, assignee, due_at, created_at, updated_at)"
-        " VALUES (%s,%s,'pending',%s,%s,%s,%s,%s,%s,%s,%s)",
-        (
-            job_id, type_name,
-            json.dumps({"entity_type": entity.type, "entity_id": entity.id}),
-            json.dumps(ctx_to_dict(child_ctx)),
-            spec.retry.max_attempts if spec.retry else 3,
-            now, spec.ui and f"role:{spec.ui.assignee_role}",
-            _spec_due_at(spec, now), now, now,
-        ),
-    )
+    await storage.job_insert(uow, JobInsert(
+        id=str(job_id), type=type_name,
+        payload={"entity_type": entity.type, "entity_id": entity.id},
+        context=ctx_to_dict(child_ctx),
+        max_attempts=spec.retry.max_attempts if spec.retry else 3,
+        run_at=now,
+        assignee=(spec.human_task
+            and f"role:{spec.human_task.assignee_role}"),
+        due_at=_spec_due_at(spec, now),
+    ))
 
 
 # ── step enqueue helpers ──────────────────────────────────────────────────
 
 
 async def _enqueue_step(
-    cursor, sr, spec_step: StepSpec, spec, run_row, step_runs, parent_ctx, kernel
+    uow, storage: Storage, sr, spec_step: StepSpec, spec, run_row,
+    step_runs, parent_ctx, kernel,
 ) -> None:
     inputs = resolve_inputs(spec_step.input, run_row["inputs"], step_runs)
     job_id = uuid.uuid4()
     child_ctx = _child_ctx(parent_ctx, job_id)
     now = datetime.now(UTC)
 
-    await cursor.execute(
-        """
-        INSERT INTO keelflow_jobs
-            (id, type, status, payload, context, attempts, max_attempts,
-             run_at, claimed_by, lease_until, concurrency_key, assignee,
-             parent_job_id, result, created_at, updated_at)
-        VALUES (%s,%s,%s,%s,%s,0,%s,%s,NULL,NULL,NULL,NULL,NULL,NULL,%s,%s)
-        """,
-        (
-            job_id, spec_step.type, JobStatus.PENDING.value,
-            json.dumps(inputs), json.dumps(ctx_to_dict(child_ctx)),
-            spec.retry.max_attempts if spec.retry else 3, now, now, now,
-        ),
-    )
+    await storage.job_insert(uow, JobInsert(
+        id=str(job_id), type=spec_step.type, payload=inputs,
+        context=ctx_to_dict(child_ctx),
+        max_attempts=spec.retry.max_attempts if spec.retry else 3,
+        run_at=now,
+    ))
     await kernel.push_ex(
-        cursor,
+        uow,
         _kernel_job(job_id, spec_step.type, spec, step_run_id=sr["id"]),
     )
-    await cursor.execute(
-        "UPDATE keelflow_step_runs SET job_id=%s, status=%s, updated_at=now()"
-        " WHERE id=%s",
-        (job_id, "claimed", sr["id"]),
-    )
+    await storage.step_attach_job(uow, str(sr["id"]), str(job_id), "claimed")
 
 
 async def _enqueue_human_step(
-    cursor, sr, spec_step, spec, run_row, step_runs, parent_ctx, kernel
+    uow, storage: Storage, sr, spec_step, spec, run_row, step_runs,
+    parent_ctx, kernel,
 ) -> None:
     """Human step: durable job row, no kernel claim (people claim via Inbox)."""
     inputs = resolve_inputs(spec_step.input, run_row["inputs"], step_runs)
@@ -578,30 +484,21 @@ async def _enqueue_human_step(
     child_ctx = _child_ctx(parent_ctx, job_id)
     now = datetime.now(UTC)
 
-    await cursor.execute(
-        """
-        INSERT INTO keelflow_jobs
-            (id, type, status, payload, context, attempts, max_attempts,
-             run_at, claimed_by, lease_until, concurrency_key, assignee,
-             due_at, parent_job_id, result, created_at, updated_at)
-        VALUES (%s,%s,%s,%s,%s,0,%s,%s,NULL,NULL,NULL,%s,%s,NULL,NULL,%s,%s)
-        """,
-        (
-            job_id, spec_step.type, JobStatus.PENDING.value,
-            json.dumps(inputs), json.dumps(ctx_to_dict(child_ctx)),
-            spec.retry.max_attempts if spec.retry else 3,
-            now, _spec_assignee(spec), _spec_due_at(spec, now), now, now,
-        ),
-    )
-    await cursor.execute(
-        "UPDATE keelflow_step_runs SET job_id=%s, status=%s, updated_at=now()"
-        " WHERE id=%s",
-        (job_id, JobStatus.BLOCKED.value, sr["id"]),
-    )
+    await storage.job_insert(uow, JobInsert(
+        id=str(job_id), type=spec_step.type, payload=inputs,
+        context=ctx_to_dict(child_ctx),
+        max_attempts=spec.retry.max_attempts if spec.retry else 3,
+        run_at=now,
+        assignee=_spec_assignee(spec),
+        due_at=_spec_due_at(spec, now),
+    ))
+    await storage.step_attach_job(
+        uow, str(sr["id"]), str(job_id), JobStatus.BLOCKED.value)
 
 
 async def _enqueue_wait_step(
-    cursor, sr, spec_step, spec, run_row, step_runs, parent_ctx
+    uow, storage: Storage, sr, spec_step, spec, run_row, step_runs,
+    parent_ctx,
 ) -> None:
     """External-wait step: durable job row, no kernel claim — the
     application resolves it via JobService.signal after its own
@@ -613,36 +510,20 @@ async def _enqueue_wait_step(
     child_ctx = _child_ctx(parent_ctx, job_id)
     now = datetime.now(UTC)
 
-    await cursor.execute(
-        """
-        INSERT INTO keelflow_jobs
-            (id, type, status, payload, context, attempts, max_attempts,
-             run_at, claimed_by, lease_until, concurrency_key, assignee,
-             due_at, parent_job_id, result, created_at, updated_at)
-        VALUES (%s,%s,%s,%s,%s,0,%s,%s,NULL,NULL,NULL,NULL,NULL,NULL,NULL,%s,%s)
-        """,
-        (
-            job_id, spec_step.type, JobStatus.PENDING.value,
-            json.dumps(inputs), json.dumps(ctx_to_dict(child_ctx)),
-            spec.retry.max_attempts if spec.retry else 3,
-            now, now, now,
-        ),
-    )
-    await cursor.execute(
-        "UPDATE keelflow_step_runs SET job_id=%s, status=%s, updated_at=now()"
-        " WHERE id=%s",
-        (job_id, JobStatus.BLOCKED.value, sr["id"]),
-    )
-    await cursor.execute(
-        "INSERT INTO keelflow_outbox (event_type, payload)"
-        " VALUES ('wait.opened', %s)",
-        (json.dumps({
-            "job_id": str(job_id),
-            "type": spec_step.type,
-            "step_id": spec_step.id,
-            "run_id": str(run_row["id"]),
-        }),),
-    )
+    await storage.job_insert(uow, JobInsert(
+        id=str(job_id), type=spec_step.type, payload=inputs,
+        context=ctx_to_dict(child_ctx),
+        max_attempts=spec.retry.max_attempts if spec.retry else 3,
+        run_at=now,
+    ))
+    await storage.step_attach_job(
+        uow, str(sr["id"]), str(job_id), JobStatus.BLOCKED.value)
+    await storage.outbox_insert(uow, "wait.opened", {
+        "job_id": str(job_id),
+        "type": spec_step.type,
+        "step_id": spec_step.id,
+        "run_id": str(run_row["id"]),
+    })
 
 
 def _kernel_job(job_id, type_name: str, spec, *, step_run_id):
@@ -658,17 +539,17 @@ def _kernel_job(job_id, type_name: str, spec, *, step_run_id):
 
 
 def _spec_assignee(spec) -> str | None:
-    ui = getattr(spec, "ui", None)
-    if ui and getattr(ui, "assignee_role", None):
-        return f"role:{ui.assignee_role}"
+    opts = getattr(spec, "human_task", None)
+    if opts and getattr(opts, "assignee_role", None):
+        return f"role:{opts.assignee_role}"
     return None
 
 
 def _spec_due_at(spec, now: datetime) -> datetime | None:
-    """Human task SLA deadline from ui.due_in_seconds (None = no SLA)."""
-    ui = getattr(spec, "ui", None)
-    if ui and getattr(ui, "due_in_seconds", None):
-        return now + timedelta(seconds=ui.due_in_seconds)
+    """Human task SLA deadline from human_task.due_in_seconds (None = no SLA)."""
+    opts = getattr(spec, "human_task", None)
+    if opts and getattr(opts, "due_in_seconds", None):
+        return now + timedelta(seconds=opts.due_in_seconds)
     return None
 
 
@@ -764,66 +645,6 @@ def eval_guard(expr: str, run_inputs: dict, step_runs: list[dict], _registry=Non
         "steps": {s["step_id"]: s["outputs"] or {} for s in step_runs},
     }
     return bool(eval(compile(tree, "<guard>", "eval"), {"__builtins__": {}}, scope))
-
-
-# ── db helpers ────────────────────────────────────────────────────────────
-
-
-async def _fetch_run(cursor, run_id, *, for_update: bool = False) -> dict[str, Any] | None:
-    from psycopg.rows import dict_row
-
-    cur = cursor.connection.cursor(row_factory=dict_row) if hasattr(cursor, "connection") else cursor
-    await cur.execute(
-        "SELECT id, workflow, status, inputs FROM keelflow_workflow_runs"
-        f" WHERE id=%s{' FOR UPDATE' if for_update else ''}",
-        (run_id,),
-    )
-    return await cur.fetchone()
-
-
-async def _fetch_steps(cursor, run_id) -> list[dict[str, Any]]:
-    from psycopg.rows import dict_row
-
-    cur = cursor.connection.cursor(row_factory=dict_row) if hasattr(cursor, "connection") else cursor
-    await cur.execute(
-        "SELECT id, step_id, type, status, job_id, outputs, attempts"
-        " FROM keelflow_step_runs WHERE run_id=%s",
-        (run_id,),
-    )
-    return await cur.fetchall()
-
-
-async def _set_run_status(cursor, run_id, status: JobStatus) -> None:
-    await cursor.execute(
-        "UPDATE keelflow_workflow_runs SET status=%s, updated_at=now() WHERE id=%s",
-        (status.value, run_id),
-    )
-
-
-async def _set_step_status(cursor, step_run_id, status: str) -> None:
-    await cursor.execute(
-        "UPDATE keelflow_step_runs SET status=%s, updated_at=now() WHERE id=%s",
-        (status, step_run_id),
-    )
-
-
-async def _run_ctx(cursor, run_id) -> JobContext:
-    """Rebuild the parent ctx for a run's next-step jobs from its first job."""
-    cur = await cursor.execute(
-        "SELECT context FROM keelflow_jobs j"
-        " JOIN keelflow_step_runs sr ON sr.job_id = j.id"
-        " WHERE sr.run_id=%s ORDER BY j.created_at LIMIT 1",
-        (run_id,),
-    )
-    row = await cur.fetchone()
-    if row:
-        from .context import ctx_from_dict
-
-        ctx_d = row["context"] if "context" in row else row[0]
-        if isinstance(ctx_d, str):
-            ctx_d = json.loads(ctx_d)
-        return ctx_from_dict(ctx_d)
-    return JobContext(actor=Actor.system())
 
 
 def _child_ctx(parent: JobContext, job_id) -> JobContext:

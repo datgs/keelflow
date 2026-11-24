@@ -25,6 +25,7 @@ from keelflow.engine.bulk import (
 from keelflow.engine.enqueue import JobService
 from keelflow.engine.registry import InMemoryRegistry
 from keelflow.postgres.schema import apply_async
+from keelflow.postgres.storage import PostgresStorage
 from keelflow.sdk import (
     Actor,
     BatchRowResult,
@@ -149,7 +150,7 @@ async def env(db):
         reg.register_job_type(
             JobTypeSpec(type="imp.flaky@v1", input_schema=Payload, handler=_FlakyH)
         )
-        jobs = JobService(reg, kernel)
+        jobs = JobService(reg, kernel, PostgresStorage(DSN))
         worker_mod.configure(registry=reg, dsn=DSN, kernel=kernel)
         yield {"reg": reg, "jobs": jobs, "kernel": kernel}
 

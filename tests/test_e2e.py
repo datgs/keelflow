@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+from contextlib import asynccontextmanager
 
 import psycopg
 import pytest
@@ -34,6 +35,7 @@ from keelflow.engine.human import HumanTaskService
 from keelflow.engine.registry import InMemoryRegistry
 from keelflow.engine.statemachine import EngineStateMachineService
 from keelflow.postgres.schema import apply_async
+from keelflow.postgres.storage import PostgresStorage
 from keelflow.sdk import (
     Actor,
     EntityRef,
@@ -180,12 +182,27 @@ async def env(db):
             ),
             initial="draft",
         ))
-        jobs = JobService(reg, kernel)
-        worker_mod.configure(registry=reg, dsn=DSN, kernel=kernel)
-        sm = EngineStateMachineService(reg, kernel)
-        human = HumanTaskService(reg, kernel)
+        storage = PostgresStorage(DSN)
+        jobs = JobService(reg, kernel, storage)
+        worker_mod.configure(registry=reg, dsn=DSN, kernel=kernel,
+                             storage=storage)
+        sm = EngineStateMachineService(reg, kernel, storage=storage)
+        human = HumanTaskService(reg, kernel, storage=storage)
         yield {"reg": reg, "jobs": jobs, "sm": sm, "human": human,
-               "kernel": kernel, "audit": PostgresAuditService()}
+               "kernel": kernel, "audit": PostgresAuditService(storage),
+               "storage": storage}
+
+
+@asynccontextmanager
+async def _uow(env):
+    """One unit of work on a fresh session (the enqueue/transition
+    boundary a real app would use)."""
+    sess = await env["storage"].connect()
+    try:
+        async with sess.begin() as uow:
+            yield uow
+    finally:
+        await sess.close()
 
 
 async def _wait(db, sql, pred, timeout=20.0):
@@ -203,13 +220,10 @@ async def test_e2e_scenario(env, db):
 
     # ── 1. bulk import ──────────────────────────────────────────────
     keys = [f"SKU-{i}" for i in range(49)] + ["BAD-1"]
-    async with (
-        await _conn(autocommit=False) as conn,
-        conn.transaction(),
-        conn.cursor() as cur,
-    ):
+    async with _uow(env) as uow:
         ref = await env["jobs"].builder("imp.orders@v1").context(ctx)\
-            .payload({"chunk_size": 10, "atomic": "row"}).enqueue(cur)
+            .payload({"chunk_size": 10, "atomic": "row"}).enqueue(uow)
+        cur = uow.native.cursor()
         for k in keys:
             await cur.execute(
                 "INSERT INTO keelflow_row_status (job_id, row_key, status, data)"
@@ -250,13 +264,9 @@ async def test_e2e_scenario(env, db):
         assert chunks[0] == 5
 
         # ── 2. flaky retry → done ───────────────────────────────────
-        async with (
-            await _conn(autocommit=False) as conn,
-            conn.transaction(),
-            conn.cursor() as cur,
-        ):
+        async with _uow(env) as uow:
             fref = await env["jobs"].builder("flaky@v1").context(ctx)\
-                .payload({}).enqueue(cur)
+                .payload({}).enqueue(uow)
         for _ in range(200):
             row = await (await db.execute(
                 "SELECT status FROM keelflow_jobs WHERE id=%s", (fref.id,)
@@ -269,12 +279,8 @@ async def test_e2e_scenario(env, db):
 
         # ── 3. order → review → approve → workflow ──────────────────
         order = EntityRef(type="order", id="SO-1")
-        async with (
-            await _conn(autocommit=False) as conn,
-            conn.transaction(),
-            conn.cursor() as cur,
-        ):
-            await env["sm"].transition(order, "submit", ctx, cur)
+        async with _uow(env) as uow:
+            await env["sm"].transition(order, "submit", ctx, uow)
         # human task appears for finance
         tasks = await env["human"].my_tasks(db, Actor.user("fin1"),
                                             roles=["finance"])
@@ -283,17 +289,16 @@ async def test_e2e_scenario(env, db):
         assert await env["sm"].current(order, db) == "in_review"
         # claim + complete
         tid = str(tasks[0]["id"])
-        await env["human"].claim(db, tid, Actor.user("fin1"),
-                                             roles=["finance"])
-        await env["human"].complete(
-            db, tid, Actor.user("fin1"), {"ok": True}, roles=["finance"])
+        async with _uow(env) as uow:
+            await env["human"].claim(uow, tid, Actor.user("fin1"),
+                                   roles=["finance"])
+        async with _uow(env) as uow:
+            await env["human"].complete(
+                uow, tid, Actor.user("fin1"), {"ok": True},
+                roles=["finance"])
         # approve triggers workflow
-        async with (
-            await _conn(autocommit=False) as conn,
-            conn.transaction(),
-            conn.cursor() as cur,
-        ):
-            await env["sm"].transition(order, "approve", ctx, cur)
+        async with _uow(env) as uow:
+            await env["sm"].transition(order, "approve", ctx, uow)
         assert await env["sm"].current(order, db) == "approved"
         # workflow runs through both steps
         for _ in range(200):
@@ -307,13 +312,9 @@ async def test_e2e_scenario(env, db):
         assert row[0] == "done"
 
         # ── 4. kill-resume: worker dies mid-job ─────────────────────
-        async with (
-            await _conn(autocommit=False) as conn,
-            conn.transaction(),
-            conn.cursor() as cur,
-        ):
+        async with _uow(env) as uow:
             sref = await env["jobs"].builder("slow@v1").context(ctx)\
-                .payload({"sleep": 0.4}).enqueue(cur)
+                .payload({"sleep": 0.4}).enqueue(uow)
         # The job must actually be claimed before the kill — otherwise
         # the scenario degenerates to plain enqueue→run and never
         # exercises recovery. ('done' is possible if the executor let
@@ -367,11 +368,7 @@ async def test_e2e_scenario(env, db):
     # ── 5. audit trail ──────────────────────────────────────────────
     from keelflow.sdk import AuditEvent
 
-    async with (
-        await _conn(autocommit=False) as conn,
-        conn.transaction(),
-        conn.cursor() as cur,
-    ):
+    async with _uow(env) as uow:
         await env["audit"].record(
             AuditEvent(
                 actor=Actor.user("u1"),
@@ -380,7 +377,7 @@ async def test_e2e_scenario(env, db):
                 changes={"status": ("in_review", "approved")},
                 source="e2e",
             ),
-            cur,
+            uow,
         )
     events = await env["audit"].trace(db, EntityRef(type="order", id="SO-1"))
     assert any(e["action"] == "order.approve" for e in events)

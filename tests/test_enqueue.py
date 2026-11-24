@@ -17,6 +17,7 @@ from pydantic import BaseModel
 from keelflow.engine.enqueue import EnqueueError, JobService
 from keelflow.engine.registry import InMemoryRegistry
 from keelflow.postgres.schema import apply_async
+from keelflow.postgres.storage import PostgresStorage
 from keelflow.sdk import (
     Actor,
     JobContext,
@@ -87,7 +88,7 @@ async def service(kernel):
     reg.register_job_type(
         JobTypeSpec(type="invoice.match@v1", input_schema=Payload, handler=_Noop)
     )
-    return JobService(reg, kernel)
+    return JobService(reg, kernel, PostgresStorage(DSN))
 
 
 async def _count(conn, table: str, job_id: str | None = None) -> int:
@@ -194,13 +195,13 @@ async def test_unique_key_idempotent_enqueue(service, db, kernel):
     async with await _connect() as conn, conn.transaction(), conn.cursor() as cur:
         first = await service.builder("invoice.match@v1") \
             .context(_ctx()).payload(Payload(invoice_id="inv-1")) \
-            .unique_key("k-1").enqueue(cur)
+            .deduplication_key("k-1").enqueue(cur)
         second = await service.builder("invoice.match@v1") \
             .context(_ctx()).payload(Payload(invoice_id="inv-1")) \
-            .unique_key("k-1").enqueue(cur)
+            .deduplication_key("k-1").enqueue(cur)
         third = await service.builder("invoice.match@v1") \
             .context(_ctx()).payload(Payload(invoice_id="inv-2")) \
-            .unique_key("k-2").enqueue(cur)
+            .deduplication_key("k-2").enqueue(cur)
     assert second.id == first.id                 # dedup — same job
     assert third.id != first.id                  # different key -> new job
     assert await _count(db, "keelflow_jobs") == 2
@@ -222,12 +223,12 @@ async def test_unique_key_released_when_terminal(service, db):
     async with await _connect() as conn, conn.transaction(), conn.cursor() as cur:
         first = await service.builder("invoice.match@v1") \
             .context(_ctx()).payload(Payload(invoice_id="inv-1")) \
-            .unique_key("k-reuse").enqueue(cur)
+            .deduplication_key("k-reuse").enqueue(cur)
     await db.execute(
         "UPDATE keelflow_jobs SET status='done' WHERE id=%s", (first.id,))
     async with await _connect() as conn, conn.transaction(), conn.cursor() as cur:
         second = await service.builder("invoice.match@v1") \
             .context(_ctx()).payload(Payload(invoice_id="inv-1")) \
-            .unique_key("k-reuse").enqueue(cur)
+            .deduplication_key("k-reuse").enqueue(cur)
     assert second.id != first.id
     assert await _count(db, "keelflow_jobs") == 2

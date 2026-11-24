@@ -6,7 +6,7 @@
 builder(type)                      # registered type "name@vN", else reject
   .context(ctx)                    # REQUIRED — missing → EnqueueError
   .payload(p)                      # schema-validated at enqueue
-  [.run_at(t)] [.concurrency_key(k)] [.unique_key(k)] [.queue(q)]
+  [.run_at(t)] [.concurrency_key(k)] [.deduplication_key(k)] [.queue(q)]
   .enqueue(tx)                     # inside caller transaction
 ```
 
@@ -21,7 +21,7 @@ MUST, atomically in `tx`:
 
 Rollback of `tx` MUST leave no trace in any of the three.
 
-`.unique_key(k)` — idempotent enqueue. A partial unique index on
+`.deduplication_key(k)` — idempotent enqueue. A partial unique index on
 `(type, unique_key)` over non-terminal statuses
 (`pending|claimed|running|blocked`) means a duplicate enqueue
 **returns the existing job's `JobRef`** — the kernel job and outbox
@@ -103,7 +103,7 @@ kernel claims job → dispatch(job_id)
   exist (registry must be passed), otherwise it re-enqueues the
   payload as a fresh standalone job.
 
-## Wait jobs (`is_wait`, `type` in `wait.*`)
+## Wait jobs (`is_external_wait`, `type` in `wait.*`)
 
 An external-wait type is materialized by workflow steps only — direct
 `builder(...).enqueue()` is rejected. The job row is inserted `pending`

@@ -25,6 +25,27 @@ from typing import Any, Protocol, runtime_checkable
 from .services import AuditEvent, JobStatus
 from .uow import Session, UnitOfWork
 
+
+def json_default(o: Any) -> Any:
+    """JSON fallback for engine payloads (Enum, dataclass, set, datetime).
+
+    Adapters use this when serializing `payload`/`context`/`outputs`/
+    `result` so values written through the port survive round-trips.
+    """
+    from dataclasses import asdict, is_dataclass
+    from enum import Enum
+
+    if isinstance(o, Enum):
+        return o.value
+    if is_dataclass(o) and not isinstance(o, type):
+        return asdict(o)
+    if isinstance(o, frozenset | set):
+        return list(o)
+    if isinstance(o, datetime):
+        return o.isoformat()
+    return str(o)
+
+
 # ── write payloads ────────────────────────────────────────────────────
 
 
@@ -296,6 +317,13 @@ class Storage(Protocol):
         """Row-lock run for the exactly-once trigger callback check."""
         ...
 
+    async def run_parent_ctx(
+        self, uow: UnitOfWork, run_id: str
+    ) -> dict[str, Any] | None:
+        """Serialized JobContext dict of the run's first step job — the
+        ctx children inherit on resume/advance."""
+        ...
+
     # ── bulk ─────────────────────────────────────────────────────
 
     async def bulk_pending_count(self, uow: UnitOfWork, job_id: str) -> int:
@@ -340,6 +368,13 @@ class Storage(Protocol):
         status: str,
         result: dict[str, Any] | None = None,
     ) -> None: ...
+
+    async def chunk_cancel(
+        self, uow: UnitOfWork, chunk_id: str
+    ) -> None:
+        """Mark cancelled only when not already terminal — the
+        settle-cancelled-chunk path is idempotent."""
+        ...
 
     async def chunk_counts(self, uow: UnitOfWork, job_id: str) -> dict[str, int]: ...
 
@@ -420,6 +455,10 @@ class Storage(Protocol):
         ...
 
     # ── monitoring / ops ─────────────────────────────────────────
+
+    async def ops_runs_list(
+        self, uow: UnitOfWork, *, limit: int = 50
+    ) -> list[dict[str, Any]]: ...
 
     async def ops_jobs_list(
         self,

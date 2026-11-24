@@ -80,9 +80,10 @@ class SQLiteKernel:
 
     # ── dispatch push ───────────────────────────────────────────────────
 
-    async def push_ex(self, cursor, spec: KernelJobSpec):
+    async def push_ex(self, uow, spec: KernelJobSpec):
+        cursor = _cur(uow)
         await self._push_one(cursor, spec)
-        await self.notify_pushed(cursor)
+        await self.notify_pushed(uow)
 
     async def _push_one(self, cursor, spec: KernelJobSpec) -> None:
         job_id = spec.kwargs["job_id"]
@@ -115,12 +116,13 @@ class SQLiteKernel:
                 (time.time(), job_id),
             )
 
-    async def push_many_ex(self, cursor, specs: list[KernelJobSpec]):
+    async def push_many_ex(self, uow, specs: list[KernelJobSpec]):
+        cursor = _cur(uow)
         for spec in specs:
             await self._push_one(cursor, spec)
-        await self.notify_pushed(cursor)
+        await self.notify_pushed(uow)
 
-    async def notify_pushed(self, cursor, queue: str = DEFAULT_QUEUE) -> None:
+    async def notify_pushed(self, uow, queue: str = DEFAULT_QUEUE) -> None:
         for ev in _SUBSCRIBERS:
             ev.set()
 
@@ -266,6 +268,12 @@ class SQLiteWorker(NativeWorker):
             (time.time(), time.time()),
         )
         return cur.rowcount
+
+
+def _cur(uow):
+    """aiosqlite execute lives on the connection — the uow's native
+    handle IS the cursor-equivalent. Tests may pass a raw conn/cursor."""
+    return getattr(uow, "native", uow)
 
 
 def _epoch(scheduled_at) -> float:

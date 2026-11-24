@@ -34,6 +34,28 @@ from contextlib import AbstractAsyncContextManager
 from typing import Any, Protocol
 
 
+def nested_scope(uow: UnitOfWork) -> AbstractAsyncContextManager[UnitOfWork]:
+    """Child scope for engine code that must tolerate pre-UoW callers.
+
+    Real `UnitOfWork` objects get `uow.nested()` (savepoint). A legacy
+    psycopg conn/cursor passed by an unmigrated caller gets
+    `conn.transaction()` — psycopg lowers it to a savepoint inside an
+    open TX. Anything else raises so a fake unit fails loudly instead
+    of silently widening the atomic boundary.
+    """
+    if hasattr(uow, "nested"):
+        return uow.nested()
+    conn = getattr(uow, "native", uow)
+    conn = getattr(conn, "connection", conn)  # cursor → conn
+    transaction = getattr(conn, "transaction", None)
+    if transaction is None:
+        raise TypeError(
+            f"nested_scope: {type(uow)} is neither a UnitOfWork nor a"
+            " psycopg handle — pass the session's uow"
+        )
+    return transaction()
+
+
 class Tx(Protocol):
     """Shared handle carried by Session and UnitOfWork.
 

@@ -17,6 +17,7 @@ from keelflow.engine.enqueue import JobService
 from keelflow.engine.registry import InMemoryRegistry
 from keelflow.engine.scheduler import next_fire, tick
 from keelflow.postgres.schema import apply_async
+from keelflow.postgres.storage import PostgresStorage
 from keelflow.sdk import (
     Actor,
     ConcurrencySpec,
@@ -96,7 +97,7 @@ async def env(db):
             type="nightly@v1", input_schema=In, handler=SlowH,
             schedule=CronSpec(cron="* * * * *", timezone="UTC"),
         ))
-        jobs = JobService(reg, kernel)
+        jobs = JobService(reg, kernel, PostgresStorage(DSN))
         worker_mod.configure(registry=reg, dsn=DSN, kernel=kernel)
         yield {"reg": reg, "jobs": jobs, "kernel": kernel}
 
@@ -160,14 +161,14 @@ async def test_next_fire_window():
 
 @pytest.mark.asyncio
 async def test_scheduler_tick_enqueues_once(env, db):
-    n1 = await tick(db, env["reg"], env["kernel"])
+    n1 = await tick(db, PostgresStorage(DSN), env["reg"], env["kernel"])
     assert n1 == 1
     row = await (await db.execute(
         "SELECT count(*) FROM keelflow_jobs WHERE type='nightly@v1'"
     )).fetchone()
     assert row[0] == 1
     # second tick same slot → dedup via unique_key
-    n2 = await tick(db, env["reg"], env["kernel"])
+    n2 = await tick(db, PostgresStorage(DSN), env["reg"], env["kernel"])
     assert n2 == 0 or n2 == 1  # overlap=skip may skip; but never a 2nd row
     row2 = await (await db.execute(
         "SELECT count(*) FROM keelflow_jobs WHERE type='nightly@v1'"
@@ -195,7 +196,7 @@ async def test_kill_previous_cancel_pending_but_lets_running_drain(env, db):
 
     # case 1: running previous → flagged, status unchanged, new job enqueued
     running_id = await _insert_live("running")
-    n = await tick(db, env["reg"], env["kernel"])
+    n = await tick(db, PostgresStorage(DSN), env["reg"], env["kernel"])
     assert n >= 1  # 'nightly@v1' may enqueue its own slot too
     row = await (await db.execute(
         "SELECT status, cancel_requested FROM keelflow_jobs WHERE id=%s",
@@ -213,7 +214,7 @@ async def test_kill_previous_cancel_pending_but_lets_running_drain(env, db):
         " WHERE type='nightly.kp@v1' AND status='pending'"
     )).fetchone()
     pending_id = str(pend[0])
-    await tick(db, env["reg"], env["kernel"])
+    await tick(db, PostgresStorage(DSN), env["reg"], env["kernel"])
     row = await (await db.execute(
         "SELECT status, cancel_requested FROM keelflow_jobs WHERE id=%s",
         (pending_id,))).fetchone()

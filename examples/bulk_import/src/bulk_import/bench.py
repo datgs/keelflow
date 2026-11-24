@@ -54,6 +54,7 @@ from keelflow.engine.bulk import BulkJobHandler
 from keelflow.engine.enqueue import JobService
 from keelflow.engine.registry import InMemoryRegistry
 from keelflow.postgres.schema import apply_async
+from keelflow.postgres.storage import PostgresStorage
 from keelflow.sdk import (
     Actor,
     BatchRowResult,
@@ -227,8 +228,8 @@ class _BenchH(BulkJobHandler):
     then validates + upserts each row into bench_products."""
 
     async def run(self, ctx, payload) -> JobResult:
-        cur = ctx.tx.connection.cursor(row_factory=dict_row) \
-            if hasattr(ctx.tx, "connection") else ctx.tx
+        cur = ctx.uow.connection.cursor(row_factory=dict_row) \
+            if hasattr(ctx.uow, "connection") else ctx.uow
         job_id = str(ctx.extra["job_id"])
         meta = {"start": time.perf_counter(), "stage_s": 0.0,
                 "parent_super_run_s": 0.0, "parent_tx_s": 0.0}
@@ -318,7 +319,8 @@ async def run_keelflow(conn, kernel, batch_id: str, n_workers: int,
     reg.register_job_type(JobTypeSpec(
         type=BENCH_TYPE, input_schema=_BenchPayload,
         handler=_BenchBatchH if batch else _BenchH))
-    jobs = JobService(reg, kernel)
+    jobs = JobService(reg, kernel,
+                      PostgresStorage(os.environ[DSN_ENV]))
     worker_mod.configure(registry=reg, dsn=os.environ[DSN_ENV],
                          kernel=kernel)
     ctx = JobContext(actor=Actor.user("bench"))

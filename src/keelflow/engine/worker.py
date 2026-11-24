@@ -16,19 +16,27 @@ Configuration (process-global, set by `configure` before the worker starts):
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import logging
 import os
 import random
 import traceback
 from datetime import UTC, datetime, timedelta
-from typing import Any
 
 import chancy
-import psycopg
 from pydantic import ValidationError
 
-from ..sdk import ExecutionContext, JobCancelled, JobResult, JobStatus, Registry
+from ..sdk import (
+    DlqInsert,
+    ExecutionContext,
+    JobCancelled,
+    JobFinish,
+    JobResult,
+    JobStatus,
+    Registry,
+    Storage,
+)
 from .context import ctx_from_dict
 
 log = logging.getLogger("keelflow.worker")
@@ -37,14 +45,15 @@ DSN_ENV = "KEELFLOW_DSN"
 REGISTRY_ENV = "KEELFLOW_REGISTRY"  # dotted path, e.g. "myapp.jobs:registry"
 
 _REGISTRY: Registry | None = None
-_kernel_client = None  # chancy.Chancy, set by configure()/run_worker
+_kernel_client = None  # Kernel adapter, set by configure()/run_worker
+_storage: Storage | None = None  # set by configure(), lazy-built on demand
 
 
 def configure(registry: Registry | None = None, dsn: str | None = None,
-              kernel=None) -> None:
+              kernel=None, storage: Storage | None = None) -> None:
     """Configure dispatch for this process. Called by `run_worker`; apps may
-    also call it directly before starting their own chancy worker."""
-    global _REGISTRY, _kernel_client
+    also call it directly before starting their own kernel worker."""
+    global _REGISTRY, _kernel_client, _storage
     if registry is not None:
         _REGISTRY = registry
     if dsn is not None:
@@ -55,6 +64,21 @@ def configure(registry: Registry | None = None, dsn: str | None = None,
     from .kernel import as_kernel
 
     _kernel_client = as_kernel(kernel) if kernel is not None else None
+    _storage = storage
+
+
+def _get_storage() -> Storage:
+    """Configured storage, lazily built from the DSN when unset.
+
+    Postgres remains the default backend — an app passing a different
+    adapter calls `configure(storage=…)` first.
+    """
+    global _storage
+    if _storage is None:
+        from ..postgres.storage import PostgresStorage
+
+        _storage = PostgresStorage(os.environ[DSN_ENV])
+    return _storage
 
 
 def _get_registry() -> Registry:
@@ -79,258 +103,257 @@ async def dispatch(job_id: str, step_run_id: str | None = None) -> None:
     `step_run_id` links a kernel job back to a workflow step (T7); when the
     job finishes, `workflow.on_job_finished` advances the run.
     """
-    dsn = os.environ[DSN_ENV]
     registry = _get_registry()
+    storage = _get_storage()
 
-    conn = await psycopg.AsyncConnection.connect(dsn)
+    session = await storage.connect()
     try:
-        row = await _load_job(conn, job_id)
-        if row is None:
-            log.error("job %s not found in keelflow_jobs", job_id)
-            return
-        _, type_name, status, payload_json, ctx_json, _ck, cancel_req = row
-        # Re-claim of an already-terminal job (e.g. double execution or
-        # kernel retry of a declared-failed job): mark kernel-side done and
-        # idempotently advance the run — never re-run the handler, or
-        # domain effects would execute twice.
-        if status in (
-            JobStatus.DONE.value, JobStatus.CANCELLED.value,
-            JobStatus.FAILED.value,
-        ):
-            log.info("job %s already %s; skipping", job_id, status)
-            if step_run_id and _kernel_client is not None:
-                async with conn.transaction():
+        async with session.begin() as uow:
+            row = await storage.job_load(uow, job_id)
+            if row is None:
+                log.error("job %s not found in keelflow_jobs", job_id)
+                return
+            type_name = row["type"]
+            status = row["status"]
+            payload_json = row["payload"]
+            ctx_json = row["context"]
+            _ck = row["concurrency_key"]
+            cancel_req = row["cancel_requested"]
+            # Re-claim of an already-terminal job (e.g. double execution or
+            # kernel retry of a declared-failed job): mark kernel-side done
+            # and idempotently advance the run — never re-run the handler,
+            # or domain effects would execute twice.
+            if status in (
+                JobStatus.DONE.value, JobStatus.CANCELLED.value,
+                JobStatus.FAILED.value,
+            ):
+                log.info("job %s already %s; skipping", job_id, status)
+                if step_run_id and _kernel_client is not None:
                     from .workflow import on_job_finished
 
-                    sr = await conn.execute(
-                        "SELECT outputs FROM keelflow_step_runs WHERE id=%s",
-                        (step_run_id,),
-                    )
-                    sr_row = await sr.fetchone()
+                    sr = await storage.step_run_get(uow, step_run_id)
                     await on_job_finished(
-                        conn, _kernel_client, registry, job_id, step_run_id,
-                        JobStatus(status),
-                        (sr_row[0] or {}) if sr_row else {},
+                        uow, storage, _kernel_client, registry, job_id,
+                        step_run_id, JobStatus(status),
+                        (sr["outputs"] or {}) if sr else {},
                     )
-                await conn.commit()
-            if status == JobStatus.CANCELLED.value:
-                # A pre-cancelled bulk chunk still has to settle its
-                # chunk row + run fan-in or the parent never finishes.
-                await _settle_cancelled_chunk(
-                    conn, type_name, payload_json)
-            return
-        # Cooperative cancel (JobService.cancel, kill_previous):
-        # honored at claim time — an in-flight job drains to completion
-        # unless it checkpoints (cooperative_cancel opt-in).
-        if cancel_req:
-            await _cancel_terminalize(
-                conn, registry, job_id, step_run_id,
-                _job_logger(job_id, type_name, ""),
-                type_name, payload_json)
-            return
-        try:
-            spec = registry.job_type(type_name)
-        except KeyError:
-            await _finish(
-                conn, job_id, JobStatus.FAILED, error=f"unregistered job type {type_name}"
-            )
-            log.error("job %s has unregistered type %s", job_id, type_name)
-            return
-
-        ctx = ctx_from_dict(ctx_json)
-        # Handlers get job_id via extra (context stays read-only elsewhere).
-        ctx.extra["job_id"] = job_id
-        object.__setattr__(
-            ctx, "execution",
-            ExecutionContext(
-                job_id=job_id,
-                cooperative_cancel=bool(getattr(spec, "cooperative_cancel", False)),
-            ),
-        )
-        jlog = _job_logger(job_id, type_name, ctx.correlation_id)
-        jlog.info("claimed")
-
-        # Execution-time schema validation (payload may be from older code).
-        try:
-            payload = spec.input_schema.model_validate(payload_json)  # type: ignore[attr-defined]
-        except ValidationError as exc:
-            await _finish(conn, job_id, JobStatus.FAILED, error=f"payload invalid: {exc}")
-            jlog.error("payload invalid: %s", exc)
-            return
-
-        # Atomic start/cancel decision (T-cancel): the transition into
-        # `running` is conditioned on cancel_requested=false, so a
-        # cancellation committed between the load above and this update
-        # wins — a separate check + unconditional write would lose the
-        # race and run a cancelled job.
-        if not await _transition_to_running(conn, job_id):
-            if await _cancel_requested(conn, job_id):
+                if status == JobStatus.CANCELLED.value:
+                    # A pre-cancelled bulk chunk still has to settle its
+                    # chunk row + run fan-in or the parent never finishes.
+                    await _settle_cancelled_chunk(
+                        uow, session, storage, type_name, payload_json)
+                return
+            # Cooperative cancel (JobService.cancel, kill_previous):
+            # honored at claim time — an in-flight job drains to completion
+            # unless it checkpoints (cooperative_cancel opt-in).
+            if cancel_req:
                 await _cancel_terminalize(
-                    conn, registry, job_id, step_run_id, jlog,
+                    uow, session, storage, registry, job_id, step_run_id,
+                    _job_logger(job_id, type_name, ""),
                     type_name, payload_json)
-            else:
-                log.warning(
-                    "job %s not startable (status changed); skipping", job_id)
-            return
+                return
+            try:
+                spec = registry.job_type(type_name)
+            except KeyError:
+                await storage.job_finish(uow, job_id, JobFinish(
+                    status=JobStatus.FAILED,
+                    error=f"unregistered job type {type_name}"))
+                log.error("job %s has unregistered type %s",
+                          job_id, type_name)
+                return
+
+            ctx = ctx_from_dict(ctx_json)
+            # Handlers get job_id via extra (context stays read-only elsewhere).
+            ctx.extra["job_id"] = job_id
+            object.__setattr__(
+                ctx, "execution",
+                ExecutionContext(
+                    job_id=job_id,
+                    cooperative_cancel=bool(
+                        getattr(spec, "cooperative_cancel", False)),
+                ),
+            )
+            jlog = _job_logger(job_id, type_name, ctx.correlation_id)
+            jlog.info("claimed")
+
+            # Execution-time schema validation (payload may be from
+            # older code).
+            try:
+                payload = spec.input_schema.model_validate(payload_json)  # type: ignore[attr-defined]
+            except ValidationError as exc:
+                await storage.job_finish(uow, job_id, JobFinish(
+                    status=JobStatus.FAILED,
+                    error=f"payload invalid: {exc}"))
+                jlog.error("payload invalid: %s", exc)
+                return
+
+            # Atomic start/cancel decision (T-cancel): the transition
+            # into `running` is conditioned on cancel_requested=false,
+            # so a cancellation committed between the load above and
+            # this update wins — a separate check + unconditional write
+            # would lose the race and run a cancelled job.
+            if not await storage.job_mark_running(uow, job_id):
+                if await storage.job_cancel_requested(uow, job_id):
+                    await _cancel_terminalize(
+                        uow, session, storage, registry, job_id,
+                        step_run_id, jlog, type_name, payload_json)
+                else:
+                    log.warning(
+                        "job %s not startable (status changed); skipping",
+                        job_id)
+                return
+        # uow boundary 1 committed: job is 'running' durably — a crash
+        # mid-handler leaves it for kernel recovery instead of re-claim.
 
         # Key-serialized execution (T10): jobs sharing a resolved
-        # concurrency_key never run in parallel. SKIP LOCKED in the claim
-        # query already serializes claim; this advisory lock covers the run.
-        lock = _KeyLock(conn, _ck) if _ck else _NullLock()
-        await lock.acquire()
+        # concurrency_key never run in parallel. The kernel claim query
+        # already serializes claim; this session lock covers the run.
+        lock_cm = (session.key_lock(_ck) if _ck
+                   else contextlib.nullcontext())
 
         handler = spec.handler()  # type: ignore[misc]
-        # One TX: handler domain writes (via ctx.extra["tx"]) + job finish
-        # + workflow advance commit or roll back together.
         status = None
         result = None
-        try:
-            async with conn.transaction(), conn.cursor() as tx_cur:
-                object.__setattr__(ctx, "tx", tx_cur)
-                ctx.execution.tx = tx_cur
-                run = handler.run(ctx, payload)
-                if spec.timeout_seconds:
-                    result = await asyncio.wait_for(
-                        run, timeout=spec.timeout_seconds)
-                else:
-                    result = await run
-                object.__setattr__(ctx, "tx", None)
-                ctx.execution.tx = None
-                status = JobStatus.DONE if result.status == "done" else JobStatus.FAILED
-                bulk_hold = bool(result.outputs.get("_bulk_parent"))
-                if bulk_hold:
-                    # bulk parent: partitions are out; fan-in flips to
-                    # done/failed AND advances the step. Reporting RUNNING
-                    # here would terminalize the step as 'cancelled'.
-                    status = JobStatus.RUNNING
-                    result.outputs.pop("_bulk_parent", None)
+        async with lock_cm:
+            try:
+                # One UoW: handler domain writes (via ctx.uow) + job
+                # finish + workflow advance commit or roll back together.
+                async with session.begin() as uow:
+                    object.__setattr__(ctx, "uow", uow)
+                    ctx.execution.uow = uow
+                    ctx.execution.storage = storage
+                    run = handler.run(ctx, payload)
+                    if spec.timeout_seconds:
+                        result = await asyncio.wait_for(
+                            run, timeout=spec.timeout_seconds)
+                    else:
+                        result = await run
+                    object.__setattr__(ctx, "uow", None)
+                    ctx.execution.uow = None
+                    ctx.execution.storage = None
+                    status = (JobStatus.DONE if result.status == "done"
+                              else JobStatus.FAILED)
+                    bulk_hold = bool(result.outputs.get("_bulk_parent"))
+                    if bulk_hold:
+                        # bulk parent: partitions are out; fan-in flips
+                        # to done/failed AND advances the step. Reporting
+                        # RUNNING would terminalize the step as
+                        # 'cancelled'.
+                        status = JobStatus.RUNNING
+                        result.outputs.pop("_bulk_parent", None)
 
-                # Size visibility (two-tier): measure once, always record
-                # result_bytes; warn past the soft threshold; fail only
-                # when a job type opts into result_max_bytes.
-                _res_json = json.dumps(result.outputs)
-                _res_bytes = len(_res_json.encode())
-                if (spec.result_warning_bytes is not None
-                        and _res_bytes > spec.result_warning_bytes):
-                    jlog.warning(
-                        "result %d bytes exceeds warning threshold %d for"
-                        " %s — return references, not blobs",
-                        _res_bytes, spec.result_warning_bytes, type_name)
-                if (spec.result_max_bytes is not None
-                        and _res_bytes > spec.result_max_bytes):
-                    status = JobStatus.FAILED
-                    result = JobResult(
-                        status="failed",
-                        error=(f"result {_res_bytes} bytes exceeds"
-                               f" result_max_bytes"
-                               f" {spec.result_max_bytes} for {type_name}"),
-                    )
-                await _write_finish(
-                    tx_cur, job_id, status,
-                    result=result.outputs, error=result.error,
-                    result_bytes=_res_bytes,
-                )
-                if step_run_id and not bulk_hold:
-                    kernel = _kernel_client
-                    if kernel is not None:
-                        from .workflow import on_job_finished
-
-                        await on_job_finished(
-                            conn, kernel, registry, job_id, step_run_id,
-                            status, result.outputs,
+                    # Size visibility (two-tier): measure once, always
+                    # record result_bytes; warn past the soft threshold;
+                    # fail only when a job type opts into result_max_bytes.
+                    _res_json = json.dumps(result.outputs)
+                    _res_bytes = len(_res_json.encode())
+                    if (spec.result_warning_bytes is not None
+                            and _res_bytes > spec.result_warning_bytes):
+                        jlog.warning(
+                            "result %d bytes exceeds warning threshold %d for"
+                            " %s — return references, not blobs",
+                            _res_bytes, spec.result_warning_bytes, type_name)
+                    if (spec.result_max_bytes is not None
+                            and _res_bytes > spec.result_max_bytes):
+                        status = JobStatus.FAILED
+                        result = JobResult(
+                            status="failed",
+                            error=(f"result {_res_bytes} bytes exceeds"
+                                   f" result_max_bytes"
+                                   f" {spec.result_max_bytes} for {type_name}"),
                         )
-            # conn.transaction() above is a savepoint when an implicit TX
-            # is already open (the advisory-lock SELECT opened one) —
-            # explicit commit is required or close() rolls everything back.
-            await conn.commit()
-        except JobCancelled:
-            # A checkpoint observed a committed cancel_requested: the
-            # handler TX (savepoint) already rolled back its domain
-            # writes. Terminalize as cancelled in a NEW transaction —
-            # never through the retry/DLQ path.
-            jlog.info("cancelled at checkpoint")
-            await _cancel_terminalize(conn, registry, job_id, step_run_id,
-                                      jlog, type_name, payload_json)
-            await lock.release()
-            return
-        except Exception as exc:
-            tb = traceback.format_exc(limit=10)
-            exc_text = str(exc) or type(exc).__name__  # TimeoutError → ''
-            cur = await conn.execute(
-                "SELECT attempts, max_attempts FROM keelflow_jobs WHERE id=%s",
-                (job_id,),
-            )
-            att = await cur.fetchone()
-            exhausted = bool(att and att[0] >= att[1])
-            if exhausted:
-                # Retries are done → terminal failure + DLQ copy.
-                await _finish(
-                    conn, job_id, JobStatus.FAILED,
-                    error=exc_text, trace=tb)
-                # keep the workflow link so dlq_replay can resume the run
-                _dlq_run_id = None
-                if step_run_id:
-                    _sr = await conn.execute(
-                        "SELECT run_id FROM keelflow_step_runs WHERE id=%s",
-                        (step_run_id,),
-                    )
-                    _sr_row = await _sr.fetchone()
-                    _dlq_run_id = str(_sr_row[0]) if _sr_row else None
-                await _write_dlq(
-                    conn, job_id, type_name, payload_json, ctx_json,
-                    exc_text, att[0] if att else 0,
-                    run_id=_dlq_run_id, step_run_id=step_run_id,
-                )
-                jlog.error("handler failed permanently: %s", exc)
-                if step_run_id and _kernel_client is not None:
-                    async with conn.transaction():
-                        from .workflow import on_job_finished
+                    await storage.job_finish(
+                        uow, job_id, JobFinish(
+                            status=status,
+                            result=result.outputs,
+                            error=result.error,
+                            result_bytes=_res_bytes,
+                        ))
+                    if step_run_id and not bulk_hold:
+                        kernel = _kernel_client
+                        if kernel is not None:
+                            from .workflow import on_job_finished
 
-                        await on_job_finished(
-                            conn, _kernel_client, registry, job_id,
-                            step_run_id, JobStatus.FAILED, {},
-                        )
-                    await conn.commit()
-            else:
-                # Engine-scheduled retry: keep the engine job 'running',
-                # record the error, and push a replacement kernel job at
-                # the spec's backoff delay inside one TX (push rolls back
-                # with the error write if either fails). Kernel crash
-                # recovery still redelivers the original kernel job — the
-                # attempts>=max_attempts check above converges both.
-                delay = _retry_delay(spec, att[0] if att else 1)
-                from psycopg.rows import dict_row
+                            await on_job_finished(
+                                uow, storage, kernel, registry, job_id,
+                                step_run_id, status, result.outputs,
+                            )
+            except JobCancelled:
+                # A checkpoint observed a committed cancel_requested: the
+                # handler UoW already rolled back its domain writes.
+                # Terminalize as cancelled in a NEW unit — never through
+                # the retry/DLQ path.
+                jlog.info("cancelled at checkpoint")
+                async with session.begin() as uow:
+                    await _cancel_terminalize(
+                        uow, session, storage, registry, job_id,
+                        step_run_id, jlog, type_name, payload_json)
+                return
+            except Exception as exc:
+                tb = traceback.format_exc(limit=10)
+                exc_text = str(exc) or type(exc).__name__  # TimeoutError → ''
+                async with session.begin() as uow:
+                    att = await storage.job_attempts(uow, job_id)
+                    exhausted = bool(att and att[0] >= att[1])
+                    if exhausted:
+                        # Retries are done → terminal failure + DLQ copy
+                        # + step settle in ONE unit (was three commits).
+                        await storage.job_finish(uow, job_id, JobFinish(
+                            status=JobStatus.FAILED,
+                            error=exc_text + ("\n" + tb if tb else "")))
+                        # keep the workflow link so dlq_replay can resume
+                        _dlq_run_id = None
+                        if step_run_id:
+                            _sr = await storage.step_run_get(
+                                uow, step_run_id)
+                            _dlq_run_id = (
+                                str(_sr["run_id"]) if _sr else None)
+                        await storage.dlq_insert(uow, DlqInsert(
+                            id=job_id, type=type_name,
+                            payload=payload_json, context=ctx_json,
+                            error=exc_text,
+                            attempts=att[0] if att else 0,
+                            run_id=_dlq_run_id, step_run_id=step_run_id,
+                        ))
+                        jlog.error("handler failed permanently: %s", exc)
+                        if step_run_id and _kernel_client is not None:
+                            from .workflow import on_job_finished
 
-                async with (
-                    conn.transaction(),
-                    conn.cursor(row_factory=dict_row) as rtx_cur,
-                ):
-                    await rtx_cur.execute(
-                        "UPDATE keelflow_jobs SET error=%s,"
-                        " run_at=run_at + interval '1 second' * %s,"
-                        " updated_at=now() WHERE id=%s",
-                        (exc_text, delay, job_id),
-                    )
-                    if _kernel_client is not None:
-                        await _kernel_client.push_ex(
-                            rtx_cur, _retry_kernel_job(
-                                job_id, type_name, spec, step_run_id, delay))
-                await conn.commit()
-                jlog.error(
-                    "handler failed (retryable in %.1fs): %s", delay, exc)
-            await lock.release()
-            if _kernel_client is None and not exhausted:
-                # No kernel client to push a redelivery through — fall
-                # back to kernel retry semantics.
-                raise
-        await lock.release()
+                            await on_job_finished(
+                                uow, storage, _kernel_client, registry,
+                                job_id, step_run_id, JobStatus.FAILED, {},
+                            )
+                    else:
+                        # Engine-scheduled retry: keep the engine job
+                        # 'running', record the error, and push a
+                        # replacement kernel job at the spec's backoff
+                        # delay inside one UoW (push rolls back with the
+                        # error write if either fails). Kernel crash
+                        # recovery still redelivers the original kernel
+                        # job — the attempts>=max_attempts check above
+                        # converges both.
+                        delay = _retry_delay(spec, att[0] if att else 1)
+                        await storage.job_error_and_reschedule(
+                            uow, job_id, exc_text, delay)
+                        if _kernel_client is not None:
+                            await _kernel_client.push_ex(
+                                uow, _retry_kernel_job(
+                                    job_id, type_name, spec,
+                                    step_run_id, delay))
+                        jlog.error(
+                            "handler failed (retryable in %.1fs): %s",
+                            delay, exc)
+                if _kernel_client is None and not exhausted:
+                    # No kernel client to push a redelivery through —
+                    # fall back to kernel retry semantics.
+                    raise
         if result is not None:
             jlog.info("%s", result.status)
             if result.status != "done":
                 raise _JobFailedError(
                     result.error or "handler returned failed")
     finally:
-        await conn.close()
+        await session.close()
 
 
 def run_worker(
@@ -338,6 +361,7 @@ def run_worker(
     dsn: str | None = None,
     *,
     kernel=None,
+    storage: Storage | None = None,
     queues: list[chancy.Queue] | None = None,
     prefix: str = "keelflow_kernel_",
     event_bus=None,
@@ -373,11 +397,16 @@ def run_worker(
 
     dsn = dsn or os.environ.get(DSN_ENV) \
         or getattr(injected, "dsn", None) or os.environ[DSN_ENV]
-    configure(registry=registry, dsn=dsn)
+    if storage is None:
+        from ..postgres.storage import PostgresStorage
+
+        storage = PostgresStorage(dsn)
+    configure(registry=registry, dsn=dsn, storage=storage)
 
     if injected is not None:
         async def _run_injected() -> None:
-            configure(registry=registry, dsn=dsn, kernel=injected)
+            configure(registry=registry, dsn=dsn, kernel=injected,
+                      storage=storage)
             await injected.migrate()
             worker = injected.create_worker()
             await worker.start()
@@ -386,7 +415,7 @@ def run_worker(
                 if event_bus is not None:
                     from .events import dispatch_events
 
-                    tasks.append(dispatch_events(dsn, event_bus))
+                    tasks.append(dispatch_events(event_bus, storage))
                 await asyncio.gather(*tasks)
             finally:
                 await worker.stop()
@@ -397,7 +426,8 @@ def run_worker(
     async def _run() -> None:
         async with chancy.Chancy(dsn, prefix=prefix) as client:
             kernel = ChancyKernel(client)
-            configure(registry=registry, dsn=dsn, kernel=kernel)
+            configure(registry=registry, dsn=dsn, kernel=kernel,
+                      storage=storage)
             await kernel.migrate()
             for q in queues or [
                 chancy.Queue(
@@ -415,7 +445,7 @@ def run_worker(
                 if event_bus is not None:
                     from .events import dispatch_events
 
-                    tasks.append(dispatch_events(dsn, event_bus))
+                    tasks.append(dispatch_events(event_bus, storage))
                 await asyncio.gather(*tasks)
             finally:
                 await worker.stop()
@@ -452,103 +482,29 @@ def _retry_kernel_job(job_id, type_name: str, spec, step_run_id, delay: float):
     )
 
 
-async def _write_dlq(conn, job_id, type_name: str, payload, context,
-                     error: str, attempts: int, *,
-                     run_id: str | None = None,
-                     step_run_id: str | None = None) -> None:
-    """Copy a terminally-failed job to keelflow_dlq for ops replay.
-
-    `run_id`/`step_run_id` link a dead DAG-step job back to its run so
-    `dlq_replay` can resume the workflow rather than orphan the run.
-    """
-    async with conn.transaction():
-        await conn.execute(
-            "INSERT INTO keelflow_dlq (id, type, payload, context, error,"
-            " attempts, run_id, step_run_id)"
-            " VALUES (%s, %s, %s, %s, %s, %s, %s, %s)"
-            " ON CONFLICT (id) DO UPDATE"
-            " SET error=EXCLUDED.error, attempts=EXCLUDED.attempts,"
-            " dead_at=now()",
-            (job_id, type_name,
-             json.dumps(payload) if not isinstance(payload, str) else payload,
-             json.dumps(context) if not isinstance(context, str) else context,
-             error, attempts, run_id, step_run_id),
-        )
-    await conn.commit()
+# ── cancel helpers ──────────────────────────────────────────────────────
 
 
-# ── db helpers ────────────────────────────────────────────────────────────
-
-
-async def _load_job(conn, job_id: str):
-    cur = await conn.execute(
-        "SELECT id, type, status, payload, context, concurrency_key,"
-        " cancel_requested FROM keelflow_jobs WHERE id=%s",
-        (job_id,),
-    )
-    row = await cur.fetchone()
-    if row is None:
-        return None
-    payload = row[3]
-    if isinstance(payload, str):
-        import json
-
-        payload = json.loads(payload)
-    context = row[4]
-    if isinstance(context, str):
-        import json
-
-        context = json.loads(context)
-    return (row[0], row[1], row[2], payload, context, row[5], row[6])
-
-
-async def _transition_to_running(conn, job_id) -> bool:
-    """Atomic pending/claimed/running → running + attempts increment.
-
-    Conditioned on `cancel_requested=false`: a cancel request that
-    commits first makes this a no-op (returns False) and the job is
-    never started. `running` stays eligible so engine-scheduled retries
-    (status kept 'running') can re-enter dispatch.
-    """
-    cur = await conn.execute(
-        "UPDATE keelflow_jobs SET status=%s, attempts = attempts + 1,"
-        " updated_at=now()"
-        " WHERE id=%s"
-        "   AND status IN ('pending','claimed','running')"
-        "   AND cancel_requested = false",
-        (JobStatus.RUNNING.value, job_id),
-    )
-    if cur.rowcount:
-        await conn.commit()
-        return True
-    return False
-
-
-async def _cancel_requested(conn, job_id) -> bool:
-    cur = await conn.execute(
-        "SELECT cancel_requested FROM keelflow_jobs WHERE id=%s", (job_id,))
-    row = await cur.fetchone()
-    return bool(row and row[0])
-
-
-async def _cancel_terminalize(conn, registry, job_id, step_run_id, jlog,
+async def _cancel_terminalize(uow, session, storage, registry, job_id,
+                              step_run_id, jlog,
                               type_name=None, payload_json=None) -> None:
     """Terminalize a job as cancelled and advance its owning step — the
-    same path the claim-time cancel check uses."""
-    await _finish(conn, job_id, JobStatus.CANCELLED)
+    same path the claim-time cancel check uses. Caller commits."""
+    await storage.job_finish(
+        uow, job_id, JobFinish(status=JobStatus.CANCELLED))
     if step_run_id and _kernel_client is not None:
-        async with conn.transaction():
-            from .workflow import on_job_finished
+        from .workflow import on_job_finished
 
-            await on_job_finished(
-                conn, _kernel_client, registry, job_id, step_run_id,
-                JobStatus.CANCELLED, {},
-            )
-        await conn.commit()
-    await _settle_cancelled_chunk(conn, type_name, payload_json)
+        await on_job_finished(
+            uow, storage, _kernel_client, registry, job_id, step_run_id,
+            JobStatus.CANCELLED, {},
+        )
+    await _settle_cancelled_chunk(
+        uow, session, storage, type_name, payload_json)
 
 
-async def _settle_cancelled_chunk(conn, type_name, payload_json) -> None:
+async def _settle_cancelled_chunk(uow, session, storage, type_name,
+                                  payload_json) -> None:
     """A cancelled `bulk.chunk@v1` job must still settle bookkeeping:
     mark its chunk cancelled (if not already terminal) and run fan-in
     so the parent bulk job can terminalize. Idempotent."""
@@ -560,79 +516,8 @@ async def _settle_cancelled_chunk(conn, type_name, payload_json) -> None:
     parent_id = payload_json.get("parent_job_id")
     if not chunk_id or not parent_id:
         return
-    await conn.execute(
-        "UPDATE keelflow_chunks SET status='cancelled', updated_at=now()"
-        " WHERE id=%s AND status NOT IN ('done','failed','cancelled')",
-        (chunk_id,),
-    )
-    await conn.commit()
-    await _bulk.ChunkJobHandler()._fan_in(conn, parent_id)
-
-
-
-
-
-async def _write_finish(
-    cursor,
-    job_id: str,
-    status: JobStatus,
-    *,
-    result: dict[str, Any] | None = None,
-    error: str | None = None,
-    trace: str | None = None,
-    result_bytes: int | None = None,
-) -> None:
-    """Finish write inside the caller's transaction — no commit."""
-    import json
-
-    await cursor.execute(
-        "UPDATE keelflow_jobs SET status=%s, result=%s, result_bytes=%s,"
-        " error=%s, updated_at=now() WHERE id=%s",
-        (status.value, json.dumps(result) if result else None,
-         result_bytes,
-         (error or "") + (("\n" + trace) if trace else "") or None, job_id),
-    )
-
-
-async def _finish(
-    conn,
-    job_id: str,
-    status: JobStatus,
-    *,
-    result: dict[str, Any] | None = None,
-    error: str | None = None,
-    trace: str | None = None,
-) -> None:
-    """Standalone finish — own TX (used outside the handler-run TX)."""
-    async with conn.transaction(), conn.cursor() as cur:
-        await _write_finish(
-            cur, job_id, status, result=result, error=error, trace=trace)
-    await conn.commit()
-
-
-class _KeyLock:
-    """pg advisory session lock on a concurrency key."""
-
-    def __init__(self, conn, key: str) -> None:
-        self._conn = conn
-        self._key = key
-
-    async def acquire(self) -> None:
-        await self._conn.execute("SELECT pg_advisory_lock(hashtext(%s))", (self._key,))
-
-    async def release(self) -> None:
-        await self._conn.execute(
-            "SELECT pg_advisory_unlock(hashtext(%s))", (self._key,)
-        )
-
-
-class _NullLock:
-    async def acquire(self) -> None:
-        return None
-
-    async def release(self) -> None:
-        return None
-
+    await storage.chunk_cancel(uow, str(chunk_id))
+    await _bulk.ChunkJobHandler()._fan_in(uow, storage, parent_id)
 
 def _job_logger(job_id: str, type_name: str, correlation_id: str) -> logging.LoggerAdapter:
     return logging.LoggerAdapter(

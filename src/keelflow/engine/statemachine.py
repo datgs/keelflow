@@ -7,7 +7,7 @@ state in `keelflow_entity_state`, audits the change, and fires
 
 Workflow triggers (`WorkflowTriggerSpec`) persist metadata on the spawned
 run (`triggered_by_entity_*`, callback actions, initiating ctx) so the
-terminal callback in `workflow._finish_run` can apply `on_done` /
+terminal callback in `workflow._finish_run` can apply `on_succeeded` /
 `on_rejected` / `on_failed` transitions to the entity — in the run's own
 terminal transaction, not here.
 
@@ -18,7 +18,6 @@ transitions serialize on the row's write lock instead of both seeing
 """
 from __future__ import annotations
 
-import json
 import uuid
 from datetime import UTC, datetime
 
@@ -27,59 +26,78 @@ from ..sdk import (
     AuditEvent,
     EntityRef,
     JobContext,
+    JobInsert,
     StateMachineService,
-    Transaction,
+    Storage,
     WorkflowTriggerSpec,
 )
 from .context import ctx_to_dict
-from .enqueue import _as_cursor
 from .kernel import dispatch_spec
 
 
 class EngineStateMachineService(StateMachineService):
-    def __init__(self, registry, kernel=None, audit=None) -> None:
+    def __init__(self, registry, kernel=None, audit=None,
+                 storage: Storage | None = None) -> None:
         from .kernel import as_kernel
 
         self._registry = registry
         self._kernel = as_kernel(kernel) if kernel is not None else None
-        self._audit = audit  # optional PostgresAuditService
+        self._audit = audit  # optional AuditService impl
+        self._storage = storage
 
-    async def ensure_schema(self, conn) -> None:
-        """Apply the core schema (idempotent). Kept as the test/setup hook."""
+    def _store(self, uow=None) -> Storage:
+        """Resolve the storage adapter: explicit constructor injection,
+        else the dispatch-time storage on the uow's execution ctx, else
+        the configured global."""
+        if self._storage is not None:
+            return self._storage
+        from .worker import _get_storage
+
+        return _get_storage()
+
+    async def ensure_schema(self, session) -> None:
+        """Apply the core schema (idempotent). Kept as the test/setup hook.
+
+        `session` is a storage Session — DDL runs through its native
+        connection (backend-specific setup is the adapter's job)."""
         from ..postgres.schema import apply_async
 
-        await apply_async(conn)
+        await apply_async(getattr(session, "native", session))
 
     async def transition(
-        self, entity: EntityRef, action: str, ctx: JobContext, tx: Transaction
+        self, entity: EntityRef, action: str, ctx: JobContext, uow
     ) -> None:
-        await self._apply(entity, action, ctx, tx, enforce_permission=True)
+        await self._apply(entity, action, ctx, uow, enforce_permission=True)
 
     async def _internal_transition(
-        self, cursor, entity: EntityRef, action: str, ctx: JobContext
+        self, uow, storage: Storage, entity: EntityRef, action: str,
+        ctx: JobContext,
     ) -> None:
         """Engine-authorized transition (workflow callback, resume).
 
         Skips the *permission* guard — the initiating actor was already
         authorized when the trigger was created. Still validates the
-        transition itself, so a bad on_done/on_failed action fails the run
+        transition itself, so a bad on_succeeded/on_failed action fails the run
         finalization loudly rather than silently corrupting state.
         """
-        await self._apply(entity, action, ctx, cursor, enforce_permission=False)
+        await self._apply(entity, action, ctx, uow,
+                          enforce_permission=False, storage=storage)
 
     async def _apply(
         self,
         entity: EntityRef,
         action: str,
         ctx: JobContext,
-        tx: Transaction,
+        uow,
         *,
         enforce_permission: bool,
+        storage: Storage | None = None,
     ) -> None:
         sm = self._registry.state_machine(f"{entity.type}@v1")
-        cursor = _as_cursor(tx)
+        storage = storage or self._store(uow)
 
-        current = await self._current(cursor, entity, sm)
+        current = await storage.entity_ensure_locked(
+            uow, entity.type, entity.id, sm.initial)
         t = next(
             (t for t in sm.transitions
              if t.from_state == current and t.action == action),
@@ -93,16 +111,8 @@ class EngineStateMachineService(StateMachineService):
         if enforce_permission and perm:
             ctx.require(perm)
 
-        await cursor.execute(
-            """
-            INSERT INTO keelflow_entity_state (entity_type, entity_id, state, version)
-            VALUES (%s, %s, %s, 1)
-            ON CONFLICT (entity_type, entity_id) DO UPDATE
-            SET state = EXCLUDED.state, version = keelflow_entity_state.version + 1,
-                updated_at = now()
-            """,
-            (entity.type, entity.id, t.to_state),
-        )
+        await storage.entity_transition(
+            uow, entity.type, entity.id, t.to_state)
 
         if self._audit is not None:
             await self._audit.record(
@@ -114,40 +124,31 @@ class EngineStateMachineService(StateMachineService):
                     source=ctx.extra.get("job_id") or ctx.request_id,
                     correlation_id=ctx.correlation_id,
                 ),
-                cursor,
+                uow,
             )
 
         if t.creates_job:
-            await self._spawn_job(cursor, t.creates_job, entity, ctx, t)
+            await self._spawn_job(uow, storage, t.creates_job, entity, ctx, t)
         if t.triggers_workflow:
-            await self._trigger_workflow(cursor, t.triggers_workflow, entity, ctx)
+            await self._trigger_workflow(
+                uow, storage, t.triggers_workflow, entity, ctx)
 
-    async def current(self, entity: EntityRef, conn=None) -> str | None:  # type: ignore[override]
-        if conn is None:
+    async def current(self, entity: EntityRef, uow=None) -> str | None:  # type: ignore[override]
+        if uow is None:
             return None
-        cur = await conn.execute(
-            "SELECT state FROM keelflow_entity_state"
-            " WHERE entity_type=%s AND entity_id=%s",
-            (entity.type, entity.id),
-        )
-        row = await cur.fetchone()
-        return (row["state"] if isinstance(row, dict) else row[0]) if row else None
+        return await self._store(uow).entity_state(
+            uow, entity.type, entity.id)
 
     async def allowed_actions(
-        self, entity: EntityRef, actor: Actor, conn,
+        self, entity: EntityRef, actor: Actor, uow,
         *, permissions: frozenset[str] | None = None,
     ) -> list[str]:  # type: ignore[override]
         try:
             sm = self._registry.state_machine(f"{entity.type}@v1")
         except KeyError:
             return []
-        cur = await conn.execute(
-            "SELECT state FROM keelflow_entity_state"
-            " WHERE entity_type=%s AND entity_id=%s",
-            (entity.type, entity.id),
-        )
-        row = await cur.fetchone()
-        current = (row["state"] if isinstance(row, dict) else row[0]) if row else sm.initial
+        current = (await self._store(uow).entity_state(
+            uow, entity.type, entity.id)) or sm.initial
         perms = permissions or frozenset()
         out = []
         for t in sm.transitions:
@@ -161,29 +162,10 @@ class EngineStateMachineService(StateMachineService):
 
     # ── helpers ────────────────────────────────────────────────────────
 
-    async def _current(self, cursor, entity: EntityRef, sm) -> str:
-        """Lock the entity row; create it if absent.
-
-        `INSERT … ON CONFLICT DO NOTHING` ensures the row exists, then
-        `SELECT … FOR UPDATE` serializes first transitions on a real row —
-        two concurrent first actions can no longer both pass a read that
-        returns "no row".
-        """
-        await cursor.execute(
-            "INSERT INTO keelflow_entity_state (entity_type, entity_id, state)"
-            " VALUES (%s, %s, %s) ON CONFLICT (entity_type, entity_id) DO NOTHING",
-            (entity.type, entity.id, sm.initial),
-        )
-        await cursor.execute(
-            "SELECT state FROM keelflow_entity_state"
-            " WHERE entity_type=%s AND entity_id=%s FOR UPDATE",
-            (entity.type, entity.id),
-        )
-        row = await cursor.fetchone()
-        return row["state"] if row else sm.initial
-
-    async def _spawn_job(self, cursor, type_name: str, entity, ctx, t) -> None:
-        """creates_job → a human task (or machine job) in the same TX."""
+    async def _spawn_job(
+        self, uow, storage: Storage, type_name: str, entity, ctx, t
+    ) -> None:
+        """creates_job → a human task (or machine job) in the same UoW."""
         spec = self._registry.job_type(type_name)
         job_id = uuid.uuid4()
         assignee = t.guard.get("assignee") or t.guard.get("assignee_role")
@@ -206,24 +188,16 @@ class EngineStateMachineService(StateMachineService):
             permissions=ctx.permissions,
             extra={"job_id": str(job_id)},
         )
-        await cursor.execute(
-            """
-            INSERT INTO keelflow_jobs
-                (id, type, status, payload, context, max_attempts, run_at,
-                 assignee, created_at, updated_at)
-            VALUES (%s,%s,'pending',%s,%s,%s,%s,%s,%s,%s)
-            """,
-            (
-                job_id, type_name, json.dumps(payload),
-                json.dumps(ctx_to_dict(child_ctx)),
-                spec.retry.max_attempts if spec.retry else 3,
-                datetime.now(UTC), assignee,
-                datetime.now(UTC), datetime.now(UTC),
-            ),
-        )
+        await storage.job_insert(uow, JobInsert(
+            id=str(job_id), type=type_name, payload=payload,
+            context=ctx_to_dict(child_ctx),
+            max_attempts=spec.retry.max_attempts if spec.retry else 3,
+            run_at=datetime.now(UTC),
+            assignee=assignee,
+        ))
         if not type_name.startswith("human.") and self._kernel is not None:
             await self._kernel.push_ex(
-                cursor,
+                uow,
                 dispatch_spec(
                     job_id=job_id,
                     max_attempts=spec.retry.max_attempts if spec.retry else 3,
@@ -232,7 +206,8 @@ class EngineStateMachineService(StateMachineService):
             )
 
     async def _trigger_workflow(
-        self, cursor, trigger: WorkflowTriggerSpec | str, entity, ctx
+        self, uow, storage: Storage,
+        trigger: WorkflowTriggerSpec | str, entity, ctx,
     ) -> None:
         trig = (
             trigger
@@ -240,34 +215,24 @@ class EngineStateMachineService(StateMachineService):
             else WorkflowTriggerSpec(workflow=trigger)
         )
         run_id = uuid.uuid4()
-        await cursor.execute(
-            """
-            INSERT INTO keelflow_workflow_runs
-                (id, workflow, status, inputs,
-                 triggered_by_entity_type, triggered_by_entity_id,
-                 trigger_config, trigger_ctx, callback_state)
-            VALUES (%s, %s, 'running', %s, %s, %s, %s, %s, 'pending')
-            """,
-            (
-                run_id, trig.workflow,
-                json.dumps({"entity_type": entity.type, "entity_id": entity.id}),
-                entity.type, entity.id,
-                json.dumps({
-                    "on_done": trig.on_done,
-                    "on_rejected": trig.on_rejected,
-                    "on_failed": trig.on_failed,
-                    "failure_job": trig.failure_job,
-                }),
-                json.dumps(ctx_to_dict(ctx)),
-            ),
+        await storage.run_insert(
+            uow, str(run_id), trig.workflow,
+            {"entity_type": entity.type, "entity_id": entity.id},
+            triggered_by_entity_type=entity.type,
+            triggered_by_entity_id=entity.id,
+            trigger_config={
+                "on_succeeded": trig.on_succeeded,
+                "on_rejected": trig.on_rejected,
+                "on_failed": trig.on_failed,
+                "failure_job": trig.failure_job,
+            },
+            trigger_ctx=ctx_to_dict(ctx),
         )
         defn = self._registry.workflow(trig.workflow)
-        for step in defn.steps:
-            await cursor.execute(
-                "INSERT INTO keelflow_step_runs (id, run_id, step_id, type, status)"
-                " VALUES (%s, %s, %s, %s, 'pending')",
-                (uuid.uuid4(), run_id, step.id, step.type),
-            )
+        await storage.step_runs_insert(
+            uow, str(run_id),
+            [(s.id, s.type) for s in defn.steps])
         from .workflow import advance_run
 
-        await advance_run(cursor, run_id, self._registry, self._kernel, ctx)
+        await advance_run(
+            uow, storage, run_id, self._registry, self._kernel, ctx)

@@ -27,6 +27,7 @@ from keelflow.engine.enqueue import JobService
 from keelflow.engine.human import HumanTaskService
 from keelflow.engine.statemachine import EngineStateMachineService
 from keelflow.engine.workflow import WorkflowService
+from keelflow.postgres.storage import PostgresStorage
 from keelflow.sdk import Actor, EntityRef, JobContext
 
 DSN = os.environ.get(
@@ -108,7 +109,7 @@ async def env(db, kernel_kind):
         worker_mod.configure(registry=reg, dsn=DSN, kernel=kernel)
         audit = PostgresAuditService()
         sm = EngineStateMachineService(reg, kernel, audit=audit)
-        jobs = JobService(reg, kernel)
+        jobs = JobService(reg, kernel, PostgresStorage(DSN))
         human = HumanTaskService(reg, kernel, sm=sm)
         wf = WorkflowService(reg, jobs)
         yield {"sm": sm, "human": human, "wf": wf, "kernel": kernel, "kind": kernel_kind}

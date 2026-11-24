@@ -28,6 +28,7 @@ from keelflow.engine.human import HumanTaskService
 from keelflow.engine.monitoring import MonitoringService
 from keelflow.engine.statemachine import EngineStateMachineService
 from keelflow.engine.workflow import WorkflowService
+from keelflow.postgres.storage import PostgresStorage
 from keelflow.sdk import Actor, EntityRef, JobContext
 
 from .i18n import render
@@ -59,7 +60,7 @@ async def lifespan(app: FastAPI):
     audit = PostgresAuditService()
     app.state.kernel = kernel
     app.state.registry = registry
-    app.state.jobs = JobService(registry, kernel)
+    app.state.jobs = JobService(registry, kernel, PostgresStorage(DSN))
     app.state.sm = EngineStateMachineService(registry, kernel, audit=audit)
     app.state.human = HumanTaskService(registry, kernel,
                                        sm=app.state.sm)
@@ -176,8 +177,8 @@ async def invoice_detail(request: Request, number: str):
             if st["type"].startswith("human."):
                 spec = reg.job_type(st["type"])
                 meta[st["type"]] = {
-                    "assignee": getattr(spec.ui, "assignee_role", None)
-                    if spec.ui else None}
+                    "assignee": getattr(spec.human_task, "assignee_role", None)
+                    if spec.human_task else None}
         wf_diagram = workflow_svg(
             reg.workflow(runs[-1]["workflow"]),
             step_status={st["step_id"]: st["status"]
@@ -366,7 +367,7 @@ async def decide(request: Request, tid: str, decision: str,
 @app.get("/runs/{rid}", response_class=HTMLResponse)
 async def run_detail(request: Request, rid: str):
     c = await conn()
-    run = await app.state.monitoring.runs_get(c, rid)
+    run = await app.state.monitoring.get_run(c, rid)
     await c.close()
     if run is None:
         return HTMLResponse(f"run {rid} not found", status_code=404)
@@ -379,7 +380,7 @@ async def run_detail(request: Request, rid: str):
 @app.get("/jobs/{jid}", response_class=HTMLResponse)
 async def job_detail(request: Request, jid: str):
     c = await conn()
-    job = await app.state.monitoring.job_get(c, jid)
+    job = await app.state.monitoring.get_job(c, jid)
     await c.close()
     if job is None:
         return HTMLResponse(f"job {jid} not found", status_code=404)

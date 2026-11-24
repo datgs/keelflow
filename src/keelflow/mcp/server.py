@@ -33,20 +33,20 @@ def make_server(dsn: str | None = None) -> MCPServer:
     ) -> str:
         """List jobs (durable units of work). Filter by `types`, `statuses`."""
         async with await _conn() as c:
-            return await _json(await svc.jobs_list(
+            return await _json(await svc.list_jobs(
                 c, types=types, statuses=statuses, limit=limit))
 
     @app.tool()
     async def job_get(job_id: str) -> str:
         """Full detail for one job (status, payload, context, error)."""
         async with await _conn() as c:
-            return await _json(await svc.job_get(c, job_id))
+            return await _json(await svc.get_job(c, job_id))
 
     @app.tool()
     async def run_get(run_id: str) -> str:
         """Workflow run detail incl. per-step status."""
         async with await _conn() as c:
-            return await _json(await svc.runs_get(c, run_id))
+            return await _json(await svc.get_run(c, run_id))
 
     @app.tool()
     async def rows_list_failed(job_id: str) -> str:

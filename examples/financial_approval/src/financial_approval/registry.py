@@ -36,12 +36,12 @@ from keelflow.sdk import (
     AuditEvent,
     BatchRowResult,
     EntityRef,
+    HumanTaskOptions,
     JobHandler,
     JobResult,
     JobTypeSpec,
     RetryPolicy,
     StepSpec,
-    TaskUiSpec,
     WorkflowDefinition,
 )
 
@@ -97,7 +97,7 @@ async def _rec(cur, request_id: int, check_type: str, result: dict) -> None:
 
 
 def _status(ctx, request_id: int, status: str):
-    return ctx.tx.execute(
+    return ctx.uow.execute(
         "UPDATE demo_pay_requests SET status=%s WHERE id=%s",
         (status, request_id))
 
@@ -108,7 +108,7 @@ def _audit(ctx, request_id: int, action: str, detail: dict) -> None:
         actor=ctx.actor, action=action,
         entity=EntityRef(type="pay_request", id=str(request_id)),
         changes={"detail": ("", detail)},
-        source="fin.demo"), ctx.tx)
+        source="fin.demo"), ctx.uow)
 
 
 # ── machine handlers ───────────────────────────────────────────────────────
@@ -116,8 +116,8 @@ class ValidateH(JobHandler):
     """Intake: sum lines, ensure non-zero, mark submitted."""
 
     async def run(self, ctx, payload: Pay) -> JobResult:
-        cur = ctx.tx.connection.cursor(row_factory=dict_row) if hasattr(
-            ctx.tx, "connection") else ctx.tx
+        cur = ctx.uow.connection.cursor(row_factory=dict_row) if hasattr(
+            ctx.uow, "connection") else ctx.uow
         p = await _pay_row(cur, payload.request_id)
         if p is None:
             return JobResult(status="failed",
@@ -142,8 +142,8 @@ class DedupCheckH(JobHandler):
     this vendor with the same amount (deterministic mock)."""
 
     async def run(self, ctx, payload: Pay) -> JobResult:
-        cur = ctx.tx.connection.cursor(row_factory=dict_row) if hasattr(
-            ctx.tx, "connection") else ctx.tx
+        cur = ctx.uow.connection.cursor(row_factory=dict_row) if hasattr(
+            ctx.uow, "connection") else ctx.uow
         p = await _pay_row(cur, payload.request_id)
         dup = _h("dup", p["ref"], str(p["amount"])) % 97 == 0   # ~1%
         return JobResult(status="done", outputs={"possible_dup": dup})
@@ -151,8 +151,8 @@ class DedupCheckH(JobHandler):
 
 class VendorEnrichH(JobHandler):
     async def run(self, ctx, payload: Pay) -> JobResult:
-        cur = ctx.tx.connection.cursor(row_factory=dict_row) if hasattr(
-            ctx.tx, "connection") else ctx.tx
+        cur = ctx.uow.connection.cursor(row_factory=dict_row) if hasattr(
+            ctx.uow, "connection") else ctx.uow
         p = await _pay_row(cur, payload.request_id)
         await cur.execute(
             "SELECT name, country, bank_ref FROM demo_vendors WHERE id=%s",
@@ -168,8 +168,8 @@ class VendorEnrichH(JobHandler):
 # ── parallel risk checks (machine) — deterministic mock adapters ────────
 class TaxCalcH(JobHandler):
     async def run(self, ctx, payload: Pay) -> JobResult:
-        cur = ctx.tx.connection.cursor(row_factory=dict_row) if hasattr(
-            ctx.tx, "connection") else ctx.tx
+        cur = ctx.uow.connection.cursor(row_factory=dict_row) if hasattr(
+            ctx.uow, "connection") else ctx.uow
         p = await _pay_row(cur, payload.request_id)
         rate = Decimal("0.10")
         tax = (p["amount"] * rate).quantize(Decimal("0.01"))
@@ -181,8 +181,8 @@ class TaxCalcH(JobHandler):
 
 class BudgetCheckH(JobHandler):
     async def run(self, ctx, payload: Pay) -> JobResult:
-        cur = ctx.tx.connection.cursor(row_factory=dict_row) if hasattr(
-            ctx.tx, "connection") else ctx.tx
+        cur = ctx.uow.connection.cursor(row_factory=dict_row) if hasattr(
+            ctx.uow, "connection") else ctx.uow
         p = await _pay_row(cur, payload.request_id)
         # deterministic budget: headroom derived from ref
         headroom = Decimal(50_000 + _h("bud", p["ref"]) % 250_000)
@@ -194,8 +194,8 @@ class BudgetCheckH(JobHandler):
 
 class SanctionScreenH(JobHandler):
     async def run(self, ctx, payload: Pay) -> JobResult:
-        cur = ctx.tx.connection.cursor(row_factory=dict_row) if hasattr(
-            ctx.tx, "connection") else ctx.tx
+        cur = ctx.uow.connection.cursor(row_factory=dict_row) if hasattr(
+            ctx.uow, "connection") else ctx.uow
         p = await _pay_row(cur, payload.request_id)
         if p["fail_sanction"]:
             raise RuntimeError("sanction API timeout (simulated outage)")
@@ -213,8 +213,8 @@ class RiskScoreH(JobHandler):
     """Fan-in: combine the five check outputs → low|medium|high."""
 
     async def run(self, ctx, payload: Pay) -> JobResult:
-        cur = ctx.tx.connection.cursor(row_factory=dict_row) if hasattr(
-            ctx.tx, "connection") else ctx.tx
+        cur = ctx.uow.connection.cursor(row_factory=dict_row) if hasattr(
+            ctx.uow, "connection") else ctx.uow
         p = await _pay_row(cur, payload.request_id)
         await cur.execute(
             "SELECT check_type, result FROM demo_fin_checks"
@@ -232,7 +232,7 @@ class RiskScoreH(JobHandler):
                 or r["sanction_screen"]["score"] > 0.2
                 or p["currency"] != "USD"):
             risk = "medium"
-        await ctx.tx.execute(
+        await ctx.uow.execute(
             "UPDATE demo_pay_requests SET risk=%s WHERE id=%s",
             (risk, payload.request_id))
         return JobResult(status="done", outputs={"risk": risk})
@@ -241,8 +241,8 @@ class RiskScoreH(JobHandler):
 # ── GL + schedule machine steps (run only when every approval passed) ──
 class GlPostH(JobHandler):
     async def run(self, ctx, payload: Pay) -> JobResult:
-        cur = ctx.tx.connection.cursor(row_factory=dict_row) if hasattr(
-            ctx.tx, "connection") else ctx.tx
+        cur = ctx.uow.connection.cursor(row_factory=dict_row) if hasattr(
+            ctx.uow, "connection") else ctx.uow
         await cur.execute(
             "SELECT count(*) AS n FROM demo_pay_lines WHERE request_id=%s",
             (payload.request_id,))
@@ -261,8 +261,8 @@ class AccrualH(JobHandler):
 
 class ApScheduleH(JobHandler):
     async def run(self, ctx, payload: Pay) -> JobResult:
-        cur = ctx.tx.connection.cursor(row_factory=dict_row) if hasattr(
-            ctx.tx, "connection") else ctx.tx
+        cur = ctx.uow.connection.cursor(row_factory=dict_row) if hasattr(
+            ctx.uow, "connection") else ctx.uow
         p = await _pay_row(cur, payload.request_id)
         await _status(ctx, payload.request_id, "scheduled")
         terms = "immediate" if p["urgent"] else "net30"
@@ -285,8 +285,8 @@ class PayLinesBulkH(BulkJobHandler):
     """
 
     async def run(self, ctx, payload: Pay) -> JobResult:
-        cur = ctx.tx.connection.cursor() if hasattr(
-            ctx.tx, "connection") else ctx.tx
+        cur = ctx.uow.connection.cursor() if hasattr(
+            ctx.uow, "connection") else ctx.uow
         job_id = ctx.extra["job_id"]
         await cur.execute(
             "INSERT INTO keelflow_row_status (job_id, row_key, status, data)"
@@ -353,12 +353,12 @@ class _NoopH(JobHandler):
 def build_registry() -> InMemoryRegistry:
     r = InMemoryRegistry()
 
-    def j(type_: str, handler, *, human=False, wait=False, ui=None,
+    def j(type_: str, handler, *, human=False, wait=False, human_task=None,
           attempts=3, coop=False):
         r.register_job_type(JobTypeSpec(
             type=type_, input_schema=Pay, handler=handler,
             retry=RetryPolicy(max_attempts=attempts, base_seconds=5),
-            is_human=human, is_wait=wait, ui=ui,
+            is_human=human, is_external_wait=wait, human_task=human_task,
             cooperative_cancel=coop))
 
     j("fin.validate@v1", ValidateH, coop=True)
@@ -390,13 +390,13 @@ def build_registry() -> InMemoryRegistry:
 
     # conditional human approvals — `if:` guards decide at advance time
     j("human.ap_mgr@v1", _NoopH, human=True,
-      ui=TaskUiSpec(assignee_role="manager"))
+      human_task=HumanTaskOptions(assignee_role="manager"))
     j("human.ap_ctrl@v1", _NoopH, human=True,
-      ui=TaskUiSpec(assignee_role="controller"))
+      human_task=HumanTaskOptions(assignee_role="controller"))
     j("human.ap_cfo@v1", _NoopH, human=True,
-      ui=TaskUiSpec(assignee_role="cfo"))
+      human_task=HumanTaskOptions(assignee_role="cfo"))
     j("human.ap_comp@v1", _NoopH, human=True,
-      ui=TaskUiSpec(assignee_role="compliance"))
+      human_task=HumanTaskOptions(assignee_role="compliance"))
 
     i = {"request_id": "${{ inputs.request_id }}"}
     r.register_workflow(WorkflowDefinition(

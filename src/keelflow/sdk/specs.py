@@ -44,7 +44,7 @@ class CronSpec:
 
 
 @dataclass(frozen=True)
-class TaskUiSpec:
+class HumanTaskOptions:
     """UI hints for human.* task types (level 1/2/3)."""
     route: str | None = None                    # level 1 deep link
     quick_actions: tuple[dict[str, Any], ...] = ()  # level 2 buttons
@@ -91,14 +91,14 @@ class JobTypeSpec:
     retry: RetryPolicy = field(default_factory=RetryPolicy)
     concurrency: ConcurrencySpec = field(default_factory=ConcurrencySpec)
     schedule: CronSpec | None = None
-    ui: TaskUiSpec | None = None
+    human_task: HumanTaskOptions | None = None
     is_human: bool = False                       # human.* vs machine
     # External-wait job: workflow materialization creates a durable
     # blocked job row with NO kernel claim; the application resolves it
     # later via `signal`/`signal_failure` (e.g. a vendor callback after
     # its own auth + correlation). Requires a `wait.*` type name and is
     # mutually exclusive with `is_human`.
-    is_wait: bool = False
+    is_external_wait: bool = False
     payload_max_bytes: int = 8192
     # Size visibility on handler outputs (two-tier):
     #   result_max_bytes — hard cap; None = unlimited (default, opt-in).
@@ -144,14 +144,14 @@ class WorkflowTriggerSpec:
     terminal outcome the engine applies the matching callback action to
     the entity — in the same transaction that finalizes the run.
 
-    Outcomes: `on_done` (run finished), `on_rejected` (a human step
+    Outcomes: `on_succeeded` (run finished), `on_rejected` (a human step
     completed with `_rejected` marker — business rejection, not a
     technical failure), `on_failed` (retry exhaustion). `failure_job`
     is an optional human task type spawned on `on_failed`.
     """
 
     workflow: str                            # "name@vN"
-    on_done: str | None = None               # SM action on run success
+    on_succeeded: str | None = None          # SM action on run success
     on_rejected: str | None = None           # SM action on business reject
     on_failed: str | None = None             # SM action on tech failure
     failure_job: str | None = None           # human.* type on on_failed

@@ -18,6 +18,7 @@ from keelflow.engine.enqueue import JobService
 from keelflow.engine.registry import InMemoryRegistry
 from keelflow.engine.workflow import WorkflowService, eval_guard, resolve_inputs
 from keelflow.postgres.schema import apply_async
+from keelflow.postgres.storage import PostgresStorage
 from keelflow.sdk import (
     Actor,
     JobContext,
@@ -96,7 +97,7 @@ async def env(db):
             type="t.flaky@v1", input_schema=In, handler=FailOnceH,
             retry=RetryPolicy(max_attempts=3, base_seconds=1)))
         reg.register_job_type(JobTypeSpec(type="human.review@v1", input_schema=In, handler=OkH, is_human=True))
-        jobs = JobService(reg, kernel)
+        jobs = JobService(reg, kernel, PostgresStorage(DSN))
         worker_mod.configure(registry=reg, dsn=DSN, kernel=kernel)
         wf = WorkflowService(reg, jobs)
         yield {"reg": reg, "jobs": jobs, "wf": wf, "kernel": kernel}

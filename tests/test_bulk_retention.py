@@ -25,9 +25,12 @@ from keelflow.engine.bulk import register as register_bulk
 from keelflow.engine.monitoring import MonitoringService
 from keelflow.engine.registry import InMemoryRegistry
 from keelflow.postgres.schema import apply_async
+from keelflow.postgres.storage import PostgresStorage
 from keelflow.sdk import Actor, JobContext, JobTypeSpec
 
 DSN = "postgresql://postgres:postgres@localhost:5544/keelflow"
+
+STORAGE = PostgresStorage(DSN)
 
 APPLIED: list[str] = []
 
@@ -213,7 +216,7 @@ async def test_fan_in_rerun_is_idempotent(db):
 
     handler = ChunkJobHandler()
     async with await _conn() as conn:
-        await handler._fan_in(conn, parent)  # re-run path
+        await handler._fan_in(conn, STORAGE, parent)  # re-run path
     assert await _counts(db, "keelflow_row_archive", parent) == {
         "archived": 2}
 
@@ -237,7 +240,7 @@ async def test_archive_failure_rolls_back(db):
         await conn.execute("DROP TABLE keelflow_row_archive")
         try:
             with pytest.raises(psycopg.errors.UndefinedTable):
-                await ChunkJobHandler()._fan_in(conn, parent)
+                await ChunkJobHandler()._fan_in(conn, STORAGE, parent)
         finally:
             await conn.execute(
                 "CREATE TABLE keelflow_row_archive ("
@@ -278,7 +281,7 @@ async def test_progress_terminal_uses_summary(db):
     await _stage(db, parent, ["a", "bad", "b"])
     await _run_chunk(db, parent)
 
-    st = await progress(db, parent)
+    st = await progress(db, STORAGE, parent)
     assert st["finished"] is True
     assert st["rows_total"] == 3
     assert st["done"] == 2
