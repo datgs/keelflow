@@ -59,10 +59,11 @@ async def test_upgrade_from_prior_revision_preserves_data():
         conn = await psycopg.AsyncConnection.connect(dsn, autocommit=True)
         try:
             row = await (await conn.execute(
-                "SELECT type, status, payload, unique_key"
+                "SELECT type, status, payload, unique_key, progress, progress_at"
                 " FROM keelflow_jobs")).fetchone()
             assert row[0] == "mig.t@v1" and row[1] == "pending"
             assert row[3] is None              # new column readable
+            assert row[4] is None and row[5] is None
             run = await (await conn.execute(
                 "SELECT workflow, status FROM keelflow_workflow_runs"
             )).fetchone()
@@ -70,7 +71,7 @@ async def test_upgrade_from_prior_revision_preserves_data():
             # alembic recorded head
             rev = await (await conn.execute(
                 "SELECT version_num FROM alembic_version")).fetchone()
-            assert rev[0] == "0008"
+            assert rev[0] == "0009"
         finally:
             await conn.close()
 
@@ -86,6 +87,6 @@ async def test_upgrade_is_idempotent_on_head():
         try:
             rev = await (await conn.execute(
                 "SELECT version_num FROM alembic_version")).fetchone()
-            assert rev[0] == "0008"
+            assert rev[0] == "0009"
         finally:
             await conn.close()

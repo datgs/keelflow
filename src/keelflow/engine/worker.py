@@ -21,6 +21,7 @@ import json
 import logging
 import os
 import random
+import time
 import traceback
 from datetime import UTC, datetime, timedelta
 
@@ -176,6 +177,7 @@ async def dispatch(job_id: str, step_run_id: str | None = None) -> None:
                     job_id=job_id,
                     cooperative_cancel=bool(
                         getattr(spec, "cooperative_cancel", False)),
+                    progress_enabled=bool(getattr(spec, "progress_enabled", False)),
                 ),
             )
             jlog = _job_logger(job_id, type_name, ctx.correlation_id,
@@ -208,6 +210,14 @@ async def dispatch(job_id: str, step_run_id: str | None = None) -> None:
                         "job %s not startable (status changed); skipping",
                         job_id)
                 return
+            started_attempt = await storage.job_attempts(uow, job_id)
+            if (spec.no_progress_timeout_seconds is not None
+                    and started_attempt is not None):
+                await storage.job_progress_start(
+                    job_id,
+                    started_attempt[0],
+                    spec.no_progress_timeout_seconds,
+                )
         # uow boundary 1 committed: job is 'running' durably — a crash
         # mid-handler leaves it for kernel recovery instead of re-claim.
 
@@ -217,6 +227,7 @@ async def dispatch(job_id: str, step_run_id: str | None = None) -> None:
         lock_cm = (session.key_lock(_ck) if _ck
                    else contextlib.nullcontext())
 
+        ctx.execution.attempt = started_attempt[0] if started_attempt else 0
         handler = spec.handler()  # type: ignore[misc]
         status = None
         result = None
@@ -231,10 +242,16 @@ async def dispatch(job_id: str, step_run_id: str | None = None) -> None:
                     from ..observability import tracer
                     with tracer().start_as_current_span(
                             "keelflow.dispatch"):
+                        ctx.execution.last_progress_at = time.monotonic()
                         run = handler.run(ctx, payload)
-                        if spec.timeout_seconds:
-                            result = await asyncio.wait_for(
-                                run, timeout=spec.timeout_seconds)
+                        timeout = (spec.no_progress_timeout_seconds
+                                   or spec.timeout_seconds)
+                        if timeout:
+                            result = await _run_with_progress_timeout(
+                                run, ctx.execution, timeout,
+                                absolute_timeout=spec.timeout_seconds,
+                                progress_timeout=(
+                                    spec.no_progress_timeout_seconds is not None))
                         else:
                             result = await run
                     object.__setattr__(ctx, "uow", None)
@@ -474,6 +491,56 @@ def run_worker(
                 await worker.stop()
 
     asyncio.run(_run())
+
+
+async def _run_with_progress_timeout(
+    awaitable,
+    execution,
+    timeout: float,
+    *,
+    absolute_timeout: float | None,
+    progress_timeout: bool,
+):
+    loop = asyncio.get_running_loop()
+    started_at = loop.time()
+    task = asyncio.ensure_future(awaitable)
+    try:
+        while True:
+            elapsed = time.monotonic() - execution.last_progress_at
+            remaining = timeout - elapsed
+            if absolute_timeout is not None:
+                remaining = min(
+                    remaining, absolute_timeout - (loop.time() - started_at)
+                )
+            if remaining <= 0:
+                if progress_timeout and elapsed >= timeout:
+                    raise TimeoutError("no progress reported before timeout")
+                raise TimeoutError("TimeoutError")
+            waiter = asyncio.create_task(execution.progress_event.wait())
+            done, _ = await asyncio.wait(
+                {task, waiter}, timeout=remaining,
+                return_when=asyncio.FIRST_COMPLETED)
+            if task in done:
+                waiter.cancel()
+                await asyncio.gather(waiter, return_exceptions=True)
+                return task.result()
+            if waiter in done:
+                execution.progress_event.clear()
+                if (absolute_timeout is not None
+                        and loop.time() - started_at >= absolute_timeout):
+                    raise TimeoutError("TimeoutError")
+                continue
+            waiter.cancel()
+            await asyncio.gather(waiter, return_exceptions=True)
+            elapsed = time.monotonic() - execution.last_progress_at
+            if progress_timeout and elapsed >= timeout:
+                raise TimeoutError("no progress reported before timeout")
+            raise TimeoutError("TimeoutError")
+    except BaseException:
+        if not task.done():
+            task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+        raise
 
 
 class _JobFailedError(RuntimeError):

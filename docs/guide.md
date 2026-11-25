@@ -146,10 +146,50 @@ redelivery after `RetryPolicy.backoff`/`base_seconds` (+`jitter`) until
 `max_attempts`, then the job (and any workflow step it belongs to)
 fails permanently and is copied to `keelflow_dlq`.
 
+For a long-running handler that should remain active while it makes progress,
+opt into application-reported progress. For example, report every 10 completed
+items in a 1,000-item job:
+
+```python
+class ImportItemsH(JobHandler):
+    async def run(self, ctx, payload):
+        items = await load_items(ctx, payload)
+        for completed, item in enumerate(items, start=1):
+            await process_item(ctx, item)
+            if completed % 10 == 0 or completed == len(items):
+                await ctx.execution.report_progress(completed, len(items))
+        return JobResult(status="done")
+
+registry.register_job_type(JobTypeSpec(
+    type="items.import@v1",
+    input_schema=ImportItems,
+    handler=ImportItemsH,
+    progress_enabled=True,
+    no_progress_timeout_seconds=120,
+    retry=RetryPolicy(max_attempts=3),
+))
+```
+
+Choose the report cadence and no-progress window together: here, the 120-second
+window must exceed the longest expected interval between reports. The setting
+is opt-in and requires `progress_enabled=True`. A no-progress timeout cancels
+the local handler attempt, rolls back its current UoW, and uses the normal retry
+policy. It cannot guarantee that an already-issued external request stopped, so
+retries need stable idempotency keys, outbox/receiver deduplication, or a
+reconciliation strategy. Report after a committed or otherwise verifiable unit
+when possible; reported progress itself does not prove business work committed.
+
+`report_progress` takes integer `current` and `total` with
+`0 <= current <= total`, an optional message (up to 256 characters), and
+optional JSON object metadata (up to 8 KiB). Progress is persisted outside the
+handler UoW and is fenced to the active attempt. It is application progress,
+not an automatic worker/process-liveness heartbeat. SQLite does not currently
+support persisted progress or the no-progress timeout.
+
 ```python
 retry=RetryPolicy(max_attempts=5, backoff="exponential",
                   base_seconds=30, jitter=True),
-timeout_seconds=60,    # kill the handler coroutine after 60s
+timeout_seconds=60,    # absolute cap: kill the handler coroutine after 60s
 result_warning_bytes=32768,   # soft: warn + record size, never fails
 result_max_bytes=None,        # hard cap, opt-in; exceeded -> job fails
 ```

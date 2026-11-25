@@ -81,10 +81,19 @@ kernel claims job → dispatch(job_id)
   commits after the last checkpoint can lose to normal completion.
   Cancellation never rolls back external side effects.
 - `JobHandler.on_cancel` is an **experimental** placeholder — the
-  worker never invokes it. Handler-level `heartbeat()` was removed:
-  worker liveness is kernel-owned (chancy heartbeat + Recovery), and
-  progress/cancellation responsiveness is expressed via explicit
-  checkpoints, not heartbeats.
+  worker never invokes it. Process liveness remains kernel-owned. Job
+  types may opt into `progress_enabled=True` and call
+  `await ctx.execution.report_progress(current, total, message=..., metadata=...)`.
+  Progress is observational application data, stored independently of the
+  handler UoW and fenced to the current attempt; it does not prove committed
+  business work. Metadata is JSON object data capped at 8 KiB and messages at
+  256 characters. `no_progress_timeout_seconds` requires progress opt-in and
+  causes the local handler attempt to be cancelled, its UoW rolled back, and
+  the normal retry policy applied. Local cancellation cannot stop a remote
+  request already in flight. Configure retry only when stable idempotency keys,
+  an outbox with receiver deduplication, or explicit reconciliation makes replay
+  safe; ambiguous external outcomes require manual reconciliation, not blind
+  retry. Progress reporting is distinct from cooperative cancellation checkpoints.
 - Cron `overlap="kill_previous"` follows the same rule: a pending
   previous job is cancelled outright, while a claimed/running one is
   only flagged `cancel_requested` and drains (or checkpoints).

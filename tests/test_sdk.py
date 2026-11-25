@@ -52,6 +52,8 @@ def test_job_type_spec():
     assert spec.retry.max_attempts == 5
     assert spec.concurrency.key == "payload.vendor_id"
     assert spec.payload_max_bytes == 8192
+    assert spec.progress_enabled is False
+    assert spec.no_progress_timeout_seconds is None
 
 
 def test_workflow_definition():
@@ -111,6 +113,24 @@ def test_checkpoint_requires_opt_in_and_tx():
         exc2 = ExecutionContext(job_id="j1", cooperative_cancel=True, uow=None)
         with pytest.raises(RuntimeError, match="handler transaction"):
             await exc2.checkpoint()
+
+    asyncio.run(main())
+
+
+def test_progress_requires_opt_in_and_valid_counters():
+    import asyncio
+
+    async def main():
+        from keelflow.sdk import ExecutionContext
+
+        disabled = ExecutionContext(job_id="j1")
+        with pytest.raises(RuntimeError, match="progress_enabled"):
+            await disabled.report_progress(1, 2)
+        enabled = ExecutionContext(job_id="j1", progress_enabled=True)
+        with pytest.raises(ValueError, match="current/total"):
+            await enabled.report_progress(3, 2)
+        with pytest.raises(ValueError, match="256 characters"):
+            await enabled.report_progress(1, 2, message="x" * 257)
 
     asyncio.run(main())
 

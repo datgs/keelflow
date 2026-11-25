@@ -117,6 +117,8 @@ class JobTypeSpec:
     # 'cancelled' (no retry, no DLQ). Without opt-in, checkpoints raise
     # RuntimeError and running jobs drain to done/failed.
     cooperative_cancel: bool = False
+    progress_enabled: bool = False
+    no_progress_timeout_seconds: float | None = None
 
 
 @dataclass(frozen=True)

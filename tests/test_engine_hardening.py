@@ -68,6 +68,30 @@ class SlowOnceH(JobHandler):
         return JobResult(status="done", outputs={"n": 1})
 
 
+class ProgressH(JobHandler):
+    entered: asyncio.Event | None = None
+    release: asyncio.Event | None = None
+
+    async def run(self, ctx, payload: In):
+        await ctx.uow.execute(
+            "INSERT INTO keelflow_outbox (event_type, payload)"
+            " VALUES ('probe.progress', '{}')")
+        await ctx.execution.report_progress(1, 3, message="started")
+        type(self).entered.set()
+        await type(self).release.wait()
+        return JobResult(status="done")
+
+
+class StallH(JobHandler):
+    calls = 0
+
+    async def run(self, ctx, payload: In):
+        type(self).calls += 1
+        if type(self).calls == 1:
+            await asyncio.Event().wait()
+        return JobResult(status="done")
+
+
 class BoomH(JobHandler):
     async def run(self, ctx, payload: In):
         raise RuntimeError("always boom")
@@ -182,6 +206,16 @@ async def env(db):
                               jitter=False),
             timeout_seconds=0.2))
         reg.register_job_type(JobTypeSpec(
+            type="t.progress@v1", input_schema=In, handler=ProgressH,
+            progress_enabled=True, no_progress_timeout_seconds=0.2,
+            retry=RetryPolicy(max_attempts=2, base_seconds=0.05,
+                              jitter=False)))
+        reg.register_job_type(JobTypeSpec(
+            type="t.stall@v1", input_schema=In, handler=StallH,
+            progress_enabled=True, no_progress_timeout_seconds=0.05,
+            retry=RetryPolicy(max_attempts=2, base_seconds=0.05,
+                              jitter=False)))
+        reg.register_job_type(JobTypeSpec(
             type="t.boom@v1", input_schema=In, handler=BoomH,
             retry=RetryPolicy(max_attempts=2, base_seconds=0.05,
                               jitter=False)))
@@ -227,6 +261,65 @@ async def _wait_run(db, run_id, want, timeout=15):
             return row
         await asyncio.sleep(0.1)
     return await _run_row(db, run_id)
+
+
+@pytest.mark.asyncio
+async def test_progress_is_visible_before_handler_finishes(env, db):
+    ProgressH.entered = asyncio.Event()
+    ProgressH.release = asyncio.Event()
+    async with (
+        await _conn(autocommit=False) as conn,
+        conn.transaction(),
+        conn.cursor() as cur,
+    ):
+        ref = await env["jobs"].builder("t.progress@v1") \
+            .context(JobContext(actor=Actor.user("u1"))) \
+            .payload({"x": 1}).enqueue(cur)
+    task = asyncio.create_task(worker_mod.dispatch(ref.id))
+    try:
+        await asyncio.wait_for(ProgressH.entered.wait(), timeout=2)
+        row = await (await db.execute(
+            "SELECT progress->>'current', progress->>'message', progress_at"
+            " FROM keelflow_jobs WHERE id=%s", (ref.id,))).fetchone()
+        assert row[0] == "1" and row[1] == "started" and row[2] is not None
+        assert (await (await db.execute(
+            "SELECT count(*) FROM keelflow_outbox"
+            " WHERE event_type='probe.progress'")).fetchone())[0] == 0
+    finally:
+        ProgressH.release.set()
+        await task
+    assert (await (await db.execute(
+        "SELECT status FROM keelflow_jobs WHERE id=%s", (ref.id,)
+    )).fetchone())[0] == "done"
+    mon = MonitoringService(env["jobs"])
+    stale = await mon.list_stale_progress(db)
+    assert all(str(row["id"]) != ref.id for row in stale)
+
+
+@pytest.mark.asyncio
+async def test_no_progress_timeout_retries_and_fences_attempt(env, db):
+    StallH.calls = 0
+    async with (
+        await _conn(autocommit=False) as conn,
+        conn.transaction(),
+        conn.cursor() as cur,
+    ):
+        ref = await env["jobs"].builder("t.stall@v1") \
+            .context(JobContext(actor=Actor.user("u1"))) \
+            .payload({"x": 1}).enqueue(cur)
+    await worker_mod.dispatch(ref.id)
+    row = await (await db.execute(
+        "SELECT status, attempts, error FROM keelflow_jobs WHERE id=%s",
+        (ref.id,))).fetchone()
+    assert row[0] == "running" and row[1] == 1
+    assert "no progress" in row[2]
+    await worker_mod.dispatch(ref.id)
+    row = await (await db.execute(
+        "SELECT status, attempts FROM keelflow_jobs WHERE id=%s", (ref.id,)
+    )).fetchone()
+    assert row == ("done", 2)
+    assert (await PostgresStorage(DSN).job_progress_report(
+        ref.id, 1, {"current": 2, "total": 2})) is False
 
 
 # ── cancelled-step run outcome ────────────────────────────────────────────

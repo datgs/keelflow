@@ -133,6 +133,14 @@ class Storage(Protocol):
 
     async def job_cancel_requested(self, uow: UnitOfWork, job_id: str) -> bool: ...
 
+    async def job_progress_start(
+        self, job_id: str, attempt: int, timeout_seconds: float
+    ) -> None: ...
+
+    async def job_progress_report(
+        self, job_id: str, attempt: int, progress: dict[str, Any]
+    ) -> bool: ...
+
     async def job_finish(
         self, uow: UnitOfWork, job_id: str, finish: JobFinish
     ) -> None: ...
@@ -486,6 +494,8 @@ class Storage(Protocol):
     async def ops_results_oversized(
         self, uow: UnitOfWork, *, threshold: int = 32768, limit: int = 50
     ) -> list[dict[str, Any]]: ...
+
+    async def ops_stale_progress(self, uow: UnitOfWork) -> list[dict[str, Any]]: ...
 
     async def ops_metrics_snapshot(self, uow: UnitOfWork) -> dict[str, Any]:
         """Queue depth / running / failed24h + optional

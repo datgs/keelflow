@@ -1,6 +1,8 @@
 """JobContext — ambient execution context for every job."""
 from __future__ import annotations
 
+import asyncio
+import time
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -36,8 +38,55 @@ class ExecutionContext:
 
     job_id: str
     cooperative_cancel: bool = False
+    progress_enabled: bool = False
+    attempt: int = 0
+    progress_event: asyncio.Event = field(default_factory=asyncio.Event)
+    last_progress_at: float = field(default_factory=time.monotonic)
     uow: Any = None
     storage: Any = None
+
+    async def report_progress(
+        self,
+        current: int,
+        total: int,
+        *,
+        message: str | None = None,
+        metadata: dict[str, Any] | None = None,
+    ) -> None:
+        """Persist bounded application progress outside the handler UoW."""
+        import json
+
+        if not self.progress_enabled:
+            raise RuntimeError(
+                "report_progress() requires JobTypeSpec(progress_enabled=True)"
+            )
+        if (isinstance(current, bool) or isinstance(total, bool)
+                or not isinstance(current, int) or not isinstance(total, int)
+                or current < 0 or total < 0 or current > total):
+            raise ValueError("progress current/total must be integers with 0 <= current <= total")
+        if message is not None and (not isinstance(message, str) or len(message) > 256):
+            raise ValueError("progress message must be at most 256 characters")
+        if metadata is not None:
+            if not isinstance(metadata, dict):
+                raise ValueError("progress metadata must be a JSON object")
+            try:
+                encoded = json.dumps(
+                    metadata, separators=(",", ":"), allow_nan=False)
+            except (TypeError, ValueError) as exc:
+                raise ValueError("progress metadata must contain JSON values") from exc
+            if len(encoded.encode()) > 8192:
+                raise ValueError("progress metadata exceeds 8192 bytes")
+        if self.storage is None:
+            raise RuntimeError("report_progress() is only valid inside a handler")
+        self.progress_event.clear()
+        persisted = await self.storage.job_progress_report(
+            self.job_id, self.attempt, {
+                "current": current, "total": total,
+                "message": message, "metadata": metadata,
+            })
+        if persisted:
+            self.last_progress_at = time.monotonic()
+            self.progress_event.set()
 
     async def checkpoint(self) -> None:
         """Observe a cancellation request at a safe point in the handler.

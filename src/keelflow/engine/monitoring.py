@@ -38,6 +38,10 @@ class MonitoringService:
     async def get_job(self, uow, job_id: str) -> dict[str, Any] | None:
         return await self._store().job_load(uow, job_id)
 
+    async def list_stale_progress(self, uow) -> list[dict[str, Any]]:
+        """Return running jobs past their configured no-progress window."""
+        return await self._store().ops_stale_progress(uow)
+
     async def get_run(self, uow, run_id: str) -> dict[str, Any] | None:
         storage = self._store()
         run = await storage.run_get(uow, run_id)

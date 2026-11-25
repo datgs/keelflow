@@ -22,9 +22,15 @@ CREATE TABLE IF NOT EXISTS keelflow_jobs (
     result_bytes    INT,              -- serialized size for size-visibility
     error           TEXT,
     cancel_requested BOOLEAN NOT NULL DEFAULT FALSE,
+    progress         JSONB,
+    progress_at      TIMESTAMPTZ,
+    progress_timeout_seconds DOUBLE PRECISION,
     created_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at      TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+ALTER TABLE keelflow_jobs ADD COLUMN IF NOT EXISTS progress JSONB;
+ALTER TABLE keelflow_jobs ADD COLUMN IF NOT EXISTS progress_at TIMESTAMPTZ;
+ALTER TABLE keelflow_jobs ADD COLUMN IF NOT EXISTS progress_timeout_seconds DOUBLE PRECISION;
 CREATE INDEX IF NOT EXISTS ix_jobs_claim
     ON keelflow_jobs (status, run_at, type)
     WHERE status = 'pending';

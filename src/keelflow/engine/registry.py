@@ -41,6 +41,12 @@ class InMemoryRegistry(Registry):
         return frozenset(self._permissions)
 
     def register_job_type(self, spec: JobTypeSpec) -> None:
+        if (spec.no_progress_timeout_seconds is not None
+                and (not spec.progress_enabled
+                     or spec.no_progress_timeout_seconds <= 0)):
+            raise ValueError(
+                f"{spec.type!r}: no_progress_timeout_seconds must be positive "
+                "and requires progress_enabled=True")
         if spec.concurrency.max_workers is not None:
             raise ValueError(
                 f"{spec.type!r}: concurrency.max_workers is declared "

@@ -252,6 +252,39 @@ class PostgresStorage(Storage):
         row = await cur.fetchone()
         return bool(row and row["cancel_requested"])
 
+    async def job_progress_start(
+        self, job_id: str, attempt: int, timeout_seconds: float
+    ) -> None:
+        conn = await psycopg.AsyncConnection.connect(self.dsn)
+        try:
+            async with conn.transaction():
+                await conn.execute(
+                    "UPDATE keelflow_jobs SET progress=NULL, progress_at=now(),"
+                " progress_timeout_seconds=%s"
+                    " WHERE id=%s AND status='running' AND attempts=%s",
+
+                    (timeout_seconds, job_id, attempt),
+                )
+        finally:
+            await conn.close()
+
+    async def job_progress_report(
+        self, job_id: str, attempt: int, progress: dict[str, Any]
+    ) -> bool:
+        conn = await psycopg.AsyncConnection.connect(self.dsn)
+        try:
+            async with conn.transaction():
+                cur = await conn.execute(
+                    "UPDATE keelflow_jobs SET progress=%s, progress_at=now()"
+                    " WHERE id=%s AND status='running' AND attempts=%s"
+                    " AND (progress_timeout_seconds IS NULL OR progress_at >"
+                    " now() - interval '1 second' * progress_timeout_seconds)",
+                    (json.dumps(progress, default=json_default), job_id, attempt),
+                )
+                return bool(cur.rowcount)
+        finally:
+            await conn.close()
+
     async def job_finish(self, uow: UnitOfWork, job_id: str, finish: JobFinish) -> None:
         await self._conn(uow).execute(
             "UPDATE keelflow_jobs SET status=%s, result=%s, result_bytes=%s,"
@@ -1136,6 +1169,7 @@ class PostgresStorage(Storage):
         await cur.execute(
             "SELECT id, type, status, attempts, run_at, claimed_by,"
             " concurrency_key, assignee, parent_job_id, result_bytes,"
+            " progress, progress_at, progress_timeout_seconds,"
             " created_at, updated_at"
             f" FROM keelflow_jobs WHERE {' AND '.join(where)}"
             " ORDER BY created_at DESC LIMIT %s",
@@ -1201,6 +1235,18 @@ class PostgresStorage(Storage):
             " ORDER BY worst DESC NULLS LAST LIMIT %s",
             (threshold, limit),
         )
+        return await cur.fetchall()
+
+    async def ops_stale_progress(self, uow: UnitOfWork) -> list[dict[str, Any]]:
+        cur = self._cur(uow)
+        await cur.execute(
+            "SELECT id, type, status, attempts, progress, progress_at,"
+            " progress_timeout_seconds,"
+            " EXTRACT(EPOCH FROM (now() - progress_at)) AS progress_age_s"
+            " FROM keelflow_jobs WHERE status='running' AND run_at <= now()"
+            " AND progress_timeout_seconds IS NOT NULL"
+            " AND progress_at < now() - interval '1 second' * progress_timeout_seconds"
+            " ORDER BY progress_at ASC")
         return await cur.fetchall()
 
     async def ops_metrics_snapshot(self, uow: UnitOfWork) -> dict[str, Any]:
