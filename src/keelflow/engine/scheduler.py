@@ -72,7 +72,7 @@ def _apply_window(fire: datetime, window: str | None, tz) -> datetime:
 
 async def tick(
     uow, storage: Storage, registry: Registry, kernel,
-    *, now: datetime | None = None,
+    *, now: datetime | None = None, interval: float = 30.0,
 ) -> int:
     """Enqueue due scheduled jobs for all registered scheduled types.
 
@@ -84,9 +84,12 @@ async def tick(
 
     kernel = as_kernel(kernel)
     # liveness: a heartbeat row per scheduler process, inside the tick's
-    # uow so ops can alert on a silently dead scheduler.
+    # uow so ops can alert on a silently dead scheduler. The tick IS
+    # the heartbeat, so the freshness window needs headroom over the
+    # caller's interval — ~3 missed ticks before reporting stale.
     await storage.heartbeat_upsert(
-        uow, _scheduler_name(), "scheduler")
+        uow, _scheduler_name(), "scheduler",
+        stale_after_s=max(interval * 3.0, 30.0))
     enqueued = 0
     for spec in _scheduled_types(registry):
         cron = spec.schedule
@@ -137,7 +140,8 @@ async def run_scheduler(
         while not (stop and stop.is_set()):
             try:
                 async with session.begin() as uow:
-                    n = await tick(uow, storage, registry, kernel)
+                    n = await tick(uow, storage, registry, kernel,
+                                   interval=interval)
             except Exception:
                 log.exception("scheduler tick failed")
                 n = 0

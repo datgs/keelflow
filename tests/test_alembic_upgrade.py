@@ -64,6 +64,11 @@ async def test_upgrade_from_prior_revision_preserves_data():
             assert row[0] == "mig.t@v1" and row[1] == "pending"
             assert row[3] is None              # new column readable
             assert row[4] is None and row[5] is None
+            tok = await (await conn.execute(
+                "SELECT column_name FROM information_schema.columns"
+                " WHERE table_name='keelflow_jobs'"
+                " AND column_name='execution_token'")).fetchone()
+            assert tok is not None
             run = await (await conn.execute(
                 "SELECT workflow, status FROM keelflow_workflow_runs"
             )).fetchone()
@@ -71,7 +76,7 @@ async def test_upgrade_from_prior_revision_preserves_data():
             # alembic recorded head
             rev = await (await conn.execute(
                 "SELECT version_num FROM alembic_version")).fetchone()
-            assert rev[0] == "0009"
+            assert rev[0] == "0010"
         finally:
             await conn.close()
 
@@ -87,6 +92,6 @@ async def test_upgrade_is_idempotent_on_head():
         try:
             rev = await (await conn.execute(
                 "SELECT version_num FROM alembic_version")).fetchone()
-            assert rev[0] == "0009"
+            assert rev[0] == "0010"
         finally:
             await conn.close()

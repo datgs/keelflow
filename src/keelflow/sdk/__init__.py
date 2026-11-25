@@ -44,7 +44,14 @@ from .specs import (
     WorkflowDefinition,
     WorkflowTriggerSpec,
 )
-from .storage import DlqInsert, JobFinish, JobInsert, RowArchiveResult, Storage
+from .storage import (
+    DlqInsert,
+    ExecutionLostError,
+    JobFinish,
+    JobInsert,
+    RowArchiveResult,
+    Storage,
+)
 from .uow import Session, Tx, UnitOfWork
 
 __all__ = [
@@ -61,6 +68,7 @@ __all__ = [
     "EventBus",
     "EventHandler",
     "ExecutionContext",
+    "ExecutionLostError",
     "HumanTaskOptions",
     "Job",
     "JobBuilder",

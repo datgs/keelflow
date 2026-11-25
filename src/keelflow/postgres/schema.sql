@@ -25,12 +25,14 @@ CREATE TABLE IF NOT EXISTS keelflow_jobs (
     progress         JSONB,
     progress_at      TIMESTAMPTZ,
     progress_timeout_seconds DOUBLE PRECISION,
+    execution_token TEXT,           -- non-reusable fencing token per claim
     created_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at      TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 ALTER TABLE keelflow_jobs ADD COLUMN IF NOT EXISTS progress JSONB;
 ALTER TABLE keelflow_jobs ADD COLUMN IF NOT EXISTS progress_at TIMESTAMPTZ;
 ALTER TABLE keelflow_jobs ADD COLUMN IF NOT EXISTS progress_timeout_seconds DOUBLE PRECISION;
+ALTER TABLE keelflow_jobs ADD COLUMN IF NOT EXISTS execution_token TEXT;
 CREATE INDEX IF NOT EXISTS ix_jobs_claim
     ON keelflow_jobs (status, run_at, type)
     WHERE status = 'pending';
@@ -214,5 +216,8 @@ CREATE TABLE IF NOT EXISTS keelflow_dlq (
 CREATE TABLE IF NOT EXISTS keelflow_process_health (
     name       TEXT PRIMARY KEY,
     kind       TEXT NOT NULL CHECK (kind IN ('worker','scheduler')),
-    last_seen  TIMESTAMPTZ NOT NULL DEFAULT now()
+    last_seen  TIMESTAMPTZ NOT NULL DEFAULT now(),
+    stale_after_s DOUBLE PRECISION NOT NULL DEFAULT 30
 );
+ALTER TABLE keelflow_process_health
+    ADD COLUMN IF NOT EXISTS stale_after_s DOUBLE PRECISION NOT NULL DEFAULT 30;

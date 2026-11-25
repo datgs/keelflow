@@ -46,6 +46,16 @@ def json_default(o: Any) -> Any:
     return str(o)
 
 
+class ExecutionLostError(Exception):
+    """The current dispatch no longer owns this job's execution.
+
+    Raised by fenced storage writes when the row's `execution_token` no
+    longer matches the token handed to this dispatch — a newer claim,
+    reschedule, or ops reset took over. Workers treat it as
+    "abandon the attempt", never as a retryable handler failure.
+    """
+
+
 # ── write payloads ────────────────────────────────────────────────────
 
 
@@ -126,24 +136,56 @@ class Storage(Protocol):
         concurrency_key, cancel_requested, attempts, max_attempts."""
         ...
 
-    async def job_mark_running(self, uow: UnitOfWork, job_id: str) -> bool:
+    async def job_mark_running(
+        self,
+        uow: UnitOfWork,
+        job_id: str,
+        *,
+        progress_timeout_seconds: float | None = None,
+    ) -> str | None:
         """Atomic pending/claimed/running → running + attempts+1, only
-        when cancel_requested is false. False = not startable."""
+        when cancel_requested is false. None = not startable.
+
+        The winning claim generates a fresh `execution_token` — the
+        non-reusable fence for progress, finish, and reschedule writes.
+        When `progress_timeout_seconds` is set, the attempt's progress
+        clock (`progress_at`/`progress_timeout_seconds`, `progress`
+        cleared) is initialized in the same unit so monitoring and
+        fenced reports observe it after the running transition commits.
+        Returns the token on success."""
         ...
 
     async def job_cancel_requested(self, uow: UnitOfWork, job_id: str) -> bool: ...
 
-    async def job_progress_start(
-        self, job_id: str, attempt: int, timeout_seconds: float
-    ) -> None: ...
-
     async def job_progress_report(
-        self, job_id: str, attempt: int, progress: dict[str, Any]
-    ) -> bool: ...
+        self, job_id: str, execution_token: str, progress: dict[str, Any]
+    ) -> bool:
+        """Persist progress for the current running attempt.
+
+        Commits on its own connection/transaction — never joins or
+        commits the handler's business UoW. Returns False when the
+        execution token no longer owns the job (a newer claim, a
+        reschedule, or an ops reset took over) or the job left
+        `running`; callers should treat False as a lost execution,
+        not a successful report. Deadline enforcement is the in-process
+        watchdog, not this write."""
+        ...
 
     async def job_finish(
-        self, uow: UnitOfWork, job_id: str, finish: JobFinish
-    ) -> None: ...
+        self,
+        uow: UnitOfWork,
+        job_id: str,
+        finish: JobFinish,
+        *,
+        execution_token: str | None = None,
+    ) -> None:
+        """Terminal/intermediate finish write.
+
+        When `execution_token` is supplied the update is fenced to the
+        owning claim — zero matching rows raises `ExecutionLostError`
+        so the caller's UoW rolls back its business writes instead of
+        committing a stale result."""
+        ...
 
     async def job_cancel_request(self, uow: UnitOfWork, job_id: str) -> str | None:
         """Flag cooperative cancel; pending → cancelled immediately.
@@ -158,8 +200,18 @@ class Storage(Protocol):
         ...
 
     async def job_error_and_reschedule(
-        self, uow: UnitOfWork, job_id: str, error: str, delay_s: float
-    ) -> None: ...
+        self,
+        uow: UnitOfWork,
+        job_id: str,
+        error: str,
+        delay_s: float,
+        *,
+        execution_token: str | None = None,
+    ) -> None:
+        """Record a retryable failure, defer run_at, and release the
+        claim token. Token-fenced like `job_finish` — a stale dispatch
+        must not reschedule a job a newer claim owns."""
+        ...
 
     async def job_retry_reset(self, uow: UnitOfWork, job_id: str) -> int:
         """Ops action: failed → pending, attempts=0. Rows changed."""
@@ -528,7 +580,16 @@ class Storage(Protocol):
     # ── process liveness (observability) ─────────────────────────
 
     async def heartbeat_upsert(
-        self, uow: UnitOfWork, name: str, kind: str
+        self,
+        uow: UnitOfWork,
+        name: str,
+        kind: str,
+        *,
+        stale_after_s: float = 30.0,
     ) -> None:
-        """Record a worker/scheduler liveness tick inside `uow`."""
+        """Record a worker/scheduler liveness tick inside `uow`.
+
+        `stale_after_s` declares the freshness window monitoring uses
+        for this process — pick it with headroom over the heartbeat
+        cadence so a healthy process is not reported stale by delay."""
         ...

@@ -182,9 +182,13 @@ when possible; reported progress itself does not prove business work committed.
 `report_progress` takes integer `current` and `total` with
 `0 <= current <= total`, an optional message (up to 256 characters), and
 optional JSON object metadata (up to 8 KiB). Progress is persisted outside the
-handler UoW and is fenced to the active attempt. It is application progress,
-not an automatic worker/process-liveness heartbeat. SQLite does not currently
-support persisted progress or the no-progress timeout.
+handler UoW and is fenced to the owning claim's `execution_token` — a report
+committed after the window closes, or from a claim a retry already replaced,
+is rejected with `ExecutionLostError` and that stale dispatch is abandoned
+rather than retried — the in-process watchdog owns the deadline, the
+token fence owns the durable row. It is application progress, not an automatic
+worker/process-liveness heartbeat. SQLite does not currently support
+persisted progress or the no-progress timeout.
 
 ```python
 retry=RetryPolicy(max_attempts=5, backoff="exponential",
@@ -694,8 +698,26 @@ when `keelflow[otel]` is installed (`tracer()` is a no-op otherwise).
 queue depth, claimed, running, waiting (blocked human/wait steps —
 separate from stuck work), failed_24h, oldest pending, done duration,
 DLQ depth, worker liveness and scheduler heartbeat age as Prometheus
-text. Workers and schedulers upsert `keelflow_process_health` rows.
-Mount the text on your own /metrics endpoint — no built-in listener.
+text. Workers and schedulers upsert `keelflow_process_health` rows and
+monitoring treats a row as alive while `last_seen` is fresher than its
+`stale_after_s` window. `run_worker` starts a worker heartbeat every
+10s (`stale_after_s=30`); a scheduler's heartbeat is its tick, declared
+at `max(interval*3, 30)` so a healthy idle scheduler is not reported
+stale. Mount the text on your own /metrics endpoint — no built-in
+listener.
+
+Running a caller-owned kernel worker instead of `run_worker`?
+`configure()` only wires dispatch — start the heartbeat yourself so an
+idle worker still shows alive:
+
+```python
+from keelflow.engine.worker import configure, worker_heartbeat_loop
+
+configure(registry=reg, dsn=DSN, kernel=kernel, storage=storage)
+heartbeat = asyncio.create_task(
+    worker_heartbeat_loop(storage))          # 10s cadence, 30s window
+# ... start your kernel worker; cancel heartbeat on shutdown.
+```
 
 - **Audit**: pass `PostgresAuditService` to `EngineStateMachineService`;
   every transition (including workflow-trigger callbacks) lands in

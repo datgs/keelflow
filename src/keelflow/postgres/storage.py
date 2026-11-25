@@ -24,6 +24,7 @@ from psycopg.rows import dict_row
 from ..sdk.services import AuditEvent, JobStatus
 from ..sdk.storage import (
     DlqInsert,
+    ExecutionLostError,
     JobFinish,
     JobInsert,
     Storage,
@@ -232,16 +233,28 @@ class PostgresStorage(Storage):
         rid = existing["id"] if isinstance(existing, dict) else existing[0]
         return str(rid)
 
-    async def job_mark_running(self, uow: UnitOfWork, job_id: str) -> bool:
+    async def job_mark_running(
+        self,
+        uow: UnitOfWork,
+        job_id: str,
+        *,
+        progress_timeout_seconds: float | None = None,
+    ) -> str | None:
         cur = await self._conn(uow).execute(
-            "UPDATE keelflow_jobs SET status=%s, attempts = attempts + 1,"
-            " updated_at=now()"
+            "UPDATE keelflow_jobs"
+            " SET status=%s, attempts = attempts + 1,"
+            "     execution_token = gen_random_uuid()::text,"
+            "     progress = NULL, progress_at = now(),"
+            "     progress_timeout_seconds = %s,"
+            "     updated_at=now()"
             " WHERE id=%s"
             "   AND status IN ('pending','claimed','running')"
-            "   AND cancel_requested = false",
-            (JobStatus.RUNNING.value, job_id),
+            "   AND cancel_requested = false"
+            " RETURNING execution_token",
+            (JobStatus.RUNNING.value, progress_timeout_seconds, job_id),
         )
-        return bool(cur.rowcount)
+        row = await cur.fetchone()
+        return row[0] if row else None
 
     async def job_cancel_requested(self, uow: UnitOfWork, job_id: str) -> bool:
         cur = self._cur(uow)
@@ -252,51 +265,53 @@ class PostgresStorage(Storage):
         row = await cur.fetchone()
         return bool(row and row["cancel_requested"])
 
-    async def job_progress_start(
-        self, job_id: str, attempt: int, timeout_seconds: float
-    ) -> None:
-        conn = await psycopg.AsyncConnection.connect(self.dsn)
-        try:
-            async with conn.transaction():
-                await conn.execute(
-                    "UPDATE keelflow_jobs SET progress=NULL, progress_at=now(),"
-                " progress_timeout_seconds=%s"
-                    " WHERE id=%s AND status='running' AND attempts=%s",
-
-                    (timeout_seconds, job_id, attempt),
-                )
-        finally:
-            await conn.close()
-
     async def job_progress_report(
-        self, job_id: str, attempt: int, progress: dict[str, Any]
+        self, job_id: str, execution_token: str, progress: dict[str, Any]
     ) -> bool:
         conn = await psycopg.AsyncConnection.connect(self.dsn)
         try:
             async with conn.transaction():
                 cur = await conn.execute(
                     "UPDATE keelflow_jobs SET progress=%s, progress_at=now()"
-                    " WHERE id=%s AND status='running' AND attempts=%s"
-                    " AND (progress_timeout_seconds IS NULL OR progress_at >"
-                    " now() - interval '1 second' * progress_timeout_seconds)",
-                    (json.dumps(progress, default=json_default), job_id, attempt),
+                    " WHERE id=%s AND status='running'"
+                    "   AND execution_token=%s"
+                    "   AND (progress_timeout_seconds IS NULL OR progress_at >"
+                    "        now() - interval '1 second'"
+                    "        * progress_timeout_seconds)",
+                    (json.dumps(progress, default=json_default),
+                     job_id, execution_token),
                 )
                 return bool(cur.rowcount)
         finally:
             await conn.close()
 
-    async def job_finish(self, uow: UnitOfWork, job_id: str, finish: JobFinish) -> None:
-        await self._conn(uow).execute(
+    async def job_finish(
+        self,
+        uow: UnitOfWork,
+        job_id: str,
+        finish: JobFinish,
+        *,
+        execution_token: str | None = None,
+    ) -> None:
+        sql = (
             "UPDATE keelflow_jobs SET status=%s, result=%s, result_bytes=%s,"
-            " error=%s, updated_at=now() WHERE id=%s",
-            (
-                finish.status.value,
-                json.dumps(finish.result, default=json_default) if finish.result else None,
-                finish.result_bytes,
-                finish.error,
-                job_id,
-            ),
+            " error=%s, updated_at=now() WHERE id=%s"
         )
+        params: list[Any] = [
+            finish.status.value,
+            json.dumps(finish.result, default=json_default) if finish.result else None,
+            finish.result_bytes,
+            finish.error,
+            job_id,
+        ]
+        if execution_token is not None:
+            sql += " AND execution_token = %s"
+            params.append(execution_token)
+        cur = await self._conn(uow).execute(sql, tuple(params))
+        if execution_token is not None and not cur.rowcount:
+            raise ExecutionLostError(
+                f"job {job_id}: execution token lost — a newer claim, "
+                "reschedule, or ops retry owns this job")
 
     async def job_load(self, uow: UnitOfWork, job_id: str) -> dict[str, Any] | None:
         cur = self._conn(uow).cursor(row_factory=dict_row)
@@ -335,19 +350,33 @@ class PostgresStorage(Storage):
         )
 
     async def job_error_and_reschedule(
-        self, uow: UnitOfWork, job_id: str, error: str, delay_s: float
+        self,
+        uow: UnitOfWork,
+        job_id: str,
+        error: str,
+        delay_s: float,
+        *,
+        execution_token: str | None = None,
     ) -> None:
-        await self._conn(uow).execute(
+        sql = (
             "UPDATE keelflow_jobs SET error=%s,"
             " run_at=run_at + interval '1 second' * %s,"
-            " updated_at=now() WHERE id=%s",
-            (error, delay_s, job_id),
+            " execution_token=NULL, updated_at=now() WHERE id=%s"
         )
+        params: list[Any] = [error, delay_s, job_id]
+        if execution_token is not None:
+            sql += " AND execution_token = %s"
+            params.append(execution_token)
+        cur = await self._conn(uow).execute(sql, tuple(params))
+        if execution_token is not None and not cur.rowcount:
+            raise ExecutionLostError(
+                f"job {job_id}: execution token lost — a newer claim, "
+                "reschedule, or ops retry owns this job")
 
     async def job_retry_reset(self, uow: UnitOfWork, job_id: str) -> int:
         cur = await self._conn(uow).execute(
             "UPDATE keelflow_jobs SET status='pending', error=NULL,"
-            " attempts=0, updated_at=now()"
+            " attempts=0, execution_token=NULL, updated_at=now()"
             " WHERE id=%s AND status='failed'",
             (job_id,),
         )
@@ -1170,7 +1199,7 @@ class PostgresStorage(Storage):
             "SELECT id, type, status, attempts, run_at, claimed_by,"
             " concurrency_key, assignee, parent_job_id, result_bytes,"
             " progress, progress_at, progress_timeout_seconds,"
-            " created_at, updated_at"
+            " execution_token, created_at, updated_at"
             f" FROM keelflow_jobs WHERE {' AND '.join(where)}"
             " ORDER BY created_at DESC LIMIT %s",
             params,
@@ -1278,7 +1307,8 @@ class PostgresStorage(Storage):
         # fresher than the stale threshold (see worker.STALE_AFTER_S).
         await cur.execute(
             "SELECT count(*) FILTER"
-            "       (WHERE last_seen > now() - interval '30 seconds')"
+            "       (WHERE last_seen > now() - interval '1 second'"
+            "                         * stale_after_s)"
             "       AS alive,"
             "       count(*) AS total,"
             "       EXTRACT(EPOCH FROM (now() - min(last_seen)))"
@@ -1289,7 +1319,8 @@ class PostgresStorage(Storage):
         row["workers_stale"] = w["total"] - w["alive"]
         await cur.execute(
             "SELECT count(*) FILTER"
-            "       (WHERE last_seen > now() - interval '30 seconds')"
+            "       (WHERE last_seen > now() - interval '1 second'"
+            "                         * stale_after_s)"
             "       AS alive,"
             "       max(last_seen) AS last_seen, "
             "       EXTRACT(EPOCH FROM (now() - max(last_seen))) AS age_s"
@@ -1398,14 +1429,21 @@ class PostgresStorage(Storage):
     # ── process liveness ─────────────────────────────────────────
 
     async def heartbeat_upsert(
-        self, uow: UnitOfWork, name: str, kind: str
+        self,
+        uow: UnitOfWork,
+        name: str,
+        kind: str,
+        *,
+        stale_after_s: float = 30.0,
     ) -> None:
         cur = self._cur(uow)
         await cur.execute(
             """
-            INSERT INTO keelflow_process_health (name, kind, last_seen)
-            VALUES (%s, %s, now())
-            ON CONFLICT (name) DO UPDATE SET last_seen = now()
+            INSERT INTO keelflow_process_health (name, kind, last_seen,
+                                                 stale_after_s)
+            VALUES (%s, %s, now(), %s)
+            ON CONFLICT (name) DO UPDATE SET last_seen = now(),
+                                            stale_after_s = EXCLUDED.stale_after_s
             """,
-            (name, kind),
+            (name, kind, stale_after_s),
         )

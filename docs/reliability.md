@@ -20,6 +20,7 @@ must own. Proofs referenced are executable tests — see
 ## What is NOT guaranteed
 
 - **Progress is not proof of work.** Opt-in job progress is an application-reported snapshot visible independently of the handler transaction. A report is not proof that the corresponding business work committed. No-progress timeouts cancel the local attempt and use normal retries; they cannot cancel an external request already in flight. Configure automatic retry only with a stable provider idempotency key, a transactional outbox plus receiver deduplication, or an explicit reconciliation strategy. If an external outcome is ambiguous and cannot be deduplicated or reconciled, do not configure blind automatic retry; use alerting/manual reconciliation.
+- **Stale dispatches cannot overwrite a newer claim.** Each claim mints a non-reusable `execution_token`; progress, finish, and retry-reschedule writes carrying an outdated token are rejected (`ExecutionLostError`) and the attempt's UoW rolls back. Fencing prevents stale local commits — it does not undo external side effects already issued.
 - **Exactly-once external effects.** Email, payment calls, webhooks,
   and any write outside the UoW are **not rolled back** and may repeat
   on redelivery. Applications must use idempotency keys, dedup

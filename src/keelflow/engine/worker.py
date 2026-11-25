@@ -31,6 +31,7 @@ from pydantic import ValidationError
 from ..sdk import (
     DlqInsert,
     ExecutionContext,
+    ExecutionLostError,
     JobCancelled,
     JobFinish,
     JobResult,
@@ -200,7 +201,14 @@ async def dispatch(job_id: str, step_run_id: str | None = None) -> None:
             # so a cancellation committed between the load above and
             # this update wins — a separate check + unconditional write
             # would lose the race and run a cancelled job.
-            if not await storage.job_mark_running(uow, job_id):
+            # The claim mints a fresh non-reusable execution_token in
+            # the same atomic UPDATE: fenced progress/finish/reschedule
+            # writes reject anything older than this claim, and ops
+            # retry (attempts=0) can never collide with a live token.
+            execution_token = await storage.job_mark_running(
+                uow, job_id,
+                progress_timeout_seconds=spec.no_progress_timeout_seconds)
+            if execution_token is None:
                 if await storage.job_cancel_requested(uow, job_id):
                     await _cancel_terminalize(
                         uow, session, storage, registry, job_id,
@@ -210,14 +218,7 @@ async def dispatch(job_id: str, step_run_id: str | None = None) -> None:
                         "job %s not startable (status changed); skipping",
                         job_id)
                 return
-            started_attempt = await storage.job_attempts(uow, job_id)
-            if (spec.no_progress_timeout_seconds is not None
-                    and started_attempt is not None):
-                await storage.job_progress_start(
-                    job_id,
-                    started_attempt[0],
-                    spec.no_progress_timeout_seconds,
-                )
+            ctx.execution.execution_token = execution_token
         # uow boundary 1 committed: job is 'running' durably — a crash
         # mid-handler leaves it for kernel recovery instead of re-claim.
 
@@ -226,8 +227,6 @@ async def dispatch(job_id: str, step_run_id: str | None = None) -> None:
         # already serializes claim; this session lock covers the run.
         lock_cm = (session.key_lock(_ck) if _ck
                    else contextlib.nullcontext())
-
-        ctx.execution.attempt = started_attempt[0] if started_attempt else 0
         handler = spec.handler()  # type: ignore[misc]
         status = None
         result = None
@@ -294,7 +293,7 @@ async def dispatch(job_id: str, step_run_id: str | None = None) -> None:
                             result=result.outputs,
                             error=result.error,
                             result_bytes=_res_bytes,
-                        ))
+                        ), execution_token=ctx.execution.execution_token)
                     if step_run_id and not bulk_hold:
                         kernel = _kernel_client
                         if kernel is not None:
@@ -304,71 +303,97 @@ async def dispatch(job_id: str, step_run_id: str | None = None) -> None:
                                 uow, storage, kernel, registry, job_id,
                                 step_run_id, status, result.outputs,
                             )
-            except JobCancelled:
-                # A checkpoint observed a committed cancel_requested: the
-                # handler UoW already rolled back its domain writes.
-                # Terminalize as cancelled in a NEW unit — never through
-                # the retry/DLQ path.
+            except (JobCancelled, ExecutionLostError) as ctrl:
+                # JobCancelled: a checkpoint observed a committed
+                # cancel_requested → terminalize 'cancelled' in a new
+                # unit (bypasses retry/DLQ).
+                # ExecutionLostError: this dispatch lost its claim
+                # (retry takeover, ops reset, newer claim) → the fenced
+                # write already rolled the UoW back; abandon.
+                if isinstance(ctrl, ExecutionLostError):
+                    jlog.warning(
+                        "execution lost before completion; abandoning "
+                        "stale dispatch")
+                    return
                 jlog.info("cancelled at checkpoint")
-                async with session.begin() as uow:
-                    await _cancel_terminalize(
-                        uow, session, storage, registry, job_id,
-                        step_run_id, jlog, type_name, payload_json)
+                try:
+                    async with session.begin() as uow:
+                        await _cancel_terminalize(
+                            uow, session, storage, registry, job_id,
+                            step_run_id, jlog, type_name, payload_json,
+                            execution_token=ctx.execution.execution_token)
+                except ExecutionLostError:
+                    jlog.warning(
+                        "execution lost during cancel settle; "
+                        "abandoning stale dispatch")
                 return
             except Exception as exc:
                 tb = traceback.format_exc(limit=10)
                 exc_text = str(exc) or type(exc).__name__  # TimeoutError → ''
-                async with session.begin() as uow:
-                    att = await storage.job_attempts(uow, job_id)
-                    exhausted = bool(att and att[0] >= att[1])
-                    if exhausted:
-                        # Retries are done → terminal failure + DLQ copy
-                        # + step settle in ONE unit (was three commits).
-                        await storage.job_finish(uow, job_id, JobFinish(
-                            status=JobStatus.FAILED,
-                            error=exc_text + ("\n" + tb if tb else "")))
-                        # keep the workflow link so dlq_replay can resume
-                        _dlq_run_id = None
-                        if step_run_id:
-                            _sr = await storage.step_run_get(
-                                uow, step_run_id)
-                            _dlq_run_id = (
-                                str(_sr["run_id"]) if _sr else None)
-                        await storage.dlq_insert(uow, DlqInsert(
-                            id=job_id, type=type_name,
-                            payload=payload_json, context=ctx_json,
-                            error=exc_text,
-                            attempts=att[0] if att else 0,
-                            run_id=_dlq_run_id, step_run_id=step_run_id,
-                        ))
-                        jlog.error("handler failed permanently: %s", exc)
-                        if step_run_id and _kernel_client is not None:
-                            from .workflow import on_job_finished
+                try:
+                    async with session.begin() as uow:
+                        att = await storage.job_attempts(uow, job_id)
+                        exhausted = bool(att and att[0] >= att[1])
+                        if exhausted:
+                            # Retries are done → terminal failure + DLQ
+                            # copy + step settle in ONE unit.
+                            await storage.job_finish(uow, job_id, JobFinish(
+                                status=JobStatus.FAILED,
+                                error=exc_text + ("\n" + tb if tb else "")),
+                                execution_token=ctx.execution.execution_token)
+                            # keep the workflow link so dlq_replay can
+                            # resume the owning run
+                            _dlq_run_id = None
+                            if step_run_id:
+                                _sr = await storage.step_run_get(
+                                    uow, step_run_id)
+                                _dlq_run_id = (
+                                    str(_sr["run_id"]) if _sr else None)
+                            await storage.dlq_insert(uow, DlqInsert(
+                                id=job_id, type=type_name,
+                                payload=payload_json, context=ctx_json,
+                                error=exc_text,
+                                attempts=att[0] if att else 0,
+                                run_id=_dlq_run_id, step_run_id=step_run_id,
+                            ))
+                            jlog.error("handler failed permanently: %s", exc)
+                            if step_run_id and _kernel_client is not None:
+                                from .workflow import on_job_finished
 
-                            await on_job_finished(
-                                uow, storage, _kernel_client, registry,
-                                job_id, step_run_id, JobStatus.FAILED, {},
-                            )
-                    else:
-                        # Engine-scheduled retry: keep the engine job
-                        # 'running', record the error, and push a
-                        # replacement kernel job at the spec's backoff
-                        # delay inside one UoW (push rolls back with the
-                        # error write if either fails). Kernel crash
-                        # recovery still redelivers the original kernel
-                        # job — the attempts>=max_attempts check above
-                        # converges both.
-                        delay = _retry_delay(spec, att[0] if att else 1)
-                        await storage.job_error_and_reschedule(
-                            uow, job_id, exc_text, delay)
-                        if _kernel_client is not None:
-                            await _kernel_client.push_ex(
-                                uow, _retry_kernel_job(
-                                    job_id, type_name, spec,
-                                    step_run_id, delay))
-                        jlog.error(
-                            "handler failed (retryable in %.1fs): %s",
-                            delay, exc)
+                                await on_job_finished(
+                                    uow, storage, _kernel_client, registry,
+                                    job_id, step_run_id, JobStatus.FAILED,
+                                    {})
+                        else:
+                            # Engine-scheduled retry: keep the engine job
+                            # 'running', record the error, and push a
+                            # replacement kernel job at the spec's backoff
+                            # delay inside one UoW (push rolls back with
+                            # the error write if either fails). Kernel
+                            # crash recovery still redelivers the
+                            # original kernel job — the
+                            # attempts>=max_attempts check above
+                            # converges both.
+                            delay = _retry_delay(spec, att[0] if att else 1)
+                            await storage.job_error_and_reschedule(
+                                uow, job_id, exc_text, delay,
+                                execution_token=ctx.execution.execution_token)
+                            if _kernel_client is not None:
+                                await _kernel_client.push_ex(
+                                    uow, _retry_kernel_job(
+                                        job_id, type_name, spec,
+                                        step_run_id, delay))
+                            jlog.error(
+                                "handler failed (retryable in %.1fs): %s",
+                                delay, exc)
+                except ExecutionLostError:
+                    # The failure-recording UoW hit the fence: another
+                    # claim or ops action owns the job now. Never
+                    # reschedule from a stale dispatch.
+                    jlog.warning(
+                        "execution lost while recording failure; "
+                        "abandoning stale dispatch")
+                    return
                 if _kernel_client is None and not exhausted:
                     # No kernel client to push a redelivery through —
                     # fall back to kernel retry semantics.
@@ -515,7 +540,7 @@ async def _run_with_progress_timeout(
             if remaining <= 0:
                 if progress_timeout and elapsed >= timeout:
                     raise TimeoutError("no progress reported before timeout")
-                raise TimeoutError("TimeoutError")
+                raise TimeoutError
             waiter = asyncio.create_task(execution.progress_event.wait())
             done, _ = await asyncio.wait(
                 {task, waiter}, timeout=remaining,
@@ -528,14 +553,14 @@ async def _run_with_progress_timeout(
                 execution.progress_event.clear()
                 if (absolute_timeout is not None
                         and loop.time() - started_at >= absolute_timeout):
-                    raise TimeoutError("TimeoutError")
+                    raise TimeoutError
                 continue
             waiter.cancel()
             await asyncio.gather(waiter, return_exceptions=True)
             elapsed = time.monotonic() - execution.last_progress_at
             if progress_timeout and elapsed >= timeout:
                 raise TimeoutError("no progress reported before timeout")
-            raise TimeoutError("TimeoutError")
+            raise TimeoutError
     except BaseException:
         if not task.done():
             task.cancel()
@@ -577,11 +602,13 @@ def _retry_kernel_job(job_id, type_name: str, spec, step_run_id, delay: float):
 
 async def _cancel_terminalize(uow, session, storage, registry, job_id,
                               step_run_id, jlog,
-                              type_name=None, payload_json=None) -> None:
+                              type_name=None, payload_json=None,
+                              execution_token=None) -> None:
     """Terminalize a job as cancelled and advance its owning step — the
     same path the claim-time cancel check uses. Caller commits."""
     await storage.job_finish(
-        uow, job_id, JobFinish(status=JobStatus.CANCELLED))
+        uow, job_id, JobFinish(status=JobStatus.CANCELLED),
+        execution_token=execution_token)
     if step_run_id and _kernel_client is not None:
         from .workflow import on_job_finished
 

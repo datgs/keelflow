@@ -168,15 +168,61 @@ async def test_job_dedup_returns_existing_id(storage, session):
 
 @pytest.mark.asyncio
 async def test_job_mark_running_fenced_by_cancel(storage, session):
-    """pending→running increments attempts, but never when
-    cancel_requested is set — the claim-time race the port must fence."""
+    """pending→running increments attempts and mints the execution
+    token, but never when cancel_requested is set — the claim-time
+    race the port must fence."""
     job_id = str(uuid.uuid4())
     async with session.begin() as uow:
         await storage.job_insert(uow, _job(job_id))
-        assert await storage.job_mark_running(uow, job_id) is True
+        token = await storage.job_mark_running(uow, job_id)
+        assert token is not None
         assert (await storage.job_attempts(uow, job_id)) == (1, 3)
         assert await storage.job_cancel_request(uow, job_id) == "running"
-        assert await storage.job_mark_running(uow, job_id) is False
+        assert await storage.job_mark_running(uow, job_id) is None
+
+
+@pytest.mark.asyncio
+async def test_execution_token_fences_finish_and_report(storage, session):
+    """A stale token cannot finish the job or record progress: the
+    same non-reusable fence protects both paths even after ops retry
+    resets the human attempt counter."""
+    job_id = str(uuid.uuid4())
+    async with session.begin() as uow:
+        await storage.job_insert(uow, _job(job_id))
+        tok1 = await storage.job_mark_running(uow, job_id)
+        tok2 = await storage.job_mark_running(uow, job_id)
+    # Progress writes commit on their own connection — must see the
+    # committed claim, so run them outside the session uow.
+    assert tok1 is not None and tok2 is not None and tok1 != tok2
+    assert not await storage.job_progress_report(
+        job_id, tok1, {"current": 1, "total": 2})
+    assert await storage.job_progress_report(
+        job_id, tok2, {"current": 1, "total": 2})
+    async with session.begin() as uow:
+        from keelflow.sdk.storage import ExecutionLostError
+        with pytest.raises(ExecutionLostError):
+            await storage.job_finish(uow, job_id, JobFinish(
+                status=JobStatus.DONE), execution_token=tok1)
+    async with session.begin() as uow:
+        await storage.job_finish(uow, job_id, JobFinish(
+            status=JobStatus.DONE), execution_token=tok2)
+
+
+@pytest.mark.asyncio
+async def test_mark_running_initializes_progress_clock(storage, session):
+    """The configured no-progress window must commit atomically with
+    the running transition — not via a second write that races it."""
+    job_id = str(uuid.uuid4())
+    async with session.begin() as uow:
+        await storage.job_insert(uow, _job(job_id))
+        token = await storage.job_mark_running(
+            uow, job_id, progress_timeout_seconds=120.0)
+        assert token is not None
+        row = await storage.job_load(uow, job_id)
+        assert row is not None
+        assert row["progress_timeout_seconds"] == 120.0
+        assert row["progress_at"] is not None
+        assert row["execution_token"] == token
 
 
 @pytest.mark.asyncio

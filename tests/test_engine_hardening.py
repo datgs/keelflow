@@ -149,6 +149,19 @@ class CheckpointH(JobHandler):
         raise AssertionError("checkpoint did not raise JobCancelled")
 
 
+class FenceH(JobHandler):
+    """Blocks on a shared event — used to simulate two dispatches
+    racing one job; the older claim's finish must be fenced."""
+
+    started: asyncio.Event | None = None
+    release: asyncio.Event | None = None
+
+    async def run(self, ctx, payload: In):
+        type(self).started.set()
+        await type(self).release.wait()
+        return JobResult(status="done", outputs={"n": 1})
+
+
 class BoomThenOkH(JobHandler):
     """Fails while `armed`, succeeds once disarmed — simulates an ops fix
     between DLQ write and replay."""
@@ -313,13 +326,65 @@ async def test_no_progress_timeout_retries_and_fences_attempt(env, db):
         (ref.id,))).fetchone()
     assert row[0] == "running" and row[1] == 1
     assert "no progress" in row[2]
+    # the no-progress window committed atomically with the claim
+    cfg = await (await db.execute(
+        "SELECT progress_timeout_seconds FROM keelflow_jobs"
+        " WHERE id=%s", (ref.id,))).fetchone()
+    assert cfg[0] == 0.05
+    # a report carrying a foreign execution_token is rejected — the
+    # token fence, not just the attempt counter
+    assert (await PostgresStorage(DSN).job_progress_report(
+        ref.id, "deadbeef-dead-dead-dead-deadbeefdead",
+        {"current": 1, "total": 1})) is False
     await worker_mod.dispatch(ref.id)
     row = await (await db.execute(
         "SELECT status, attempts FROM keelflow_jobs WHERE id=%s", (ref.id,)
     )).fetchone()
     assert row == ("done", 2)
-    assert (await PostgresStorage(DSN).job_progress_report(
-        ref.id, 1, {"current": 2, "total": 2})) is False
+
+
+@pytest.mark.asyncio
+async def test_stale_dispatch_cannot_finish_or_overwrite(env, db):
+    """Two dispatches on the same job (double delivery): the second
+    claim mints a new execution_token; when the first handler finally
+    finishes its fenced writes lose, the UoW discards its result
+    write, and the job ends exactly once under the winning claim."""
+    env["reg"].register_job_type(JobTypeSpec(
+        type="t.fence@v1", input_schema=In, handler=FenceH))
+    FenceH.started = asyncio.Event()
+    FenceH.release = asyncio.Event()
+    async with (
+        await _conn(autocommit=False) as conn,
+        conn.transaction(),
+        conn.cursor() as cur,
+    ):
+        ref = await env["jobs"].builder("t.fence@v1") \
+            .context(JobContext(actor=Actor.user("u1"))) \
+            .payload({"x": 1}).enqueue(cur)
+    first = asyncio.create_task(worker_mod.dispatch(ref.id))
+    await asyncio.wait_for(FenceH.started.wait(), timeout=2)
+    tok1 = (await (await db.execute(
+        "SELECT execution_token FROM keelflow_jobs WHERE id=%s",
+        (ref.id,))).fetchone())[0]
+    # Stale dispatch steals the claim — same job id delivered again.
+    second = asyncio.create_task(worker_mod.dispatch(ref.id))
+    # Wait until the second claim commits its fresh execution_token
+    # before letting the first handler finish — that is the takeover
+    # the fence must catch.
+    for _ in range(100):
+        cur_tok = (await (await db.execute(
+            "SELECT execution_token FROM keelflow_jobs WHERE id=%s",
+            (ref.id,))).fetchone())[0]
+        if cur_tok != tok1:
+            break
+        await asyncio.sleep(0.02)
+    assert cur_tok != tok1
+    FenceH.release.set()
+    await asyncio.gather(first, second)   # neither raises
+    row = await (await db.execute(
+        "SELECT status, attempts FROM keelflow_jobs WHERE id=%s",
+        (ref.id,))).fetchone()
+    assert row == ("done", 2)
 
 
 # ── cancelled-step run outcome ────────────────────────────────────────────
@@ -573,11 +638,11 @@ async def test_cancel_wins_start_race_handler_never_runs(env, db, monkeypatch):
     from keelflow.postgres.storage import PostgresStorage
     orig = PostgresStorage.job_mark_running
 
-    async def injected(self, uow, job_id):
+    async def injected(self, uow, job_id, **kwargs):
         await db.execute(
             "UPDATE keelflow_jobs SET cancel_requested=true WHERE id=%s",
             (ref.id,))
-        return await orig(self, uow, job_id)
+        return await orig(self, uow, job_id, **kwargs)
 
     monkeypatch.setattr(PostgresStorage, "job_mark_running", injected)
     await worker_mod.dispatch(ref.id)

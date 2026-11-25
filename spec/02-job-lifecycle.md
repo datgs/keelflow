@@ -85,9 +85,17 @@ kernel claims job → dispatch(job_id)
   types may opt into `progress_enabled=True` and call
   `await ctx.execution.report_progress(current, total, message=..., metadata=...)`.
   Progress is observational application data, stored independently of the
-  handler UoW and fenced to the current attempt; it does not prove committed
-  business work. Metadata is JSON object data capped at 8 KiB and messages at
-  256 characters. `no_progress_timeout_seconds` requires progress opt-in and
+  handler UoW; it does not prove committed business work. Metadata is
+  JSON object data capped at 8 KiB and messages at 256 characters.
+- The pending→running transition mints a fresh `execution_token`
+  (non-reusable across retries and ops `retry_reset`). Progress,
+  finish, and reschedule writes are fenced on that token: a write
+  carrying an outdated token is rejected. Progress reports also must
+  arrive within the configured window — a report committed after the
+  deadline is rejected with `ExecutionLostError`, which abandons the
+  stale dispatch instead of retrying it. `report_progress()` raises
+  `ExecutionLostError` rather than silently dropping the report.
+- `no_progress_timeout_seconds` requires progress opt-in and
   causes the local handler attempt to be cancelled, its UoW rolled back, and
   the normal retry policy applied. Local cancellation cannot stop a remote
   request already in flight. Configure retry only when stable idempotency keys,

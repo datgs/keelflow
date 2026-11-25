@@ -4,9 +4,11 @@ Date: 2026-11-25
 
 ## Status
 
-Implemented for Postgres-backed dispatch (Chancy and Native kernel paths).
-SQLite progress persistence/watchdog remains unsupported because SQLiteKernel
-maintains a separate job table from the shared PostgresStorage contract.
+Follow-up hardening implemented and verified on Postgres. The original
+feature is committed as `aecf1f7`; this change adds execution-token fencing,
+atomic progress initialization, per-process heartbeat freshness, an
+`ExecutionLostError` contract, and a runnable demo. SQLite progress/watchdog
+remains out of scope as documented.
 
 ## Outcome
 
@@ -19,6 +21,35 @@ This feature reports application progress; it does not claim that a heartbeat
 proves useful work is happening or that an external request has stopped.
 
 ## Context and verified evidence
+
+Verified during plan preparation:
+
+- `job_mark_running()` increments `attempts` in the dispatch UoW
+  (`src/keelflow/postgres/storage.py:235-244`). Progress initialization is then
+  issued through a separate connection before that UoW exits
+  (`src/keelflow/engine/worker.py:203-220`,
+  `src/keelflow/postgres/storage.py:255-269`).
+- `job_retry_reset()` resets `attempts` to zero, and `job_finish()` updates by
+  job id without an attempt/claim fence
+  (`src/keelflow/postgres/storage.py:288-299,347-354`).
+- Progress reports are separately persisted and currently compare the attempt
+  number; the same timeout predicate appears twice in the query
+  (`src/keelflow/postgres/storage.py:271-288`).
+- Scheduler ticks default to a 30-second sleep when no job is enqueued
+  (`src/keelflow/engine/scheduler.py:129-147`). Metrics use a 30-second
+  freshness threshold for both workers and schedulers
+  (`src/keelflow/postgres/storage.py:1278-1299`).
+- `configure()` documents direct app-owned worker startup, while periodic worker
+  heartbeat is started only by `run_worker()`; dispatch upserts liveness only
+  when a job runs (`src/keelflow/engine/worker.py:53-56,432-452,630-657`).
+- The progress API returns normally when the storage update returns false
+  (`src/keelflow/sdk/context.py:81-89`). Each progress operation opens a new
+  database connection (`src/keelflow/postgres/storage.py:255-288`).
+- Existing tests cover progress visibility and a report attempted after terminal
+  completion, but not active stale attempts, manual retry reuse, scheduler idle
+  freshness, or app-owned worker heartbeat lifecycle
+  (`tests/test_engine_hardening.py:266-322`,
+  `tests/test_observability.py:84-126`).
 
 - `JobTypeSpec` already has opt-in per-job execution controls such as
   `timeout_seconds` and `cooperative_cancel` (`src/keelflow/sdk/specs.py:110-119`).
@@ -119,6 +150,11 @@ Out of scope:
    for ambiguous external effects.
 
 ## Work graph
+
+### Previous implementation work graph
+
+The following P1–P3 records describe the already committed feature, not this
+follow-up hardening scope.
 
 ### P1 — Define and persist the progress contract
 
@@ -223,7 +259,131 @@ across shared schema and worker code.
   `uv run ruff check src examples tests`, `uv run mypy src/keelflow`, and
   `git diff --check`.
 
-## Implementation record
+## Follow-up scope: reliability and heartbeat hardening
+
+In scope:
+
+- Make progress initialization atomic with the running-attempt transition.
+- Fence progress writes and handler terminal writes using an attempt/claim
+  identity that cannot be reused by ops retry; roll back business UoW if the
+  execution no longer owns the current claim.
+- Fix stale-progress registration/reporting semantics and make rejected reports
+  visible to the handler.
+- Choose a scheduler freshness rule with margin over its default tick interval.
+- Ensure app-owned worker startup has a documented and usable periodic
+  heartbeat lifecycle.
+- Add isolated Postgres tests for these races and lifecycle paths; measure
+  progress-write overhead before adding throttling/pooling.
+- Clarify that timeout detects missing reports, not dead processes or committed
+  progress, and that repeated identical counters still reset the timer.
+
+Out of scope:
+
+- Exactly-once external effects or remote request cancellation.
+- Automatic heartbeat generation on behalf of the handler.
+- Pooling, throttling, or rate guarantees without measurement evidence.
+- SQLite progress/watchdog support unless implementation discovery shows it is
+  a prerequisite to the accepted backend scope.
+
+## Approach
+
+1. Reconfirm and reproduce the progress transaction/fencing races against a
+   real isolated Postgres database. Choose a monotonically unique claim token
+   (rather than the reusable `attempts` count) and thread it through progress,
+   finish, retry, and ops-reset paths. Persist start state atomically with the
+   running transition. Keep per-job UoW writes and progress writes isolated.
+2. Define rejected-report behavior (raise a dedicated execution-lost error or
+   return an explicit result) and ensure stale handlers cannot commit domain
+   changes or job results. Test both a still-running old handler and an ops
+   retry where the human-facing attempt count resets.
+3. Set process-heartbeat ownership consistently for helper-managed and
+   app-managed workers. Define scheduler freshness relative to configurable or
+   fixed tick cadence with enough operating margin; prove idle behavior.
+4. Run focused tests, migration tests if schema changes are needed, targeted
+   recovery/fencing tests, then full tests and examples with observed results.
+   Measure report connection overhead descriptively before deciding whether a
+   connection reuse design is justified.
+
+## Risks And Recovery
+
+- **Stale completion / duplicate side effects (high):** transaction fencing can
+  prevent local commits but cannot roll back already-issued external effects.
+  Preserve the idempotency/reconciliation requirements in `docs/reliability.md`.
+- **Public execution API change (medium):** rejected progress currently returns
+  normally. Pick clear semantics and document any exception/result contract.
+- **Schema and migration (medium):** unique claim token may require a forward
+  migration. Preserve existing jobs and keep downgrade consistent with the
+  repository's forward-only production upgrade policy.
+- **Heartbeat threshold policy (medium):** changing freshness changes alerts;
+  retain a clear relation to configured intervals and test boundary behavior.
+- **Recovery:** revert code changes normally. Do not delete progress/job rows;
+  use a forward correction migration if schema has shipped. Do not amend or
+  rewrite the existing commit.
+
+## Progress
+
+- [x] Reproduce priority findings with isolated Postgres tests and settle the
+      claim-token and report-rejection contracts. During implementation the
+      review's `attempts`-based fence proved insufficient against ops
+      `retry_reset`; a per-claim `execution_token` (fresh `gen_random_uuid()`
+      in `job_mark_running`, cleared on reschedule/ops reset) replaced it.
+      `report_progress` now raises `ExecutionLostError` on rejection — the
+      report-deadline predicate was removed from the storage write because a
+      late-but-valid report left the job stuck `running`; deadline
+      enforcement lives in the in-process watchdog.
+- [x] Implement atomic start and non-reusable execution fencing across
+      progress, finish, retry reset, and retry routing
+      (`job_mark_running` RETURNING token; `job_finish` /
+      `job_error_and_reschedule` token-fenced, `execution_token` cleared on
+      release; alembic `0010`).
+- [x] Align scheduler freshness (`stale_after_s` on
+      `keelflow_process_health`; tick declares `max(interval*3, 30)`)
+      and app-owned worker heartbeat lifecycle
+      (`worker_heartbeat_loop` is a documented reusable entry point).
+- [x] Add race/lifecycle proof and update user-facing docs
+      (`test_storage_contract` token fencing + atomic start;
+      `test_engine_hardening` stale-dispatch finish fence;
+      `test_observability` scheduler margin + idle heartbeat loop).
+      Progress-write overhead measured indirectly: each report is one
+      short autocommit UPDATE on its own connection; no pooling/
+      throttling added — no measurement warranted it yet.
+- [x] Run focused and full validation; record unsupported backend
+      boundaries (SQLite unchanged/unsupported).
+- [x] Demo: `examples/progress_heartbeat.py` — long job reporting every
+      15s, `no_progress_timeout_seconds=180` default, `--stuck` mode and
+      env-tunable timings; verified live against Postgres in both modes.
+
+## Validation
+
+- Focused Postgres tests prove start timestamp/timeout config commits with the
+  running transition and is visible to monitoring.
+- Old attempt blocked in handler cannot report progress or commit job/domain
+  UoW after a new claim starts; UoW rolls back and the newer claim remains
+  unchanged.
+- Ops retry does not reuse a fencing identity even though `attempts` resets.
+- A timeout/retry race cannot commit a late result or overwrite fresh progress.
+- Scheduler remains fresh across idle intervals greater than 30 seconds and
+  becomes stale only beyond its chosen threshold.
+- App-owned worker startup emits idle heartbeats through the documented API;
+  helper-managed behavior remains covered.
+- Rejected reports produce the documented explicit signal.
+- Capture elapsed time / connection cost for representative progress cadence;
+  do not set an overhead guarantee absent a benchmark target.
+- Repository checks: `uv run pytest tests/ -q`, `uv run pytest examples -q`,
+  `uv run ruff check src examples tests`, `uv run mypy src/keelflow`, and
+  `git diff --check`.
+
+## Result
+
+Hardening verified: `uv run pytest tests/ -q` → 247 passed, 3 skipped;
+`uv run pytest examples -q` → 40 passed; ruff and mypy clean;
+`git diff --check` clean. Demo verified live: healthy run reports
+progress and completes; `--stuck` run goes stale at the configured
+window, watchdog cancels the attempt, engine reschedules, and retry
+exhaustion lands in DLQ. SQLite remains outside the progress contract
+because its kernel uses a separate job table.
+
+## Implementation record (previous feature)
 
 - Added default-off `progress_enabled` and optional
   `no_progress_timeout_seconds` settings. Timeout requires progress opt-in.

@@ -39,7 +39,10 @@ class ExecutionContext:
     job_id: str
     cooperative_cancel: bool = False
     progress_enabled: bool = False
-    attempt: int = 0
+    # Non-reusable claim token issued when the job transitions to
+    # running; storage fences progress/finish writes on it so a stale
+    # dispatch can never overwrite a newer claim's state.
+    execution_token: str | None = None
     progress_event: asyncio.Event = field(default_factory=asyncio.Event)
     last_progress_at: float = field(default_factory=time.monotonic)
     uow: Any = None
@@ -76,17 +79,26 @@ class ExecutionContext:
                 raise ValueError("progress metadata must contain JSON values") from exc
             if len(encoded.encode()) > 8192:
                 raise ValueError("progress metadata exceeds 8192 bytes")
-        if self.storage is None:
+        if self.storage is None or self.execution_token is None:
             raise RuntimeError("report_progress() is only valid inside a handler")
         self.progress_event.clear()
         persisted = await self.storage.job_progress_report(
-            self.job_id, self.attempt, {
+            self.job_id, self.execution_token, {
                 "current": current, "total": total,
                 "message": message, "metadata": metadata,
             })
-        if persisted:
-            self.last_progress_at = time.monotonic()
-            self.progress_event.set()
+        if not persisted:
+            # The row rejected the report: another claim/reschedule owns
+            # the job, or the progress window already closed. Raise so
+            # the handler cannot believe its progress was recorded —
+            # and so the worker stops this stale attempt cleanly.
+            from .storage import ExecutionLostError
+
+            raise ExecutionLostError(
+                f"job {self.job_id}: progress report rejected — "
+                "this dispatch no longer owns the execution")
+        self.last_progress_at = time.monotonic()
+        self.progress_event.set()
 
     async def checkpoint(self) -> None:
         """Observe a cancellation request at a safe point in the handler.

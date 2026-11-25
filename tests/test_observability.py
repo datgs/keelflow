@@ -100,13 +100,16 @@ async def test_workers_alive_counts_only_fresh_heartbeats():
     try:
         await conn.execute("DELETE FROM keelflow_process_health")
         await conn.execute(
-            "INSERT INTO keelflow_process_health (name, kind, last_seen)"
-            " VALUES ('fresh-1','worker', now()),"
-            "        ('fresh-2','worker', now() - interval '5 seconds'),"
-            "        ('stale-1','worker', now() - interval '10 minutes'),"
-            "        ('stale-2','worker', now() - interval '1 hour'),"
-            "        ('sched-live','scheduler', now()),"
-            "        ('sched-dead','scheduler', now() - interval '1 day')"
+            "INSERT INTO keelflow_process_health"
+            " (name, kind, last_seen, stale_after_s)"
+            " VALUES ('fresh-1','worker', now(), 30),"
+            "        ('fresh-2','worker', now() - interval '5 seconds', 30),"
+            "        ('stale-1','worker', now() - interval '10 minutes', 30),"
+            "        ('stale-2','worker', now() - interval '1 hour', 30),"
+            "        ('sched-live','scheduler', now(), 90),"
+            "        ('sched-idle','scheduler',"
+            "         now() - interval '60 seconds', 90),"
+            "        ('sched-dead','scheduler', now() - interval '1 day', 90)"
         )
         storage = PostgresStorage(dsn)
         session = await storage.connect()
@@ -117,11 +120,51 @@ async def test_workers_alive_counts_only_fresh_heartbeats():
             await session.close()
         assert snap["workers_alive"] == 2
         assert snap["workers_stale"] == 2
-        assert snap["schedulers_alive"] == 1
+        assert snap["schedulers_alive"] == 2   # 60s-old row is within its 90s window
         text = format_metrics_prometheus(snap)
         assert "keelflow_workers_alive 2" in text
         assert "keelflow_workers_stale 2" in text
-        assert "keelflow_schedulers_alive 1" in text
+        assert "keelflow_schedulers_alive 2" in text
+    finally:
+        await conn.execute("DELETE FROM keelflow_process_health")
+        await conn.close()
+
+
+@pytest.mark.asyncio
+async def test_worker_heartbeat_loop_marks_idle_worker_alive():
+    """An app-owned worker (own kernel lifecycle) can reuse
+    `worker_heartbeat_loop` for idle liveness — the row lands without
+    any dispatch running."""
+    import asyncio
+    import os
+
+    import psycopg
+    from psycopg.rows import dict_row
+
+    from keelflow.engine.worker import worker_heartbeat_loop
+    from keelflow.postgres.storage import PostgresStorage
+
+    dsn = os.environ.get(
+        "KEELFLOW_TEST_DSN",
+        "postgresql://postgres:postgres@localhost:5544/keelflow_test",
+    )
+    conn = await psycopg.AsyncConnection.connect(
+        dsn, autocommit=True, row_factory=dict_row
+    )
+    try:
+        await conn.execute("DELETE FROM keelflow_process_health")
+        stop = asyncio.Event()
+        storage = PostgresStorage(dsn)
+        task = asyncio.create_task(
+            worker_heartbeat_loop(storage, interval=0.1, stop=stop))
+        await asyncio.sleep(0.35)
+        stop.set()
+        await asyncio.wait_for(task, timeout=2)
+        row = await (await conn.execute(
+            "SELECT kind, stale_after_s FROM keelflow_process_health"
+        )).fetchone()
+        assert row is not None
+        assert row["kind"] == "worker" and row["stale_after_s"] == 30.0
     finally:
         await conn.execute("DELETE FROM keelflow_process_health")
         await conn.close()

@@ -113,7 +113,7 @@ def test_upgrade_db_advances_versioned_database():
             try:
                 rev = await (await conn.execute(
                     "SELECT version_num FROM alembic_version")).fetchone()
-                assert rev[0] == "0008"
+                assert rev[0] == "0010"
             finally:
                 await conn.close()
 
