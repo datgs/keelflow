@@ -4,11 +4,10 @@ Date: 2026-11-25
 
 ## Status
 
-Follow-up hardening implemented and verified on Postgres. The original
-feature is committed as `aecf1f7`; this change adds execution-token fencing,
-atomic progress initialization, per-process heartbeat freshness, an
-`ExecutionLostError` contract, and a runnable demo. SQLite progress/watchdog
-remains out of scope as documented.
+Original feature and first hardening pass are implemented and verified on
+Postgres. A second follow-up is now planned for the additional review findings
+below; this plan remains active until those findings are implemented and
+verified. SQLite progress/watchdog remains out of scope as documented.
 
 ## Outcome
 
@@ -407,11 +406,155 @@ because its kernel uses a separate job table.
   initial full-suite attempt failed in Native kernel tests amid cross-test DB
   state/cleanup failures. Full-suite status remains unresolved.
 
-## Approval
+## Follow-up: additional review findings
 
-- User approved the mitigation direction: fail-and-retry only when explicitly
-  configured, with application-owned idempotency/reconciliation; use stable
-  idempotency keys, transactional outbox plus receiver deduplication, and
-  meaningful committed/verifiable progress checkpoints; ambiguous effects need
-  manual reconciliation rather than blind retry.
-- Implementation was explicitly requested on 2026-11-25. User selected all-backend intent, 8 KiB metadata, 256-character messages, required integer counters, and `0 <= current <= total`.
+### Outcome
+
+Close the remaining correctness gaps in demo isolation, progress-report
+acceptance, and Native lease-reclaim fencing; align heartbeat and monitoring
+semantics with their configured windows; and make the progress API accurately
+typed and discoverable. The renamed timeout measures report silence, not
+counter movement. Setting it enables reporting; reporting without a timeout
+remains independently opt-in.
+
+### Scope
+
+In scope:
+
+- Require an explicit isolated demo DSN; use dedicated Chancy prefix and queue
+  so the demo worker cannot consume application jobs.
+- Remove the storage-side progress deadline rejection. A still-owning token may
+  report while the job is running; the watchdog enforces the timeout.
+- Invalidate execution tokens when Native lease reaping returns a job to
+  pending, and ensure stale dispatches cannot finish/progress in the gap before
+  a new claim.
+- Derive worker heartbeat freshness from its configured interval with margin.
+- Make metric help and absent-scheduler age accurately represent the actual
+  snapshot; distinguish claim time from the first/last actual progress report.
+- Rename public `no_progress_timeout_seconds` to
+  `progress_report_timeout_seconds`. This is an accepted breaking API change:
+  do not retain a compatibility alias. A configured report timeout enables
+  reporting; `progress_enabled=True` still independently enables reporting
+  without a timeout.
+- Give `JobContext.execution` an explicit public type while keeping
+  `execution_token` engine-internal and requiring no handler boilerplate.
+
+Out of scope:
+
+- New UI, broad execution-context abstraction, automatic progress generation,
+  or SQLite progress/watchdog support.
+- Changing the existing retry/idempotency contract or claiming remote side
+  effects can be fenced or cancelled.
+
+### Approach
+
+1. Fix demo isolation and the stale-report semantics; prove the demo cannot
+   receive unrelated queue work and a report after a `concurrency_key` wait
+   exceeding the configured threshold is accepted and completes normally on
+   PostgreSQL.
+2. Close the Native reclaim gap; prove against Native/Postgres that an old
+   dispatch cannot report or commit its UoW after lease reclaim and before a
+   replacement claim.
+3. Apply the public timeout rename and reporting opt-in rule consistently to
+   specs, enqueue/runtime paths, persisted fields/migrations as needed, docs,
+   and examples. Decide migration impact from actual persisted config usage;
+   do not retain the old Python API alias.
+4. Align worker heartbeat windows, progress timestamps, and Prometheus output;
+   add focused boundary tests for customized interval and missing scheduler.
+5. Run focused Postgres and Native tests, then full tests, examples, Ruff,
+   mypy, and `git diff --check`; update this record with observed evidence.
+
+### Risks And Recovery
+
+- Breaking API rename: update all in-repository callers in the same change and
+  state clearly that consumers must rename the setting. No compatibility shim.
+- Reclaim race: local UoW fencing must hold even if the old handler resumes
+  before the next claim; test this exact interval, not only after a new token.
+- Demo isolation: require explicit DSN and namespace its kernel objects; never
+  silently migrate a shared/default application database.
+- Recovery: prefer code correction without data rewrite. If a persisted column
+  rename is required, use a forward migration and preserve existing timeout
+  values; no destructive cleanup or history rewrite.
+
+### Progress
+
+- [x] Isolate demo database and Chancy prefix; prove the demo cannot claim
+      unrelated work. `KEELFLOW_DEMO_DSN` is required — the demo exits
+      before opening a connection without it — and kernel tables use the
+      dedicated `keelflow_demo_kernel_` prefix. The engine queue name is
+      fixed (`DEFAULT_QUEUE`), so dedicated prefix + required DSN is the
+      isolation boundary; `examples/test_progress_heartbeat.py` asserts
+      both (no Postgres needed).
+- [x] Remove deadline predicate from progress persistence and prove late
+      report after lock wait using PostgreSQL. The predicate the earlier
+      pass intended to remove was still present
+      (`postgres/storage.py:278`); now removed. New
+      `test_late_report_after_concurrency_lock_is_accepted` enqueues two
+      same-key jobs: B's claim-time `progress_at` is older than its 0.1s
+      window by the time the handler runs (A holds the advisory lock
+      0.4s); report accepted, job `done`.
+- [x] Invalidate Native execution fence on lease reclaim
+      (`_reap` sets `execution_token=NULL`) and prove via
+      `test_native_reap_retires_execution_token`: stale finish raises
+      `ExecutionLostError`, stale report returns False, job stays
+      `pending` in the gap before the next claim.
+- [x] Rename timeout API: `JobTypeSpec.progress_report_timeout_seconds`
+      (breaking, no alias). It alone enables reporting — registry
+      validation no longer requires `progress_enabled` (`t.stall@v1`
+      exercises timeout-only). `progress_enabled=True` alone stays the
+      progress-only opt-in. `JobContext.execution` is now typed
+      `ExecutionContext` (placeholder instance, replaced by dispatch —
+      handlers need no None guard) and internals renamed private
+      (`_execution_token`, `_storage`, `_uow`, `_progress_event`,
+      `_last_progress_at`); `bulk.py` internals updated.
+- [x] Fix customized worker freshness (`stale_after_s =
+      max(interval*3, 30)`, same margin as scheduler —
+      `test_worker_heartbeat_custom_interval_widens_window`), metric
+      HELP text (declared-window wording, no hardcoded 30s), and absent
+      metrics omitted instead of rendered 0
+      (`test_prometheus_handles_missing_values`, `..._none_age_not_zero`).
+      `progress_at` semantics documented: claim time until first report,
+      then last report — it is the silence signal, not strictly
+      "last report".
+- [x] Run required tests and static checks: `uv run pytest tests/ -q` →
+      251 passed, 3 skipped; `uv run pytest examples -q` → 42 passed;
+      ruff + mypy clean; `git diff --check` clean. Demo verified live on
+      a dedicated `keelflow_demo` database (healthy run completes) and
+      the DSN guard exits 1 without it.
+
+### Result
+
+Implemented on 2026-11-25. All three P1 correctness gaps closed with
+PostgreSQL/Native regression tests; P2 monitoring/API semantics aligned
+with actual behavior; `no_progress_timeout_seconds` renamed to
+`progress_report_timeout_seconds` as an accepted breaking change (no
+alias — consumers must rename). `ctx.execution` is typed and its
+internals private. Full validation above; SQLite remains outside the
+progress contract.
+
+### Decisions
+
+- 2026-11-25: User accepts a breaking change to rename
+  `no_progress_timeout_seconds` to `progress_report_timeout_seconds`; do not
+  retain the old alias. The new name better describes timeout of report
+  silence, regardless of counter movement.
+- 2026-11-25: Configuring `progress_report_timeout_seconds` enables progress
+  reporting; `progress_enabled=True` without a timeout remains a separate
+  progress-only opt-in.
+
+### Validation
+
+- PostgreSQL test for a job waiting on a `concurrency_key` longer than its
+  report timeout; valid report afterward is accepted and the job is not stuck.
+- Native/Postgres reclaim race test: token retired at reclaim; old dispatch
+  cannot commit handler UoW or progress before a new claim.
+- Demo integration proof with unrelated application work in the same database:
+  startup rejects unsafe/default configuration or demo's dedicated queue/prefix
+  leaves unrelated work untouched.
+- Heartbeat loop with a custom interval remains alive within its declared
+  window; boundary test becomes stale only beyond that window.
+- Metrics tests for dynamic HELP semantics and absent scheduler age remaining
+  `None`/not emitted as zero; progress timestamps distinguish no report from
+  first report.
+- SDK/API tests for renamed setting, timeout-implies-reporting, independent
+  progress-only opt-in, and typed `ctx.execution`; repository full checks.

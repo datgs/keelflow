@@ -74,10 +74,27 @@ def test_prometheus_format_golden():
     assert "payload" not in out and "context" not in out
 
 
+def _has_sample(out: str, metric: str) -> bool:
+    """True when the exposition contains a sample line (not HELP/TYPE)."""
+    return any(line.startswith(f"{metric} ") for line in out.splitlines())
+
+
 def test_prometheus_handles_missing_values():
+    """Absent snapshot keys are omitted, not rendered as zero — an
+    absent scheduler heartbeat age is unknown, not '0 seconds'."""
     out = format_metrics_prometheus({"queue_depth": 0})
-    assert "keelflow_queue_depth 0" in out
-    assert "keelflow_running 0" in out
+    assert _has_sample(out, "keelflow_queue_depth")
+    assert not _has_sample(out, "keelflow_running")
+    assert not _has_sample(out, "keelflow_scheduler_last_seen_age_seconds")
+
+
+def test_prometheus_none_age_not_zero():
+    """Snapshot with no scheduler rows carries age=None — it must not
+    emit a misleading 0 sample."""
+    out = format_metrics_prometheus({
+        "schedulers_alive": 0, "scheduler_last_seen_age_s": None})
+    assert _has_sample(out, "keelflow_schedulers_alive")
+    assert not _has_sample(out, "keelflow_scheduler_last_seen_age_seconds")
 
 
 @pytest.mark.asyncio
@@ -168,3 +185,40 @@ async def test_worker_heartbeat_loop_marks_idle_worker_alive():
     finally:
         await conn.execute("DELETE FROM keelflow_process_health")
         await conn.close()
+
+
+@pytest.mark.asyncio
+async def test_worker_heartbeat_custom_interval_widens_window():
+    """A caller heartbeating slower than the default 10s cadence must
+    not be reported stale while healthy — the declared freshness
+    window derives from the interval (3 missed ticks, min 30s)."""
+    import asyncio
+    import os
+
+    from keelflow.engine.worker import worker_heartbeat_loop
+    from keelflow.postgres.storage import PostgresStorage
+
+    dsn = os.environ.get(
+        "KEELFLOW_TEST_DSN",
+        "postgresql://postgres:postgres@localhost:5544/keelflow_test",
+    )
+    captured: list[float] = []
+    storage = PostgresStorage(dsn)
+    orig = PostgresStorage.heartbeat_upsert
+
+    async def capture(self, uow, name, kind, *, stale_after_s=30.0):
+        captured.append(stale_after_s)
+        return await orig(self, uow, name, kind,
+                          stale_after_s=stale_after_s)
+
+    PostgresStorage.heartbeat_upsert = capture
+    try:
+        stop = asyncio.Event()
+        task = asyncio.create_task(
+            worker_heartbeat_loop(storage, interval=60.0, stop=stop))
+        await asyncio.sleep(0.3)   # first upsert has landed
+        stop.set()
+        await asyncio.wait_for(task, timeout=2)
+    finally:
+        PostgresStorage.heartbeat_upsert = orig
+    assert captured == [180.0]     # max(60*3, 30), not the 30s default

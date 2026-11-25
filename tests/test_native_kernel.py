@@ -287,6 +287,61 @@ async def test_native_reclaim_after_lease_expiry(env, db):
 
 
 @pytest.mark.asyncio
+async def test_native_reap_retires_execution_token(env, db):
+    """Fence (P1): `_reap` returns an expired job to pending AND
+    invalidates its execution_token. The old execution — still
+    running locally until the next heartbeat fences it — must not be
+    able to finish or report in the gap before the next claim mints a
+    new token."""
+    from keelflow.sdk import JobFinish
+    from keelflow.sdk.storage import ExecutionLostError
+
+    storage = PostgresStorage(DSN)
+    job_id = await _enqueue(env["jobs"], "test.slow@v1",
+                            {"invoice_id": "i-reap"})
+    # Wait until the dispatch claims the job and mints its token.
+    tok = None
+    for _ in range(100):
+        row = await (await db.execute(
+            "SELECT status, execution_token FROM keelflow_jobs"
+            " WHERE id=%s", (job_id,))).fetchone()
+        if row[0] == "running" and row[1]:
+            tok = row[1]
+            break
+        await asyncio.sleep(0.05)
+    assert tok is not None
+    # Stop claim/maintenance so no new dispatch steals the window;
+    # keep `worker._conn` open for the manual reap.
+    for t in env["worker"]._tasks:
+        t.cancel()
+    await db.execute(
+        "UPDATE keelflow_jobs SET lease_until=now()-interval '1 second'"
+        " WHERE id=%s", (job_id,))
+    assert await env["worker"]._reap() == 1
+    row = await (await db.execute(
+        "SELECT status, execution_token FROM keelflow_jobs"
+        " WHERE id=%s", (job_id,))).fetchone()
+    assert row == ("pending", None)
+    # The still-running old execution's fenced writes lose outright —
+    # finish raises, report returns False; its handler UoW rolls back.
+    session = await storage.connect()
+    try:
+        with pytest.raises(ExecutionLostError):
+            async with session.begin() as uow:
+                await storage.job_finish(
+                    uow, job_id, JobFinish(status=JobStatus.DONE),
+                    execution_token=tok)
+    finally:
+        await session.close()
+    assert not await storage.job_progress_report(
+        job_id, tok, {"current": 1, "total": 1})
+    row = await (await db.execute(
+        "SELECT status, result FROM keelflow_jobs WHERE id=%s",
+        (job_id,))).fetchone()
+    assert row == ("pending", None)
+
+
+@pytest.mark.asyncio
 async def test_native_stale_worker_cannot_finish(env, db):
     """Fencing: once the row belongs to another owner (reclaimed and
     finished elsewhere), the stale worker's heartbeat detects the lost

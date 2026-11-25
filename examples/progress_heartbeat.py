@@ -4,20 +4,27 @@ A `demo.long_job@v1` handler simulates a job that runs for tens of
 minutes: each work unit sleeps, then every REPORT interval it calls
 `ctx.execution.report_progress(current, total)` — the application's
 "still alive, still making progress" signal. The job type opts in with
-`progress_enabled=True` and `no_progress_timeout_seconds` — when no
+`progress_report_timeout_seconds` — when no
 report lands inside that window the attempt is cancelled, its UoW
 rolled back, and the existing retry policy takes over.
 
-Two modes (needs Postgres, same as order_flow):
+Two modes (needs an ISOLATED Postgres database — do not point this at
+an application database; see isolation note below):
 
     # healthy run — reports every 15s, finishes normally
-    KEELFLOW_DSN=postgresql://postgres:postgres@localhost:5544/keelflow \
+    KEELFLOW_DEMO_DSN=postgresql://postgres:postgres@localhost:5544/keelflow_demo \
         python examples/progress_heartbeat.py
 
     # stuck run — never reports; watchdog fails the attempt after the
     # stale window, engine reschedules, retries exhaust → DLQ
-    KEELFLOW_DSN=postgresql://postgres:postgres@localhost:5544/keelflow \
+    KEELFLOW_DEMO_DSN=postgresql://postgres:postgres@localhost:5544/keelflow_demo \
         python examples/progress_heartbeat.py --stuck
+
+Isolation: the demo exits unless KEELFLOW_DEMO_DSN is set explicitly,
+and it uses its own Chancy prefix (keelflow_demo_kernel_) so its kernel
+tables never overlap an application's keelflow_kernel_* set. The engine
+job table name is fixed, so database isolation is still required — a
+shared database would let this worker claim application dispatch rows.
 
 Tuning (production-shaped defaults: report every 15s, stale after 180s,
 ~40 min job — shorten via env for a quick look):
@@ -27,9 +34,11 @@ Tuning (production-shaped defaults: report every 15s, stale after 180s,
     DEMO_STALE_S=180           no-progress timeout    (default 180)
     DEMO_BACKOFF_S=30          retry backoff base     (default 30)
 
-The monitor loop prints job status, latest progress, report age, and
-whether `list_stale_progress` considers it stale — application progress,
-distinct from the worker process heartbeat in keelflow_process_health.
+The monitor loop prints job status, latest progress, progress-signal
+age (claim time until the first report lands, then last report time),
+and whether `list_stale_progress` considers it stale — application
+progress, distinct from the worker process heartbeat in
+keelflow_process_health.
 """
 from __future__ import annotations
 
@@ -58,9 +67,8 @@ from keelflow.sdk import (
     RetryPolicy,
 )
 
-DSN = os.environ.get(
-    "KEELFLOW_DSN", "postgresql://postgres:postgres@localhost:5544/keelflow"
-)
+DEMO_DSN_ENV = "KEELFLOW_DEMO_DSN"
+DEMO_KERNEL_PREFIX = "keelflow_demo_kernel_"  # never "keelflow_kernel_"
 RUN_SECONDS = float(os.environ.get("DEMO_RUN_SECONDS", "300"))
 REPORT_EVERY_S = float(os.environ.get("DEMO_REPORT_EVERY_S", "15"))
 STALE_S = float(os.environ.get("DEMO_STALE_S", "180"))
@@ -77,8 +85,8 @@ class LongJobH(JobHandler):
     """Ticks one unit per second; heartbeats progress every REPORT_S.
 
     The cadence is application-chosen: it must stay well under
-    `no_progress_timeout_seconds`, otherwise honest-but-slow stretches
-    look like a stall.
+    `progress_report_timeout_seconds`, otherwise honest-but-slow
+    stretches look like a stall.
     """
 
     async def run(self, ctx, payload: P):
@@ -98,7 +106,7 @@ class LongJobH(JobHandler):
 
 class StuckJobH(JobHandler):
     """Same long job but never reports progress — the watchdog must
-    fire after `no_progress_timeout_seconds` of silence."""
+    fire after `progress_report_timeout_seconds` of silence."""
 
     async def run(self, ctx, payload: P):
         await asyncio.Event().wait()  # stuck forever
@@ -108,18 +116,23 @@ class StuckJobH(JobHandler):
 def _spec(type_name: str, handler) -> JobTypeSpec:
     return JobTypeSpec(
         type=type_name, input_schema=P, handler=handler,
-        progress_enabled=True,
-        no_progress_timeout_seconds=STALE_S,
+        progress_report_timeout_seconds=STALE_S,
         retry=RetryPolicy(max_attempts=2, backoff="fixed",
                           base_seconds=BACKOFF_S, jitter=False))
 
 
 async def main() -> None:
     stuck = "--stuck" in sys.argv
-    conn = await psycopg.AsyncConnection.connect(DSN, autocommit=True)
+    dsn = os.environ.get(DEMO_DSN_ENV)
+    if not dsn:
+        raise SystemExit(
+            f"{DEMO_DSN_ENV} is required — point it at a dedicated demo "
+            "database, never a shared application database (this demo "
+            "runs a worker that claims jobs).")
+    conn = await psycopg.AsyncConnection.connect(dsn, autocommit=True)
     await apply_async(conn)
 
-    async with Chancy(DSN, prefix="keelflow_kernel_") as kernel:
+    async with Chancy(dsn, prefix=DEMO_KERNEL_PREFIX) as kernel:
         await kernel.migrate()
         await kernel.declare(
             Queue("default", concurrency=8, executor=Chancy.Executor.Async,
@@ -131,9 +144,9 @@ async def main() -> None:
         reg.register_job_type(_spec("demo.long_job@v1", LongJobH))
         reg.register_job_type(_spec("demo.stuck_job@v1", StuckJobH))
 
-        storage = PostgresStorage(DSN)
+        storage = PostgresStorage(dsn)
         jobs = JobService(reg, kernel, storage)
-        worker_mod.configure(registry=reg, dsn=DSN, kernel=kernel)
+        worker_mod.configure(registry=reg, dsn=dsn, kernel=kernel)
         mon = MonitoringService(jobs, storage=storage)
 
         type_name = "demo.stuck_job@v1" if stuck else "demo.long_job@v1"
@@ -164,7 +177,7 @@ async def main() -> None:
                 print(
                     f"status={job['status']:<8} attempts={job['attempts']} "
                     f"progress={prog.get('current')}/{prog.get('total')} "
-                    f"last_report={age} stale={is_stale} "
+                    f"progress_at={age} stale={is_stale} "
                     f"error={(job.get('error') or '')[:60]}")
                 if job["status"] in ("done", "failed", "cancelled"):
                     break

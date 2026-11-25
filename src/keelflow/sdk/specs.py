@@ -117,8 +117,16 @@ class JobTypeSpec:
     # 'cancelled' (no retry, no DLQ). Without opt-in, checkpoints raise
     # RuntimeError and running jobs drain to done/failed.
     cooperative_cancel: bool = False
+    # Progress reporting (default off). `progress_enabled=True` alone
+    # exposes the progress snapshot without any stall detection.
+    # `progress_report_timeout_seconds` measures silence between
+    # report_progress() calls — not counter movement — and implies
+    # reporting is enabled; when it fires, the local attempt is
+    # cancelled, its UoW rolled back, and the retry policy applies.
+    # Retries replay the handler: only configure it when external
+    # effects are idempotent or reconcilable (docs/reliability.md).
     progress_enabled: bool = False
-    no_progress_timeout_seconds: float | None = None
+    progress_report_timeout_seconds: float | None = None
 
 
 @dataclass(frozen=True)

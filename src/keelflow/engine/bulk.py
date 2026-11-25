@@ -137,7 +137,7 @@ class BulkJobHandler(JobHandler):
         job_id = ctx.extra["job_id"]  # injected by dispatch
         assert isinstance(payload, BulkJobPayload)
         kernel = _worker._kernel_client
-        storage = (ctx.execution.storage if ctx.execution is not None
+        storage = (ctx.execution._storage if ctx.execution._storage is not None
                    else _storage_or_default())
         uow = ctx.uow
         if kernel is None:
@@ -230,7 +230,7 @@ class ChunkJobHandler(JobHandler):
     async def run(self, ctx: JobContext, payload: BaseModel) -> JobResult:
         assert isinstance(payload, ChunkPayload)
         registry = _get_registry()
-        storage = (ctx.execution.storage if ctx.execution is not None
+        storage = (ctx.execution._storage if ctx.execution._storage is not None
                    else _storage_or_default())
         session = await storage.connect()
         processed = failed_rows = 0
@@ -294,7 +294,7 @@ class ChunkJobHandler(JobHandler):
                             # handler.run calls (unit tests) have no
                             # ctx.execution injected; only dispatched jobs
                             # of an opted-in spec observe the flag.
-                            if ctx.execution is not None:
+                            if ctx.execution._storage is not None:
                                 await ctx.execution.checkpoint()
                             ok = await self._process_one_row(
                                 uow, ctx, parent_handler, row
@@ -370,9 +370,9 @@ class ChunkJobHandler(JobHandler):
         Cancellation is observed at the checkpoint before the transaction
         starts — a committed TX cannot be interrupted mid-flight.
         """
-        storage = (ctx.execution.storage if ctx.execution is not None
+        storage = (ctx.execution._storage if ctx.execution._storage is not None
                    else _storage_or_default())
-        if ctx.execution is not None:
+        if ctx.execution._storage is not None:
             await ctx.execution.checkpoint()
         async with nested_scope(uow) as nuow:
             results = await handler.process_batch(ctx, rows, nuow)
@@ -410,7 +410,7 @@ class ChunkJobHandler(JobHandler):
     async def _process_chunk_atomic(
         self, session, uow, ctx, handler, rows, chunk_id
     ) -> None:
-        storage = ctx.execution.storage
+        storage = ctx.execution._storage
         failing: tuple | None = None
         try:
             async with nested_scope(uow) as nuow:
@@ -432,7 +432,7 @@ class ChunkJobHandler(JobHandler):
                         error_by_id={failing[0]: failing[1]})
 
     async def _process_one_row(self, uow, ctx, handler, row) -> bool:
-        storage = (ctx.execution.storage if ctx.execution is not None
+        storage = (ctx.execution._storage if ctx.execution._storage is not None
                    else _storage_or_default())
         async with nested_scope(uow) as nuow:
             await storage.rows_mark(nuow, [row["id"]], "processing")

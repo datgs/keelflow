@@ -323,7 +323,7 @@ class NativeWorker:
                 """
                 UPDATE keelflow_jobs
                    SET status='pending', claimed_by=NULL, lease_until=NULL,
-                       updated_at=now()
+                       execution_token=NULL, updated_at=now()
                  WHERE status IN ('claimed','running')
                    AND lease_until < now()
                    AND dispatch_queued

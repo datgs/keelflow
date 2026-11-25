@@ -30,6 +30,7 @@ from keelflow.postgres.schema import apply_async
 from keelflow.postgres.storage import PostgresStorage
 from keelflow.sdk import (
     Actor,
+    ConcurrencySpec,
     HumanTaskOptions,
     JobContext,
     JobHandler,
@@ -149,6 +150,30 @@ class CheckpointH(JobHandler):
         raise AssertionError("checkpoint did not raise JobCancelled")
 
 
+class LockP(BaseModel):
+    key: str = "lk"
+    x: int = 0
+
+
+class LockHoldH(JobHandler):
+    """Sleeps payload.x ms while holding the concurrency_key session
+    lock — a slow sibling delaying a same-key job's handler."""
+
+    async def run(self, ctx, payload: LockP):
+        await asyncio.sleep(payload.x / 1000.0)
+        return JobResult(status="done")
+
+
+class LateReportH(JobHandler):
+    """Reports progress immediately. Under a concurrency_key wait the
+    claim timestamp may be older than the report window by the time
+    the handler runs — the report must still be accepted."""
+
+    async def run(self, ctx, payload: LockP):
+        await ctx.execution.report_progress(1, 1)
+        return JobResult(status="done")
+
+
 class FenceH(JobHandler):
     """Blocks on a shared event — used to simulate two dispatches
     racing one job; the older claim's finish must be fenced."""
@@ -220,12 +245,15 @@ async def env(db):
             timeout_seconds=0.2))
         reg.register_job_type(JobTypeSpec(
             type="t.progress@v1", input_schema=In, handler=ProgressH,
-            progress_enabled=True, no_progress_timeout_seconds=0.2,
+            progress_enabled=True,
+            progress_report_timeout_seconds=0.2,
             retry=RetryPolicy(max_attempts=2, base_seconds=0.05,
                               jitter=False)))
         reg.register_job_type(JobTypeSpec(
             type="t.stall@v1", input_schema=In, handler=StallH,
-            progress_enabled=True, no_progress_timeout_seconds=0.05,
+            # timeout alone implies reporting is enabled — no
+            # progress_enabled required (t.stall@v1 never reports)
+            progress_report_timeout_seconds=0.05,
             retry=RetryPolicy(max_attempts=2, base_seconds=0.05,
                               jitter=False)))
         reg.register_job_type(JobTypeSpec(
@@ -341,6 +369,54 @@ async def test_no_progress_timeout_retries_and_fences_attempt(env, db):
         "SELECT status, attempts FROM keelflow_jobs WHERE id=%s", (ref.id,)
     )).fetchone()
     assert row == ("done", 2)
+
+
+@pytest.mark.asyncio
+async def test_late_report_after_concurrency_lock_is_accepted(env, db):
+    """Regression (P1): `progress_at` is stamped at claim time, so a
+    job that waits on a concurrency_key advisory lock longer than its
+    report timeout reaches its handler with a DB-side signal already
+    past the window. The report must still be accepted — the
+    in-process watchdog (started after the lock is held), not the
+    storage write, owns the deadline. The old deadline predicate
+    rejected the report, raised ExecutionLostError, and left the job
+    stuck 'running'."""
+    env["reg"].register_job_type(JobTypeSpec(
+        type="t.lockhold@v1", input_schema=LockP, handler=LockHoldH,
+        concurrency=ConcurrencySpec(key="payload.key")))
+    env["reg"].register_job_type(JobTypeSpec(
+        type="t.lockwait@v1", input_schema=LockP, handler=LateReportH,
+        concurrency=ConcurrencySpec(key="payload.key"),
+        progress_report_timeout_seconds=0.1))
+    async with (
+        await _conn(autocommit=False) as conn,
+        conn.transaction(),
+        conn.cursor() as cur,
+    ):
+        ref_a = await env["jobs"].builder("t.lockhold@v1") \
+            .context(JobContext(actor=Actor.user("u1"))) \
+            .payload({"key": "lk", "x": 400}).enqueue(cur)
+        ref_b = await env["jobs"].builder("t.lockwait@v1") \
+            .context(JobContext(actor=Actor.user("u1"))) \
+            .payload({"key": "lk"}).enqueue(cur)
+    task_a = asyncio.create_task(worker_mod.dispatch(ref_a.id))
+    # A claims and holds the 'lk' advisory lock for ~0.4s.
+    for _ in range(100):
+        row = await (await db.execute(
+            "SELECT status FROM keelflow_jobs WHERE id=%s",
+            (ref_a.id,))).fetchone()
+        if row[0] == "running":
+            break
+        await asyncio.sleep(0.02)
+    assert row[0] == "running"
+    # B claims (progress_at stamped), waits ~0.4s > its 0.1s window,
+    # then reports — accepted under token fencing only.
+    await worker_mod.dispatch(ref_b.id)
+    row = await (await db.execute(
+        "SELECT status, progress->>'current' FROM keelflow_jobs"
+        " WHERE id=%s", (ref_b.id,))).fetchone()
+    assert row == ("done", "1")
+    await task_a
 
 
 @pytest.mark.asyncio

@@ -115,13 +115,13 @@ def format_metrics_prometheus(snapshot: dict[str, Any]) -> str:
         "# TYPE keelflow_avg_done_duration_seconds_24h gauge",
         "# HELP keelflow_dlq_depth Dead-letter entries awaiting replay.",
         "# TYPE keelflow_dlq_depth gauge",
-        "# HELP keelflow_workers_alive Workers with a fresh heartbeat (<30s).",
+        "# HELP keelflow_workers_alive Workers with a heartbeat fresher than their declared window.",
         "# TYPE keelflow_workers_alive gauge",
         "# HELP keelflow_workers_stale Workers whose heartbeat went stale.",
         "# TYPE keelflow_workers_stale gauge",
-        "# HELP keelflow_schedulers_alive Schedulers with a fresh heartbeat (<30s).",
+        "# HELP keelflow_schedulers_alive Schedulers with a heartbeat fresher than their declared window.",
         "# TYPE keelflow_schedulers_alive gauge",
-        "# HELP keelflow_scheduler_last_seen_age_seconds Age of the latest scheduler heartbeat.",
+        "# HELP keelflow_scheduler_last_seen_age_seconds Age of the latest scheduler heartbeat (absent when no scheduler has reported).",
         "# TYPE keelflow_scheduler_last_seen_age_seconds gauge",
         "# HELP keelflow_db_connections Connections to this database (pg_stat_activity).",
         "# TYPE keelflow_db_connections gauge",
@@ -143,7 +143,11 @@ def format_metrics_prometheus(snapshot: dict[str, Any]) -> str:
     }
     for key, metric in mapping.items():
         v = snapshot.get(key)
-        lines.append(f"{metric} {0 if v is None else v}")
+        if v is None:
+            # Unknown is not zero: an absent metric keeps dashboards and
+            # alerts honest (e.g. no scheduler has ever heartbeated).
+            continue
+        lines.append(f"{metric} {v}")
     return "\n".join(lines) + "\n"
 
 

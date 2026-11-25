@@ -164,16 +164,18 @@ registry.register_job_type(JobTypeSpec(
     type="items.import@v1",
     input_schema=ImportItems,
     handler=ImportItemsH,
-    progress_enabled=True,
-    no_progress_timeout_seconds=120,
+    progress_report_timeout_seconds=120,
     retry=RetryPolicy(max_attempts=3),
 ))
 ```
 
-Choose the report cadence and no-progress window together: here, the 120-second
-window must exceed the longest expected interval between reports. The setting
-is opt-in and requires `progress_enabled=True`. A no-progress timeout cancels
-the local handler attempt, rolls back its current UoW, and uses the normal retry
+Choose the report cadence and the silence window together: here, the
+120-second window must exceed the longest expected interval between
+reports. Setting `progress_report_timeout_seconds` implies reporting
+is enabled — no `progress_enabled=True` needed; set `progress_enabled`
+alone when you want the progress snapshot with no stall detection. A
+report-silence timeout cancels the local handler attempt, rolls back
+its current UoW, and uses the normal retry
 policy. It cannot guarantee that an already-issued external request stopped, so
 retries need stable idempotency keys, outbox/receiver deduplication, or a
 reconciliation strategy. Report after a committed or otherwise verifiable unit
@@ -182,13 +184,17 @@ when possible; reported progress itself does not prove business work committed.
 `report_progress` takes integer `current` and `total` with
 `0 <= current <= total`, an optional message (up to 256 characters), and
 optional JSON object metadata (up to 8 KiB). Progress is persisted outside the
-handler UoW and is fenced to the owning claim's `execution_token` — a report
-committed after the window closes, or from a claim a retry already replaced,
-is rejected with `ExecutionLostError` and that stale dispatch is abandoned
-rather than retried — the in-process watchdog owns the deadline, the
-token fence owns the durable row. It is application progress, not an automatic
-worker/process-liveness heartbeat. SQLite does not currently support
-persisted progress or the no-progress timeout.
+handler UoW and is fenced to the owning claim — a report from a claim
+that lost ownership (a retry, reschedule, or ops reset replaced it) is
+rejected with `ExecutionLostError` and that stale dispatch is abandoned
+rather than retried. The in-process watchdog owns the deadline, so a
+still-owning claim may report even when its claim-time signal is older
+than the window (e.g. after waiting on a `concurrency_key` lock). The
+visible `progress_at` is the claim time until the first report lands,
+then the last report time — the stale-silence signal `list_stale_progress`
+and the watchdog both measure against. It is application progress, not
+an automatic worker/process-liveness heartbeat. SQLite does not
+currently support persisted progress or the report-silence timeout.
 
 ```python
 retry=RetryPolicy(max_attempts=5, backoff="exponential",

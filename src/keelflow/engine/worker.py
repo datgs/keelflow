@@ -178,7 +178,10 @@ async def dispatch(job_id: str, step_run_id: str | None = None) -> None:
                     job_id=job_id,
                     cooperative_cancel=bool(
                         getattr(spec, "cooperative_cancel", False)),
-                    progress_enabled=bool(getattr(spec, "progress_enabled", False)),
+                    progress_enabled=bool(
+                        getattr(spec, "progress_enabled", False)
+                        or getattr(spec, "progress_report_timeout_seconds",
+                                   None) is not None),
                 ),
             )
             jlog = _job_logger(job_id, type_name, ctx.correlation_id,
@@ -207,7 +210,7 @@ async def dispatch(job_id: str, step_run_id: str | None = None) -> None:
             # retry (attempts=0) can never collide with a live token.
             execution_token = await storage.job_mark_running(
                 uow, job_id,
-                progress_timeout_seconds=spec.no_progress_timeout_seconds)
+                progress_timeout_seconds=spec.progress_report_timeout_seconds)
             if execution_token is None:
                 if await storage.job_cancel_requested(uow, job_id):
                     await _cancel_terminalize(
@@ -218,7 +221,7 @@ async def dispatch(job_id: str, step_run_id: str | None = None) -> None:
                         "job %s not startable (status changed); skipping",
                         job_id)
                 return
-            ctx.execution.execution_token = execution_token
+            ctx.execution._execution_token = execution_token
         # uow boundary 1 committed: job is 'running' durably — a crash
         # mid-handler leaves it for kernel recovery instead of re-claim.
 
@@ -236,26 +239,26 @@ async def dispatch(job_id: str, step_run_id: str | None = None) -> None:
                 # finish + workflow advance commit or roll back together.
                 async with session.begin() as uow:
                     object.__setattr__(ctx, "uow", uow)
-                    ctx.execution.uow = uow
-                    ctx.execution.storage = storage
+                    ctx.execution._uow = uow
+                    ctx.execution._storage = storage
                     from ..observability import tracer
                     with tracer().start_as_current_span(
                             "keelflow.dispatch"):
-                        ctx.execution.last_progress_at = time.monotonic()
+                        ctx.execution._last_progress_at = time.monotonic()
                         run = handler.run(ctx, payload)
-                        timeout = (spec.no_progress_timeout_seconds
+                        timeout = (spec.progress_report_timeout_seconds
                                    or spec.timeout_seconds)
                         if timeout:
                             result = await _run_with_progress_timeout(
                                 run, ctx.execution, timeout,
                                 absolute_timeout=spec.timeout_seconds,
                                 progress_timeout=(
-                                    spec.no_progress_timeout_seconds is not None))
+                                    spec.progress_report_timeout_seconds is not None))
                         else:
                             result = await run
                     object.__setattr__(ctx, "uow", None)
-                    ctx.execution.uow = None
-                    ctx.execution.storage = None
+                    ctx.execution._uow = None
+                    ctx.execution._storage = None
                     status = (JobStatus.DONE if result.status == "done"
                               else JobStatus.FAILED)
                     bulk_hold = bool(result.outputs.get("_bulk_parent"))
@@ -293,7 +296,7 @@ async def dispatch(job_id: str, step_run_id: str | None = None) -> None:
                             result=result.outputs,
                             error=result.error,
                             result_bytes=_res_bytes,
-                        ), execution_token=ctx.execution.execution_token)
+                        ), execution_token=ctx.execution._execution_token)
                     if step_run_id and not bulk_hold:
                         kernel = _kernel_client
                         if kernel is not None:
@@ -321,7 +324,7 @@ async def dispatch(job_id: str, step_run_id: str | None = None) -> None:
                         await _cancel_terminalize(
                             uow, session, storage, registry, job_id,
                             step_run_id, jlog, type_name, payload_json,
-                            execution_token=ctx.execution.execution_token)
+                            execution_token=ctx.execution._execution_token)
                 except ExecutionLostError:
                     jlog.warning(
                         "execution lost during cancel settle; "
@@ -340,7 +343,7 @@ async def dispatch(job_id: str, step_run_id: str | None = None) -> None:
                             await storage.job_finish(uow, job_id, JobFinish(
                                 status=JobStatus.FAILED,
                                 error=exc_text + ("\n" + tb if tb else "")),
-                                execution_token=ctx.execution.execution_token)
+                                execution_token=ctx.execution._execution_token)
                             # keep the workflow link so dlq_replay can
                             # resume the owning run
                             _dlq_run_id = None
@@ -377,7 +380,7 @@ async def dispatch(job_id: str, step_run_id: str | None = None) -> None:
                             delay = _retry_delay(spec, att[0] if att else 1)
                             await storage.job_error_and_reschedule(
                                 uow, job_id, exc_text, delay,
-                                execution_token=ctx.execution.execution_token)
+                                execution_token=ctx.execution._execution_token)
                             if _kernel_client is not None:
                                 await _kernel_client.push_ex(
                                     uow, _retry_kernel_job(
@@ -531,7 +534,7 @@ async def _run_with_progress_timeout(
     task = asyncio.ensure_future(awaitable)
     try:
         while True:
-            elapsed = time.monotonic() - execution.last_progress_at
+            elapsed = time.monotonic() - execution._last_progress_at
             remaining = timeout - elapsed
             if absolute_timeout is not None:
                 remaining = min(
@@ -541,7 +544,7 @@ async def _run_with_progress_timeout(
                 if progress_timeout and elapsed >= timeout:
                     raise TimeoutError("no progress reported before timeout")
                 raise TimeoutError
-            waiter = asyncio.create_task(execution.progress_event.wait())
+            waiter = asyncio.create_task(execution._progress_event.wait())
             done, _ = await asyncio.wait(
                 {task, waiter}, timeout=remaining,
                 return_when=asyncio.FIRST_COMPLETED)
@@ -550,14 +553,14 @@ async def _run_with_progress_timeout(
                 await asyncio.gather(waiter, return_exceptions=True)
                 return task.result()
             if waiter in done:
-                execution.progress_event.clear()
+                execution._progress_event.clear()
                 if (absolute_timeout is not None
                         and loop.time() - started_at >= absolute_timeout):
                     raise TimeoutError
                 continue
             waiter.cancel()
             await asyncio.gather(waiter, return_exceptions=True)
-            elapsed = time.monotonic() - execution.last_progress_at
+            elapsed = time.monotonic() - execution._last_progress_at
             if progress_timeout and elapsed >= timeout:
                 raise TimeoutError("no progress reported before timeout")
             raise TimeoutError
@@ -663,14 +666,21 @@ async def worker_heartbeat_loop(
     """Periodic worker heartbeat — keeps a live worker visible even when
     it dispatches no jobs. Each upsert commits in its own session unit
     so a failed cycle reconnects cleanly on the next one.
+
+    The declared freshness window derives from `interval` —
+    `max(interval*3, STALE_AFTER_S)`, the same missed-ticks margin the
+    scheduler uses — so a caller that heartbeats less often than the
+    default is not reported stale while healthy.
     """
+    stale_after = max(interval * 3.0, STALE_AFTER_S)
     while not (stop and stop.is_set()):
         try:
             session = await storage.connect()
             try:
                 async with session.begin() as uow:
                     await storage.heartbeat_upsert(
-                        uow, _worker_name(), "worker")
+                        uow, _worker_name(), "worker",
+                        stale_after_s=stale_after)
             finally:
                 await session.close()
         except Exception:  # liveness must never kill the worker

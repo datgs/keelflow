@@ -90,14 +90,17 @@ kernel claims job → dispatch(job_id)
 - The pending→running transition mints a fresh `execution_token`
   (non-reusable across retries and ops `retry_reset`). Progress,
   finish, and reschedule writes are fenced on that token: a write
-  carrying an outdated token is rejected. Progress reports also must
-  arrive within the configured window — a report committed after the
-  deadline is rejected with `ExecutionLostError`, which abandons the
-  stale dispatch instead of retrying it. `report_progress()` raises
-  `ExecutionLostError` rather than silently dropping the report.
-- `no_progress_timeout_seconds` requires progress opt-in and
-  causes the local handler attempt to be cancelled, its UoW rolled back, and
-  the normal retry policy applied. Local cancellation cannot stop a remote
+  carrying an outdated token is rejected — `report_progress()` raises
+  `ExecutionLostError` rather than silently dropping the report, and
+  the worker abandons the stale dispatch instead of rescheduling it.
+  The report write is fenced on ownership only: deadline enforcement
+  lives in the worker's in-process watchdog, so a still-owning claim
+  may report even when its DB-side signal is older than the window
+  (e.g. after waiting on a `concurrency_key` lock).
+- `progress_report_timeout_seconds` measures silence between reports
+  (not counter movement) and implies reporting is enabled — it does
+  not require `progress_enabled`. Expiry cancels the local handler
+  attempt, rolls its UoW back, and the normal retry policy applies. Local cancellation cannot stop a remote
   request already in flight. Configure retry only when stable idempotency keys,
   an outbox with receiver deduplication, or explicit reconciliation makes replay
   safe; ambiguous external outcomes require manual reconciliation, not blind

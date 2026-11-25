@@ -274,10 +274,7 @@ class PostgresStorage(Storage):
                 cur = await conn.execute(
                     "UPDATE keelflow_jobs SET progress=%s, progress_at=now()"
                     " WHERE id=%s AND status='running'"
-                    "   AND execution_token=%s"
-                    "   AND (progress_timeout_seconds IS NULL OR progress_at >"
-                    "        now() - interval '1 second'"
-                    "        * progress_timeout_seconds)",
+                    "   AND execution_token=%s",
                     (json.dumps(progress, default=json_default),
                      job_id, execution_token),
                 )

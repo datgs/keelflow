@@ -36,17 +36,23 @@ class ExecutionContext:
     `JobTypeSpec(cooperative_cancel=True)`.
     """
 
-    job_id: str
+    # ``""`` is the pre-dispatch placeholder (JobContext default); the
+    # worker replaces this whole object with the real job id before
+    # `handler.run` is invoked.
+    job_id: str = ""
     cooperative_cancel: bool = False
     progress_enabled: bool = False
-    # Non-reusable claim token issued when the job transitions to
-    # running; storage fences progress/finish writes on it so a stale
-    # dispatch can never overwrite a newer claim's state.
-    execution_token: str | None = None
-    progress_event: asyncio.Event = field(default_factory=asyncio.Event)
-    last_progress_at: float = field(default_factory=time.monotonic)
-    uow: Any = None
-    storage: Any = None
+    # Engine internals — set by dispatch, not application API.
+    # `_execution_token` is the non-reusable claim token issued when the
+    # job transitions to running; storage fences progress/finish writes
+    # on it so a stale dispatch can never overwrite a newer claim.
+    _execution_token: str | None = None
+    _progress_event: asyncio.Event = field(
+        default_factory=asyncio.Event, repr=False)
+    _last_progress_at: float = field(
+        default_factory=time.monotonic, repr=False)
+    _uow: Any = field(default=None, repr=False)
+    _storage: Any = field(default=None, repr=False)
 
     async def report_progress(
         self,
@@ -61,7 +67,8 @@ class ExecutionContext:
 
         if not self.progress_enabled:
             raise RuntimeError(
-                "report_progress() requires JobTypeSpec(progress_enabled=True)"
+                "report_progress() requires JobTypeSpec(progress_enabled=True "
+                "or progress_report_timeout_seconds=...)"
             )
         if (isinstance(current, bool) or isinstance(total, bool)
                 or not isinstance(current, int) or not isinstance(total, int)
@@ -79,26 +86,26 @@ class ExecutionContext:
                 raise ValueError("progress metadata must contain JSON values") from exc
             if len(encoded.encode()) > 8192:
                 raise ValueError("progress metadata exceeds 8192 bytes")
-        if self.storage is None or self.execution_token is None:
+        if self._storage is None or self._execution_token is None:
             raise RuntimeError("report_progress() is only valid inside a handler")
-        self.progress_event.clear()
-        persisted = await self.storage.job_progress_report(
-            self.job_id, self.execution_token, {
+        self._progress_event.clear()
+        persisted = await self._storage.job_progress_report(
+            self.job_id, self._execution_token, {
                 "current": current, "total": total,
                 "message": message, "metadata": metadata,
             })
         if not persisted:
-            # The row rejected the report: another claim/reschedule owns
-            # the job, or the progress window already closed. Raise so
-            # the handler cannot believe its progress was recorded —
-            # and so the worker stops this stale attempt cleanly.
+            # The row rejected the report: another claim, reschedule, or
+            # ops reset owns the job now. Raise so the handler cannot
+            # believe its progress was recorded — and so the worker
+            # stops this stale attempt cleanly.
             from .storage import ExecutionLostError
 
             raise ExecutionLostError(
                 f"job {self.job_id}: progress report rejected — "
                 "this dispatch no longer owns the execution")
-        self.last_progress_at = time.monotonic()
-        self.progress_event.set()
+        self._last_progress_at = time.monotonic()
+        self._progress_event.set()
 
     async def checkpoint(self) -> None:
         """Observe a cancellation request at a safe point in the handler.
@@ -114,9 +121,9 @@ class ExecutionContext:
                 "ctx.execution.checkpoint() requires the job type to opt in "
                 "via JobTypeSpec(cooperative_cancel=True)"
             )
-        if self.uow is None or self.storage is None:
+        if self._uow is None or self._storage is None:
             raise RuntimeError("checkpoint() is only valid inside the handler transaction")
-        if await self.storage.job_cancel_requested(self.uow, self.job_id):
+        if await self._storage.job_cancel_requested(self._uow, self.job_id):
             raise JobCancelled(self.job_id)
 
 
@@ -138,9 +145,11 @@ class JobContext:
     # In-run unit of work set by the dispatcher when the handler executes
     # inside the finish TX. Never serialized (excluded from ctx_to_dict).
     uow: Any = field(default=None, repr=False, compare=False)
-    # Worker-injected execution runtime (job id, checkpoint API). Set by
-    # dispatch before handler.run; never serialized.
-    execution: Any = field(default=None, repr=False, compare=False)
+    # Worker-injected execution runtime (job id, checkpoint/progress
+    # API). Dispatch replaces the placeholder before handler.run;
+    # never serialized into jobs.context.
+    execution: ExecutionContext = field(
+        default_factory=ExecutionContext, repr=False, compare=False)
 
     def require(self, permission: str) -> None:
         """Raise if the actor lacks a permission (service-layer check)."""
