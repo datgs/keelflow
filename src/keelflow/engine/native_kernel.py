@@ -82,6 +82,7 @@ class NativeKernel:
             """
             UPDATE keelflow_jobs j
                SET status='pending', claimed_by=NULL, lease_until=NULL,
+                   execution_token=NULL,
                    run_at=%s, dispatch_queued=true,
                    unique_key=COALESCE(j.unique_key, %s),
                    updated_at=now()
@@ -164,15 +165,23 @@ class NativeWorker:
         self.heartbeat_interval = heartbeat_interval
         self._dispatch = dispatch  # None → engine dispatch
         self._inflight: dict[str, asyncio.Task] = {}
+        # _stop_claim ends only the claim loop; _stop ends maintenance
+        # too — during graceful drain, maintenance must keep renewing
+        # in-flight leases or siblings would reclaim live work.
         self._stop = asyncio.Event()
+        self._stop_claim = asyncio.Event()
         self._tasks: list[asyncio.Task] = []
         self._conn: Any = None
 
     # ── connection / wakeup hooks ───────────────────────────────────────
 
     async def _connect(self):
+        # application_name identifies this claim/notify connection in
+        # pg_stat_activity (LISTEN itself is not retained as `query`)
+        # — used by ops and by the connection-leak proof.
         return await psycopg.AsyncConnection.connect(
-            self._kernel.dsn, autocommit=True)
+            self._kernel.dsn, autocommit=True,
+            application_name="keelflow-worker-claim")
 
     async def _open(self) -> None:
         self._conn = await self._connect()
@@ -198,15 +207,19 @@ class NativeWorker:
         ]
 
     async def _claim_loop(self) -> None:
-        while not self._stop.is_set():
+        while not self._stop_claim.is_set():
             try:
+                await self._ensure_conn()
                 free = self.concurrency - len(self._inflight)
-                if free > 0:
-                    await self._claim_once(free)
-                    continue  # drain before sleeping
+                if free > 0 and await self._claim_once(free):
+                    continue  # claimed something — drain before sleeping
             except asyncio.CancelledError:
                 raise
             except Exception:
+                # Transient DB loss must not kill the loop: drop the
+                # suspect connection and wait — the next iteration
+                # reconnects (auto-reconnect policy).
+                self._conn = None
                 log.exception("native claim loop error")
             try:
                 await self._wait_wakeup()
@@ -215,14 +228,35 @@ class NativeWorker:
             except Exception:  # noqa: BLE001 - wakeup degraded
                 # → plain sleep; polling still correct.
                 try:
-                    await asyncio.wait_for(self._stop.wait(),
+                    await asyncio.wait_for(self._stop_claim.wait(),
                                            timeout=self.poll_interval)
                 except TimeoutError:
                     pass
 
+    async def _ensure_conn(self) -> None:
+        """Reconnect the worker's claim/lease connection after loss."""
+        conn = self._conn
+        if conn is not None and not getattr(conn, "closed", False):
+            return
+        self._conn = None
+        try:
+            if conn is not None:
+                await conn.close()
+        except Exception:  # closing a dead conn is best-effort
+            log.debug("closing dead claim connection failed",
+                      exc_info=True)
+        await self._open()
+
     # ── dialect statements ──────────────────────────────────────────────
 
-    async def _claim_once(self, limit: int) -> None:
+    async def _claim_once(self, limit: int) -> int:
+        """Claim up to `limit` pending rows; returns how many were
+        claimed (0 → caller waits for wakeup/poll).
+
+        The claim consumes retry budget up front — `attempts` counts
+        claims, not handler starts — and mints the execution_token the
+        dispatch must present at `job_mark_running` to prove the claim
+        was not reclaimed in the gap before dispatch."""
         conn = self._conn
         async with conn.cursor() as cur:
             await cur.execute(
@@ -237,10 +271,12 @@ class NativeWorker:
                 )
                 UPDATE keelflow_jobs j
                    SET status='claimed', claimed_by=%s,
+                       attempts = attempts + 1,
+                       execution_token = gen_random_uuid()::text,
                        lease_until=now()+make_interval(secs=>%s),
                        updated_at=now()
                   FROM cand WHERE j.id=cand.id
-                RETURNING j.id,
+                RETURNING j.id, j.execution_token,
                     (SELECT s.id::text FROM keelflow_step_runs s
                       WHERE s.job_id=j.id LIMIT 1)
                 """,
@@ -248,38 +284,47 @@ class NativeWorker:
             )
             rows = await cur.fetchall()
         self._spawn(rows)
+        return len(rows)
 
     def _spawn(self, rows) -> None:
-        for job_id, step_run_id in rows:
+        for job_id, execution_token, step_run_id in rows:
             task = asyncio.create_task(
-                self._run(str(job_id),
+                self._run(str(job_id), execution_token,
                           str(step_run_id) if step_run_id else None))
             self._inflight[str(job_id)] = task
 
-    async def _run(self, job_id: str, step_run_id: str | None) -> None:
+    async def _run(self, job_id: str, execution_token: str | None,
+                   step_run_id: str | None) -> None:
         dispatch = self._dispatch
         if dispatch is None:
             from .worker import dispatch as _dispatch
 
             dispatch = _dispatch
         try:
-            await dispatch(job_id, step_run_id)
+            await dispatch(job_id, step_run_id,
+                           execution_token=execution_token)
         except asyncio.CancelledError:
             raise
         except Exception:
             log.exception("native dispatch %s failed", job_id)
         finally:
-            self._inflight.pop(job_id, None)
+            # Pop by identity: a reclaim may have replaced this job's
+            # inflight entry — an older dispatch finishing last must
+            # not clear the newer dispatch's slot.
+            if self._inflight.get(job_id) is asyncio.current_task():
+                self._inflight.pop(job_id, None)
 
     async def _maintenance_loop(self) -> None:
         """Renew in-flight leases (fencing) + reclaim expired claims."""
         while not self._stop.is_set():
             try:
+                await self._ensure_conn()
                 await self._heartbeat()
                 await self._reap()
             except asyncio.CancelledError:
                 raise
             except Exception:
+                self._conn = None
                 log.exception("native maintenance error")
             try:
                 await asyncio.wait_for(self._stop.wait(),
@@ -332,24 +377,42 @@ class NativeWorker:
             return cur.rowcount
 
     async def stop(self, *, timeout: float | None = None) -> bool:
-        self._stop.set()
-        for t in self._tasks:
-            t.cancel()
+        """Stop claiming, then drain in-flight dispatches up to
+        `timeout` while the maintenance loop keeps renewing their
+        leases — a graceful drain must not let a sibling worker
+        reclaim a job whose handler is still running. After the drain
+        budget is spent, remaining dispatches are cancelled, awaited
+        for real completion, and their leases left to expire for
+        recovery.
+        """
+        self._stop_claim.set()
+        claim_task = self._tasks[0] if self._tasks else None
+        if claim_task is not None:
+            claim_task.cancel()
+            await asyncio.gather(claim_task, return_exceptions=True)
+        drained = not self._inflight
         if self._inflight:
-            done = await asyncio.wait(
+            _done, pending = await asyncio.wait(
                 self._inflight.values(),
                 timeout=timeout if timeout is not None else 30.0,
             )
-            for t in done[1]:  # pending → cancel; lease expiry re-queues
+            drained = not pending
+            for t in pending:  # lease expiry re-queues the job
                 t.cancel()
-        await asyncio.gather(*self._tasks, return_exceptions=True)
+            if pending:
+                await asyncio.wait(pending)  # real completion, not cancel()
+        self._stop.set()
+        await asyncio.gather(*self._tasks[1:], return_exceptions=True)
         if self._conn is not None:
-            await self._conn.close()
-        return not self._inflight
+            try:
+                await self._conn.close()
+            finally:
+                self._conn = None
+        return drained
 
     async def wait_for_shutdown(self) -> None:
         if self._tasks:
-            await asyncio.gather(*self._tasks, return_exceptions=True)
+            await asyncio.gather(*self._tasks)
 
     async def recover(self, conn=None) -> int:
         """Force-reclaim expired claims now (test hook like chancy's
@@ -360,7 +423,8 @@ class NativeWorker:
                     """
                     UPDATE keelflow_jobs
                        SET status='pending', claimed_by=NULL,
-                           lease_until=NULL, updated_at=now()
+                           lease_until=NULL, execution_token=NULL,
+                           updated_at=now()
                      WHERE status IN ('claimed','running')
                        AND lease_until < now()
                        AND dispatch_queued

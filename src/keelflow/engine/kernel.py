@@ -90,13 +90,18 @@ def dispatch_spec(*, job_id, queue: str = DEFAULT_QUEUE,
 
     `func` is fixed to the engine dispatch entry point; `job_id`/`type`
     meta lets ops correlate kernel rows to `keelflow_jobs`.
+
+    Kernel `max_attempts` is engine `max_attempts` + 1: the kernel must
+    always be able to deliver one final claim so the engine itself can
+    settle an exhausted job (failed + DLQ) — if the kernel bound came
+    first, an abandoned row could stall unreconciled.
     """
     return KernelJobSpec(
         func=DISPATCH_FUNC,
         queue=queue,
         kwargs={"job_id": str(job_id),
                 "step_run_id": str(step_run_id) if step_run_id else None},
-        max_attempts=max_attempts,
+        max_attempts=max_attempts + 1,
         scheduled_at=scheduled_at,
         unique_key=unique_key,
         meta=meta,

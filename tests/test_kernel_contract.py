@@ -393,7 +393,8 @@ async def test_non_queued_row_not_claimed(kenv):
 # ── dispatch stubs (injected; chancy resolves CONTRACT_FUNC by path) ────
 
 
-async def _record(job_id, step_run_id=None):
+async def _record(job_id, step_run_id=None, *,
+                  execution_token=None):
     KERNEL_DISPATCH_RECORD.append((job_id, step_run_id))
 
 

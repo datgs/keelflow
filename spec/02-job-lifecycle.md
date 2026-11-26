@@ -46,13 +46,21 @@ kernel claims job → dispatch(job_id)
 
 - Retry policy is per job type (`RetryPolicy.max_attempts`, `backoff`,
   `base_seconds`, `jitter`); engine owns the attempt counter
-  (`keelflow_jobs.attempts` per dispatch claim). On handler exception:
+  (`keelflow_jobs.attempts` per dispatch claim). **Every successful
+  claim counts an attempt** — including a claim abandoned before the
+  handler started (worker death in the claim→dispatch gap): the native
+  kernel increments in the claim UPDATE, chancy/dispatch increments at
+  `job_mark_running`. A dispatch that observes `attempts > max_attempts`
+  settles the job without running the handler — `failed` + DLQ +
+  workflow terminalization in one unit. On handler exception:
   attempts remaining → job stays `running` AND a replacement kernel job
   is pushed at `scheduled_at = now + backoff` inside the same TX
   (redelivery re-runs the handler); exhausted → status `failed`, the
   row is copied to `keelflow_dlq`, and the owning step terminalizes
   (`on_failed` path in `03-workflow.md`). Without a kernel client
-  configured, dispatch falls back to kernel-managed retries.
+  configured, dispatch falls back to kernel-managed retries. Kernel
+  delivery budget is `max_attempts + 1` so the kernel always grants
+  the final delivery needed for engine-side settlement.
 - `timeout_seconds` (per job type) wraps `handler.run` in a deadline;
   `TimeoutError` counts as a failed, retryable attempt.
 - Cancellation is **pre-start by default**. `cancel_requested` is

@@ -99,11 +99,22 @@ def _get_registry() -> Registry:
     return _REGISTRY
 
 
-async def dispatch(job_id: str, step_run_id: str | None = None) -> None:
+async def dispatch(
+    job_id: str,
+    step_run_id: str | None = None,
+    *,
+    execution_token: str | None = None,
+) -> None:
     """Execute one engine job. Called by the kernel claim loop.
 
     `step_run_id` links a kernel job back to a workflow step (T7); when the
     job finishes, `workflow.on_job_finished` advances the run.
+
+    `execution_token` is the claim generation minted by a kernel-owned
+    claim (native): `job_mark_running` validates it so a dispatch whose
+    claim was reclaimed in the gap can never mint its own token over a
+    newer claim. None means the engine owns the claim boundary
+    (chancy/direct) and the token is minted here.
     """
     registry = _get_registry()
     storage = _get_storage()
@@ -210,7 +221,8 @@ async def dispatch(job_id: str, step_run_id: str | None = None) -> None:
             # retry (attempts=0) can never collide with a live token.
             execution_token = await storage.job_mark_running(
                 uow, job_id,
-                progress_timeout_seconds=spec.progress_report_timeout_seconds)
+                progress_timeout_seconds=spec.progress_report_timeout_seconds,
+                claim_token=execution_token)
             if execution_token is None:
                 if await storage.job_cancel_requested(uow, job_id):
                     await _cancel_terminalize(
@@ -218,10 +230,27 @@ async def dispatch(job_id: str, step_run_id: str | None = None) -> None:
                         step_run_id, jlog, type_name, payload_json)
                 else:
                     log.warning(
-                        "job %s not startable (status changed); skipping",
-                        job_id)
+                        "job %s not startable (claim lost or status "
+                        "changed); skipping", job_id)
                 return
             ctx.execution._execution_token = execution_token
+            # Claim budget: every claim (kernel or engine) consumed one
+            # attempt — a job claimed more times than max_attempts is
+            # settled permanently here (failed + DLQ + step settle in
+            # this unit) instead of running the handler again.
+            att = await storage.job_attempts(uow, job_id)
+            if att and att[0] > att[1]:
+                jlog.error(
+                    "attempt budget exhausted (%d > %d); "
+                    "settling without running the handler",
+                    att[0], att[1])
+                await _settle_exhausted(
+                    uow, storage, registry, job_id, step_run_id,
+                    type_name, payload_json, ctx_json, att,
+                    error=(f"attempt budget exhausted: claimed {att[0]}"
+                           f" times > max_attempts {att[1]}"),
+                    jlog=jlog, execution_token=execution_token)
+                return
         # uow boundary 1 committed: job is 'running' durably — a crash
         # mid-handler leaves it for kernel recovery instead of re-claim.
 
@@ -338,35 +367,18 @@ async def dispatch(job_id: str, step_run_id: str | None = None) -> None:
                         att = await storage.job_attempts(uow, job_id)
                         exhausted = bool(att and att[0] >= att[1])
                         if exhausted:
-                            # Retries are done → terminal failure + DLQ
-                            # copy + step settle in ONE unit.
-                            await storage.job_finish(uow, job_id, JobFinish(
-                                status=JobStatus.FAILED,
-                                error=exc_text + ("\n" + tb if tb else "")),
-                                execution_token=ctx.execution._execution_token)
-                            # keep the workflow link so dlq_replay can
-                            # resume the owning run
-                            _dlq_run_id = None
-                            if step_run_id:
-                                _sr = await storage.step_run_get(
-                                    uow, step_run_id)
-                                _dlq_run_id = (
-                                    str(_sr["run_id"]) if _sr else None)
-                            await storage.dlq_insert(uow, DlqInsert(
-                                id=job_id, type=type_name,
-                                payload=payload_json, context=ctx_json,
-                                error=exc_text,
-                                attempts=att[0] if att else 0,
-                                run_id=_dlq_run_id, step_run_id=step_run_id,
-                            ))
-                            jlog.error("handler failed permanently: %s", exc)
-                            if step_run_id and _kernel_client is not None:
-                                from .workflow import on_job_finished
-
-                                await on_job_finished(
-                                    uow, storage, _kernel_client, registry,
-                                    job_id, step_run_id, JobStatus.FAILED,
-                                    {})
+                            await _settle_exhausted(
+                                uow, storage, registry, job_id,
+                                step_run_id, type_name, payload_json,
+                                ctx_json, att,
+                                error=(exc_text
+                                       + ("\n" + tb if tb else "")),
+                                dlq_error=exc_text,
+                                jlog=jlog,
+                                execution_token=(
+                                    ctx.execution._execution_token))
+                            jlog.error(
+                                "handler failed permanently: %s", exc)
                         else:
                             # Engine-scheduled retry: keep the engine job
                             # 'running', record the error, and push a
@@ -462,24 +474,8 @@ def run_worker(
             configure(registry=registry, dsn=dsn, kernel=injected,
                       storage=storage)
             await injected.migrate()
-            worker = injected.create_worker()
-            await worker.start()
-            try:
-                stop = asyncio.Event()
-
-                async def _watch() -> None:
-                    await worker.wait_for_shutdown()
-                    stop.set()
-
-                tasks = [_watch(), worker_heartbeat_loop(storage,
-                                                       stop=stop)]
-                if event_bus is not None:
-                    from .events import dispatch_events
-
-                    tasks.append(dispatch_events(event_bus, storage))
-                await asyncio.gather(*tasks)
-            finally:
-                await worker.stop()
+            await _run_supervised(storage, event_bus,
+                                  injected.create_worker)
 
         asyncio.run(_run_injected())
         return
@@ -499,26 +495,70 @@ def run_worker(
                 )
             ]:
                 await kernel.declare_queue(q, upsert=True)
-            worker = kernel.create_worker()
-            await worker.start()
-            try:
-                stop = asyncio.Event()
-
-                async def _watch() -> None:
-                    await worker.wait_for_shutdown()
-                    stop.set()
-
-                tasks = [_watch(), worker_heartbeat_loop(storage,
-                                                       stop=stop)]
-                if event_bus is not None:
-                    from .events import dispatch_events
-
-                    tasks.append(dispatch_events(event_bus, storage))
-                await asyncio.gather(*tasks)
-            finally:
-                await worker.stop()
+            await _run_supervised(storage, event_bus,
+                                  kernel.create_worker)
 
     asyncio.run(_run())
+
+
+async def _run_supervised(storage, event_bus, worker_factory,
+                          restart_delay: float = 2.0) -> None:
+    """Run a kernel worker under supervision: a dead worker (transient
+    DB loss, broker fault, plugin crash) is stopped and replaced by a
+    fresh `worker_factory()` instance after `restart_delay`, forever —
+    the heartbeat task keeps declaring the process alive through the
+    gap. A clean `wait_for_shutdown` return ends the loop.
+    """
+    import asyncio
+
+    stop = asyncio.Event()
+
+    async def _supervise() -> None:
+        try:
+            while True:
+                worker = worker_factory()
+                try:
+                    await worker.start()
+                    await worker.wait_for_shutdown()
+                except asyncio.CancelledError:
+                    raise
+                except Exception:
+                    log.exception(
+                        "kernel worker lost; restarting in %.1fs",
+                        restart_delay)
+                    await asyncio.sleep(restart_delay)
+                    continue
+                finally:
+                    try:
+                        await worker.stop()
+                    except Exception:
+                        log.exception("worker.stop failed during "
+                                      "supervision")
+                break  # clean shutdown
+        finally:
+            stop.set()
+
+    tasks = [asyncio.ensure_future(_supervise()),
+             asyncio.ensure_future(
+                 worker_heartbeat_loop(storage, stop=stop))]
+    if event_bus is not None:
+        from .events import dispatch_events
+
+        tasks.append(asyncio.ensure_future(
+            dispatch_events(event_bus, storage)))
+    # wait (not gather): any task dying — supervision returns, the
+    # heartbeat crashes — ends the set, then remaining tasks are
+    # cancelled and their exception (if any) propagates.
+    try:
+        done, _ = await asyncio.wait(tasks,
+                                     return_when=asyncio.FIRST_COMPLETED)
+    finally:
+        for t in tasks:
+            if not t.done():
+                t.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+    for t in done:
+        t.result()
 
 
 async def _run_with_progress_timeout(
@@ -601,6 +641,40 @@ def _retry_kernel_job(job_id, type_name: str, spec, step_run_id, delay: float):
 
 
 # ── cancel helpers ──────────────────────────────────────────────────────
+
+
+async def _settle_exhausted(
+    uow, storage, registry, job_id, step_run_id,
+    type_name, payload_json, ctx_json, att,
+    *, error: str, jlog, execution_token,
+    dlq_error: str | None = None,
+) -> None:
+    """Permanent terminalization in ONE unit: job_finish('failed') +
+    DLQ copy + workflow step settle. Used both by handler-exception
+    exhaustion and by a dispatch observing the claim budget already
+    spent (repeated crashes never ran the handler). Caller commits."""
+    await storage.job_finish(uow, job_id, JobFinish(
+        status=JobStatus.FAILED, error=error),
+        execution_token=execution_token)
+    # keep the workflow link so dlq_replay can resume the owning run
+    _dlq_run_id = None
+    if step_run_id:
+        _sr = await storage.step_run_get(uow, step_run_id)
+        _dlq_run_id = str(_sr["run_id"]) if _sr else None
+    await storage.dlq_insert(uow, DlqInsert(
+        id=job_id, type=type_name,
+        payload=payload_json, context=ctx_json,
+        error=dlq_error if dlq_error is not None else error,
+        attempts=att[0] if att else 0,
+        run_id=_dlq_run_id, step_run_id=step_run_id,
+    ))
+    if step_run_id and _kernel_client is not None:
+        from .workflow import on_job_finished
+
+        await on_job_finished(
+            uow, storage, _kernel_client, registry,
+            job_id, step_run_id, JobStatus.FAILED, {})
+
 
 
 async def _cancel_terminalize(uow, session, storage, registry, job_id,

@@ -184,13 +184,13 @@ class SQLiteWorker(NativeWorker):
 
     # ── dialect statements ──────────────────────────────────────────────
 
-    async def _claim_once(self, limit: int) -> None:
+    async def _claim_once(self, limit: int) -> int:
         conn = self._conn
         cur = await conn.execute(
             """
             UPDATE keelflow_jobs
                SET status='claimed', claimed_by=?, lease_until=?,
-                   updated_at=?
+                   attempts = attempts + 1, updated_at=?
              WHERE id IN (
                 SELECT id FROM keelflow_jobs
                  WHERE status='pending' AND run_at<=? AND dispatch_queued=1
@@ -211,8 +211,11 @@ class SQLiteWorker(NativeWorker):
                 " LIMIT 1", (str(job_id),))
             sr = await scur.fetchone()
             await scur.close()
-            rows.append((job_id, sr[0] if sr else None))
+            # SQLite has no execution_token column — claim fencing for
+            # this backend is the lease/claimed_by pair.
+            rows.append((job_id, None, sr[0] if sr else None))
         self._spawn(rows)
+        return len(rows)
 
     async def _heartbeat(self) -> None:
         if not self._inflight:

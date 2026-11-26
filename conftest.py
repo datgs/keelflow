@@ -138,7 +138,8 @@ KERNEL_DISPATCH_RECORD: list[tuple] = []
 KERNEL_DISPATCH_CANCELLED: list[str] = []
 
 
-async def kernel_contract_dispatch(job_id, step_run_id=None):
+async def kernel_contract_dispatch(job_id, step_run_id=None, *,
+                                   execution_token=None):
     """Stub dispatch used by the kernel-port contract suite.
 
     Importable by dotted path (chancy) and injectable as a callable

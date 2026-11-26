@@ -239,20 +239,46 @@ class PostgresStorage(Storage):
         job_id: str,
         *,
         progress_timeout_seconds: float | None = None,
+        claim_token: str | None = None,
     ) -> str | None:
-        cur = await self._conn(uow).execute(
-            "UPDATE keelflow_jobs"
-            " SET status=%s, attempts = attempts + 1,"
-            "     execution_token = gen_random_uuid()::text,"
-            "     progress = NULL, progress_at = now(),"
-            "     progress_timeout_seconds = %s,"
-            "     updated_at=now()"
-            " WHERE id=%s"
-            "   AND status IN ('pending','claimed','running')"
-            "   AND cancel_requested = false"
-            " RETURNING execution_token",
-            (JobStatus.RUNNING.value, progress_timeout_seconds, job_id),
-        )
+        if claim_token is not None:
+            # Kernel-owned claim (native path): the claim already minted
+            # the token and consumed the attempt — this only validates
+            # the claim still stands (a reap or newer claim would have
+            # replaced/cleared the token) and flips the row to running.
+            cur = await self._conn(uow).execute(
+                "UPDATE keelflow_jobs"
+                " SET status=%s,"
+                "     progress = NULL, progress_at = now(),"
+                "     progress_timeout_seconds = %s,"
+                "     updated_at=now()"
+                " WHERE id=%s"
+                "   AND status='claimed'"
+                "   AND execution_token=%s"
+                "   AND cancel_requested = false"
+                " RETURNING execution_token",
+                (JobStatus.RUNNING.value, progress_timeout_seconds,
+                 job_id, claim_token),
+            )
+        else:
+            # Engine-owned claim (chancy path / direct dispatch): mint
+            # a fresh non-reusable token and consume the attempt here.
+            # A 'claimed' row carrying a token is owned by a kernel
+            # claim — a tokenless dispatch must not hijack it.
+            cur = await self._conn(uow).execute(
+                "UPDATE keelflow_jobs"
+                " SET status=%s, attempts = attempts + 1,"
+                "     execution_token = gen_random_uuid()::text,"
+                "     progress = NULL, progress_at = now(),"
+                "     progress_timeout_seconds = %s,"
+                "     updated_at=now()"
+                " WHERE id=%s"
+                "   AND (status IN ('pending','running')"
+                "        OR (status='claimed' AND execution_token IS NULL))"
+                "   AND cancel_requested = false"
+                " RETURNING execution_token",
+                (JobStatus.RUNNING.value, progress_timeout_seconds, job_id),
+            )
         row = await cur.fetchone()
         return row[0] if row else None
 
@@ -1281,6 +1307,8 @@ class PostgresStorage(Storage):
             """
             SELECT
                 count(*) FILTER (WHERE status='pending') AS queue_depth,
+                count(*) FILTER (WHERE status='pending'
+                                 AND run_at <= now()) AS pending_due,
                 count(*) FILTER (WHERE status='claimed') AS claimed,
                 count(*) FILTER (WHERE status='running') AS running,
                 count(*) FILTER (WHERE status='blocked') AS waiting,

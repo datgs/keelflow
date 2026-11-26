@@ -16,6 +16,9 @@ must own. Proofs referenced are executable tests — see
 | **Idempotent enqueue** — same `(type, deduplication_key)` lands at most one live job | non-terminal jobs | partial unique index |
 | **No lost intent** — enqueue inside a committed TX is durably claimable | transactional outbox model | `test_recovery` |
 | **Cancel is cooperative** — `cancel()` terminalizes pending jobs and flags running ones; only `cooperative_cancel` types stop mid-run | job lifecycle | `test_engine_hardening` |
+| **Bounded crash recovery** — every claim consumes one `attempts` slot whether or not the handler ran; claims beyond `max_attempts` settle the job `failed` + DLQ + step settle atomically | both worker kernels | `test_reliability::test_repeated_crash_abandoned_claims_exhaust_to_dlq`, `test_chancy_redelivery_settles_exhausted_claim` |
+| **Lease-safe drain** — `stop(timeout)` keeps renewing in-flight leases through the drain window; a sibling worker cannot steal a draining job | native kernel | `test_reliability::test_graceful_stop_renews_lease_through_drain` |
+| **Worker survives DB loss** — a severed connection reconnects (native claim/maintenance loops; chancy worker supervision in `run_worker`) and keeps consuming | both worker kernels | `test_reliability::test_native_worker_recovers_after_connection_drop`, `test_chancy_pipeline_recovers_after_connection_drop` |
 
 ## What is NOT guaranteed
 
@@ -45,8 +48,13 @@ must own. Proofs referenced are executable tests — see
 | Scenario | What happens | Operator action |
 |---|---|---|
 | Worker dies mid-handler | UoW rolls back; kernel lease expires; job redelivered | none (at-least-once) |
+| Worker dies before its dispatch starts (native) | claim token retired on reclaim; the stale dispatch loses at `job_mark_running` | none |
+| Repeated crash-before-handler | each claim counts an attempt; `attempts > max_attempts` → `failed` + DLQ | `dlq_replay` after fixing |
 | Worker dies after commit | job is terminal; dispatch may see a stale claim and skip | none |
 | DB disconnect mid-handler | TX aborts; job redelivered; idempotent write lands once | none |
+| DB connectivity lost (worker idle) | claim/maintenance loops drop the dead conn and reconnect; `run_worker` supervision replaces a dead chancy worker | none |
+| `stop()` during a long handler | claiming stops; the lease keeps renewing while the handler drains within `timeout`; overrun → cancel + lease expiry re-queues | none |
+| Chancy kernel job abandoned before engine `mark_running` | chancy `Recovery` requeues it (kernel attempts are `engine max_attempts + 1`, so the engine always gets the final delivery to settle) | none |
 | Scheduler restart | ticks replay; `cron:<type>:<slot>` unique keys dedup | none |
 | Outbox dispatcher restart | events re-claimed; subscriber dedup skips delivered ones | none |
 | Job exhausts attempts | `failed` + DLQ row | `dlq_replay` after fixing |

@@ -701,16 +701,20 @@ Engine logs carry structured `extra` fields (`job_id`, `job_type`,
 when `keelflow[otel]` is installed (`tracer()` is a no-op otherwise).
 
 `format_metrics_prometheus(await mon.metrics_snapshot(uow))` renders
-queue depth, claimed, running, waiting (blocked human/wait steps —
-separate from stuck work), failed_24h, oldest pending, done duration,
-DLQ depth, worker liveness and scheduler heartbeat age as Prometheus
-text. Workers and schedulers upsert `keelflow_process_health` rows and
-monitoring treats a row as alive while `last_seen` is fresher than its
-`stale_after_s` window. `run_worker` starts a worker heartbeat every
-10s (`stale_after_s=30`); a scheduler's heartbeat is its tick, declared
-at `max(interval*3, 30)` so a healthy idle scheduler is not reported
-stale. Mount the text on your own /metrics endpoint — no built-in
-listener.
+queue depth, pending_due (pending rows already claimable — the
+consumption signal: fresh heartbeat + rising `pending_due` means a
+worker is alive-but-not-consuming), claimed, running, waiting (blocked
+human/wait steps — separate from stuck work), failed_24h, oldest
+pending, done duration, DLQ depth, worker liveness and scheduler
+heartbeat age as Prometheus text. Workers and schedulers upsert
+`keelflow_process_health` rows and monitoring treats a row as alive
+while `last_seen` is fresher than its `stale_after_s` window.
+`run_worker` starts a worker heartbeat every 10s (`stale_after_s=30`)
+and runs the kernel worker under supervision — a worker that dies
+(transient DB loss, plugin crash) is replaced automatically; a
+scheduler's heartbeat is its tick, declared at `max(interval*3, 30)`
+so a healthy idle scheduler is not reported stale. Mount the text on
+your own /metrics endpoint — no built-in listener.
 
 Running a caller-owned kernel worker instead of `run_worker`?
 `configure()` only wires dispatch — start the heartbeat yourself so an

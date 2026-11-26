@@ -101,6 +101,8 @@ def format_metrics_prometheus(snapshot: dict[str, Any]) -> str:
     lines = [
         "# HELP keelflow_queue_depth Jobs waiting to be claimed.",
         "# TYPE keelflow_queue_depth gauge",
+        "# HELP keelflow_pending_due Pending jobs already claimable (run_at due) — consumption backlog; rises when no worker drains the queue.",
+        "# TYPE keelflow_pending_due gauge",
         "# HELP keelflow_claimed Jobs claimed but not yet running.",
         "# TYPE keelflow_claimed gauge",
         "# HELP keelflow_running Jobs currently executing.",
@@ -109,7 +111,7 @@ def format_metrics_prometheus(snapshot: dict[str, Any]) -> str:
         "# TYPE keelflow_waiting gauge",
         "# HELP keelflow_failed_24h Jobs failed in the last 24 hours.",
         "# TYPE keelflow_failed_24h gauge",
-        "# HELP keelflow_oldest_pending_seconds Age of the oldest pending job.",
+        "# HELP keelflow_oldest_pending_seconds Age of the oldest pending job — queue-age starvation signal, distinct from worker heartbeat (alive-but-not-consuming shows workers_alive > 0 with pending_due rising).",
         "# TYPE keelflow_oldest_pending_seconds gauge",
         "# HELP keelflow_avg_done_duration_seconds_24h Mean end-to-end duration of jobs finished in 24h.",
         "# TYPE keelflow_avg_done_duration_seconds_24h gauge",
@@ -128,6 +130,7 @@ def format_metrics_prometheus(snapshot: dict[str, Any]) -> str:
     ]
     mapping = {
         "queue_depth": "keelflow_queue_depth",
+        "pending_due": "keelflow_pending_due",
         "claimed": "keelflow_claimed",
         "running": "keelflow_running",
         "waiting": "keelflow_waiting",

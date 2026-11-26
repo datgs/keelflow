@@ -4,10 +4,10 @@ Date: 2026-11-25
 
 ## Status
 
-Original feature and first hardening pass are implemented and verified on
-Postgres. A second follow-up is now planned for the additional review findings
-below; this plan remains active until those findings are implemented and
-verified. SQLite progress/watchdog remains out of scope as documented.
+Progress reporting and the two prior hardening passes are implemented and
+verified. A broader Native + Chancy reliability pass is planned below; this
+plan remains active until those recovery findings have executable evidence.
+SQLite progress/watchdog remains out of scope as documented.
 
 ## Outcome
 
@@ -522,7 +522,7 @@ Out of scope:
       a dedicated `keelflow_demo` database (healthy run completes) and
       the DSN guard exits 1 without it.
 
-### Result
+### Result (progress API follow-up)
 
 Implemented on 2026-11-25. All three P1 correctness gaps closed with
 PostgreSQL/Native regression tests; P2 monitoring/API semantics aligned
@@ -531,6 +531,363 @@ with actual behavior; `no_progress_timeout_seconds` renamed to
 alias — consumers must rename). `ctx.execution` is typed and its
 internals private. Full validation above; SQLite remains outside the
 progress contract.
+
+## Follow-up: Native + Chancy reliability pass
+
+### Outcome
+
+Provide behavior-level recovery evidence for both production-relevant
+PostgreSQL worker paths: NativeKernel and the default Chancy adapter. Prove
+claim ownership, recovery after transient and prolonged database connection
+loss, orderly shutdown and lease retention, retry exhaustion after abrupt
+worker death, deduplication during active execution, and idle queue behavior.
+Expose whether workers are genuinely consuming eligible work, not only whether
+a process heartbeat is fresh. Report recovery time as observed components and
+measurements, not a fixed SLA without evidence.
+
+### Scope
+
+In scope:
+
+- Fence Native work across the entire claim→dispatch boundary, before
+  `job_mark_running()` can mint an execution token. A stale dispatch must not
+  steal a newer claim whether it arrives before or after the replacement claim.
+- Count a successful claim against `max_attempts`, as approved on
+  2026-11-25, including a worker dying after claim but before handler start.
+  Repeated crash/reclaim must end in a durable failed state, DLQ record, and
+  workflow terminalization where applicable; those writes must be atomic.
+  Apply equivalent externally visible semantics to Chancy despite its own
+  broker-attempt counter and claim lifecycle.
+- Keep extending leases for in-flight Native jobs while graceful shutdown has
+  stopped new claims and drains handlers. At drain timeout, cancel and await
+  actual task completion before closing maintenance/DB resources; then make
+  unfinished jobs safely reclaimable. Verify ordinary and over-lease drains.
+- Make both Native and Chancy worker DB-loss recovery explicit. For each,
+  exercise a short outage, outage longer than one job lease, and one-way
+  connection loss. After connectivity returns, workers must reconnect and
+  resume claims; existing jobs must have consistent state and new jobs must
+  not remain stranded.
+- Fix Native idle claim polling if runtime measurement confirms continuous
+  empty claim queries. Retain prompt wakeup and bounded poll fallback.
+- Make `recover(conn=...)` and `_reap()` invalidate the same claim fence.
+- Prove concurrent duplicate enqueue while the original job is running remains
+  one live job/one execution across enqueue→kernel push for Chancy and Native.
+- Test shutdown, claim/recovery, workflow/DLQ consistency, and one idempotent
+  business effect together, not only isolated status updates.
+- Add/clarify a metric or monitoring signal for age of eligible pending work
+  (queue starvation); heartbeat alone is not evidence of consumption.
+
+Out of scope:
+
+- SQLite production reliability guarantees, exact-once external effects, or
+  claiming that database fencing prevents already-issued remote side effects.
+- A fixed recovery-time SLA before measurements define a service objective.
+- Unbounded retries or changing the approved claim-counts-as-attempt policy.
+- Automatically patching or forking Chancy without first proving the exact
+  failure in the pinned 0.26.0 dependency and identifying a supported recovery
+  seam.
+
+### Evidence and current assessment
+
+User reviewed code at commit `2fd3339`; the following are code findings or
+reported upstream cases, not yet reproduced as Keelflow failures:
+
+- **VERIFIED code gap — Native claim/dispatch ownership:**
+  `NativeWorker._claim_once()` sets `claimed_by` and `lease_until`, then
+  `_spawn()` schedules `dispatch(job_id, ...)` without a claim generation
+  (`src/keelflow/engine/native_kernel.py:225-257`). Later,
+  `PostgresStorage.job_mark_running()` accepts `pending`, `claimed`, or
+  `running` by id and does not validate `claimed_by`/claim generation
+  (`src/keelflow/postgres/storage.py:236-257`). This leaves a pre-token
+  dispatch race not covered by current post-start fencing tests.
+- **VERIFIED code gap — Native shutdown:** `stop()` cancels both claim and
+  maintenance tasks before waiting for in-flight dispatches; maintenance is
+  what renews their leases (`native_kernel.py:274-287,334-348`). A drain longer
+  than a lease may allow a second worker to reclaim while the old handler is
+  still executing. Timeout path sends `task.cancel()` but must prove completion
+  before releasing resources.
+- **VERIFIED code gap — Native idle polling:** `_claim_loop()` continues
+  unconditionally whenever capacity exists, regardless of whether
+  `_claim_once()` found any rows (`native_kernel.py:200-206,225-250`). Runtime
+  query rate and impact have not yet been measured.
+- **VERIFIED code gap — recovery hook:** `_reap()` clears `execution_token`,
+  but `recover(conn=...)` does not (`native_kernel.py:319-370`).
+- **VERIFIED code gap — crash retry budget:** Native `attempts` increments in
+  `job_mark_running()`, not in the Native claim update. A process death after
+  claim and before dispatch therefore consumes no engine attempt; `_reap()`
+  returns the row to pending without checking exhaustion. Handler exceptions
+  do run exhaustion/DLQ in the dispatcher
+  (`postgres/storage.py:243-255`, `native_kernel.py:319-332`,
+  `engine/worker.py:333-369`). The same durable contract must be examined for
+  Chancy, where the kernel also has its own attempt count.
+- **VERIFIED existing coverage gap:** recovery test currently terminates the
+  handler's UoW connection (`tests/test_recovery.py:46-66,112-143`); it does
+  not disconnect Native claim/maintenance or Chancy Leadership/listener
+  connections. Existing contract tests explicitly skip Chancy's lease/reclaim
+  internals (`tests/test_kernel_contract.py:300-306`).
+- **VERIFIED positive signal:** engine storage enqueue uses partial-index
+  `ON CONFLICT DO NOTHING` for active `(type, unique_key)` and returns the
+  existing id (`postgres/storage.py:180-234`); kernel contract already tests
+  duplicate keys (`tests/test_kernel_contract.py:280-297`). The missing proof is
+  concurrent application enqueue while the first job is actually running, for
+  each adapter.
+- **UPSTREAM report, not Keelflow proof:** Chancy issue #104 reports the worker
+  exiting after a short PostgreSQL interruption in 0.26.0; #88 reports a
+  queue-maintenance task dying on transient DB failure; #93 covers shutdown
+  drain behavior; #78 covers a LISTEN connection leak; #51 reports duplicate
+  execution from unique-key conflict resetting a running row. These are
+  hypotheses to test against Keelflow's pinned adapter/runtime, not evidence
+  that the same failures occur here.
+- **UPSTREAM analogy:** Celery #10205 reports a live worker stopping consumption
+  after broker reconnect. This supports checking queue age/consumption separate
+  from process heartbeat; it does not establish a Keelflow defect.
+- **User-approved decisions (2026-11-25):** DB outage behavior should be
+  automatic reconnect (not fail-fast); every successful claim counts toward
+  `max_attempts`, including a claim abandoned before handler start.
+
+### Approach and task graph
+
+Use one isolated disposable PostgreSQL database, real worker loops, and at
+least two workers for race/reclaim tests. Keep Chancy and Native kernel tables
+namespaced separately. Inject connection failures only through test-owned
+connections/proxy resources; never interrupt shared services. Capture job row,
+lease/claim identity, DLQ, workflow state, effect count, worker task/process
+state, and PostgreSQL query/connection evidence together.
+
+**Task A — Claim identity and bounded crash recovery (foundation)**
+
+- Goal: one unambiguous claim generation owns each dispatch; a successful
+  claim consumes one attempt and repeated abandoned claims terminalize safely.
+- Context: Native has a pre-dispatch gap and attempt count currently starts at
+  handler start; user approved count-at-claim semantics. Chancy is the default
+  backend and must meet the same engine-visible outcome.
+- Required outcomes: carry/validate claim ownership at dispatch entry; stale A
+  cannot start or mint over B whether A resumes before or after B claims. On
+  attempt exhaustion without handler exception, atomically persist failed,
+  DLQ, and workflow settlement. Keep kernel and engine attempt counts
+  consistent and document their relationship.
+- Constraints: do not use reusable attempts as the fencing identity; no
+  unbounded retry; external effects remain at-least-once.
+- Acceptance evidence: deterministic two-worker PostgreSQL race for both
+  backends; crash/reclaim loop stopped at configured max attempts; assert one
+  terminal row, one DLQ row, correct workflow terminal status, and effect
+  count consistent with exactly which handler starts occurred.
+- Verification: focused Native and Chancy integration tests; then existing
+  engine hardening, recovery, and kernel contract suites.
+- Ownership: `native_kernel.py`, storage claim contract, `worker.py`, and
+  tests. Chancy internals are a discovery dependency: first inspect pinned
+  0.26.0 claim/recovery behavior and a supported adapter seam before changing
+  wrapper policy.
+- Dependencies: none; output contract is a documented claim-generation and
+  claim-counted attempt invariant consumed by Tasks B/C.
+
+**Task B — Lease-safe drain and idle claim behavior**
+
+- Goal: stop new claims without abandoning ownership of in-flight work; avoid
+  empty-queue database spin.
+- Context: Native stop cancels renewal before draining; empty `_claim_once`
+  currently loops without waiting.
+- Required outcomes: drain continues lease renewals, shutdown timeout stops
+  renewal only after handler tasks have actually ended/cancelled and been
+  awaited; unfinished rows become reclaimable and no handler overlaps after
+  expiry. Empty polls wait for notification or bounded poll interval; newly
+  enqueued work remains promptly claimable.
+- Constraints: no fixed recovery SLA; preserve LISTEN/NOTIFY plus poll
+  correctness; do not close a connection while its maintenance task uses it.
+- Acceptance evidence: short drain completes once without redelivery; drain
+  longer than lease never overlaps; timed-out handler is awaited and then
+  reclaimable; count idle claim queries over a measured window and verify
+  bounded query rate; enqueue while idle is claimed within measured
+  notification/poll bound.
+- Verification: Native integration tests with two real workers and controlled
+  lease/handler durations; query-count instrumentation or PostgreSQL statement
+  stats isolated to the test.
+- Ownership: `native_kernel.py`, Native tests, reliability docs.
+- Dependencies: Task A claim identity informs what is safe to cancel/reclaim.
+
+**Task C — Database recovery on Native and Chancy (high-risk integration)**
+
+- Goal: both worker backends survive recoverable connection loss and resume
+  processing without manual intervention.
+- Context: current recovery test kills only the handler UoW; Chancy 0.26.0 has
+  upstream connection-loss reports, not yet reproduced here.
+- Required outcomes: reconnect failed claim/maintenance/listener connections,
+  restore notification subscription or retain polling fallback, continue
+  heartbeat/lease management, and resume both old eligible work and new work.
+  Cover short outage, longer-than-lease outage, and one-way connection failure.
+  If Chancy's pinned plugin exits irrecoverably and offers no supported
+  reconnect seam, stop and present the smallest architecture decision rather
+  than monkey-patching private upstream internals.
+- Constraints: isolate by fresh database/prefix and test-owned proxy/fault
+  injector; cleanup only resources created by the test. Chancy and Native may
+  have different mechanics but must satisfy the same observable contract.
+- Acceptance evidence: real worker integration tests for each backend; after
+  DB restoration, worker remains alive and claims a new job, old job state is
+  consistent with its lease/attempt, no stale execution commits, and shutdown
+  cleans all listener/worker connections. Measure recovery elapsed time and
+  decompose it into injected outage, connection retry/backoff, remaining lease,
+  reap cadence, and poll/dispatch delay.
+- Verification: focused reconnect/fault-injection tests plus `test_recovery.py`
+  and `test_native_kernel.py`; confirm PostgreSQL `pg_stat_activity` has no
+  test-owned leaked worker/listener connections after stop.
+- Ownership: Chancy adapter/worker bootstrap and Native connection lifecycle;
+  tests and runbook/reliability documentation.
+- Dependencies: Task A/B contracts; outputs are per-backend recovery behavior,
+  measured recovery components, and connection cleanup proof.
+
+**Task D — Active dedup and consumption observability**
+
+- Goal: protect live-job dedup and detect workers that heartbeat but do not
+  consume eligible work.
+- Context: existing dedup test is sequential and kernel-level; heartbeat only
+  proves a process reported liveness.
+- Required outcomes: concurrent duplicate enqueue while original handler is
+  blocked in running produces one live engine job and one handler execution
+  for both adapters. Monitoring distinguishes fresh process heartbeat from
+  oldest eligible pending job/queue age (or another accepted measurable
+  consumption signal).
+- Constraints: deduplication is not external-effect idempotency; avoid a new UI
+  or broad metrics system.
+- Acceptance evidence: two producers + real worker, deterministic barrier,
+  assert one result/handler start; idle consumer failure simulation yields
+  fresh heartbeat plus increasing eligible queue age; normal consumer drains
+  the age signal.
+- Verification: PostgreSQL integration tests and focused monitoring/metrics
+  tests; docs explain signal limitations.
+- Ownership: enqueue/storage, monitoring/observability, kernel contract tests.
+- Dependencies: Task A claim/retry semantics for interpreting queue age; can
+  develop concurrently after its contract is agreed.
+
+### Risk and recovery
+
+- **Overall risk: High.** This changes backend claim ownership, attempts,
+  retry exhaustion, shutdown, and reconnect semantics; Chancy 0.26.0 has
+  upstream reports that may require a dependency-level decision.
+- **Public/operational contract:** claim-counts-as-attempt means a crash before
+  handler start consumes retry budget. This is explicitly accepted; update
+  docs and surface attempt/DLQ evidence accordingly.
+- **Chancy integration risk:** do not assume an adapter-level retry loop can
+  revive a Chancy worker task that has already exited. Prove lifecycle and
+  supported extension points first; if upstream fix/version constraint is
+  necessary, stop and ask before changing dependencies or forking.
+- **Fault-test risk:** network proxy, `pg_terminate_backend`, or real worker
+  processes can affect shared resources. Only use disposable DBs, fresh table
+  prefixes, and resources owned by the test; no shared DB interruption.
+- **Recovery:** code changes are reversible; preserve job rows and inspect
+  attempts/leases before any manual cleanup. If a schema migration is needed
+  for claim identity or attempts, forward-migrate and preserve active jobs.
+  Do not commit/push without explicit request.
+
+### Validation
+
+- Task A: Native + Chancy two-worker pre-dispatch fencing race; both arrival
+  orderings; repeated claim crashes through attempt exhaustion; durable DLQ and
+  workflow proof; assert effect counts.
+- Task B: lease renewal during drain longer than TTL; timeout cancellation is
+  awaited; no duplicate overlap; idle SQL query count bounded; wakeup and poll
+  fallback work.
+- Task C: short, long, and one-way DB outages for both backends; worker
+  reconnect/resume; old/new jobs converge; all test-owned connections close;
+  record measured recovery components, no unsupported fixed SLA.
+- Task D: concurrent active dedup for each backend; queue-age signal detects
+  fresh-heartbeat/no-consumption state and clears after drain.
+- Integration: `uv run pytest tests/test_native_kernel.py tests/test_recovery.py
+  tests/test_kernel_contract.py tests/test_engine_hardening.py -q`, then full
+  tests and examples, Ruff, mypy, and `git diff --check`.
+- Runtime checks only on disposable Postgres DBs; record backend versions,
+  Chancy version, injected fault duration, lease settings, observations, and
+  cleanup evidence.
+
+### Result — implemented 2026-11-26
+
+All four tasks landed; every acceptance item above is executable evidence in
+`tests/test_reliability.py` (new file, 10 tests — run under both
+`--kernel=native` and the default `--kernel=chancy`).
+
+**Task A — claim identity + bounded crash recovery**
+
+- Native claim now mints the `execution_token` and consumes the attempt inside
+  `_claim_once`'s single UPDATE (`native_kernel.py`); `_run` passes the token
+  to `dispatch(job_id, step_run_id, *, execution_token=…)`, and
+  `job_mark_running(claim_token=…)` validates `status='claimed' AND
+  execution_token=…` — a dispatch whose claim was reclaimed in the
+  claim→dispatch gap can never mint its own token over the newer claim
+  (`test_stale_dispatch_cannot_steal_reclaimed_claim`: two-worker race,
+  second claim wins, stale dispatch skips, job done once, attempts=2).
+- The tokenless path (`claim_token=None`, chancy/direct dispatch) still mints
+  a fresh token and counts the attempt at `mark_running`, but now refuses to
+  hijack a `claimed` row that already carries a token.
+- Claim exhaustion is settled by the dispatch itself via `_settle_exhausted`
+  in `worker.py` — `failed` + DLQ + workflow step settle in one unit — shared
+  with the handler-exception exhausted path
+  (`test_repeated_crash_abandoned_claims_exhaust_to_dlq`,
+  `test_chancy_redelivery_settles_exhausted_claim`; second dispatch owns the
+  row, settles it, and the straggler's finish stays fenced).
+- Kernel `max_attempts` is engine `max_attempts + 1` in `dispatch_spec` so the
+  kernel always grants one final delivery for the engine to settle an
+  exhausted job instead of dead-ending the row kernel-side.
+- `recover(conn=…)` now clears `execution_token`, matching `_reap`.
+- `_run`'s inflight cleanup pops by task identity so an older dispatch
+  finishing last cannot clear a newer dispatch's slot.
+
+**Task B — lease-safe drain + paced idle polling**
+
+- `stop()` splits `_stop_claim` (claim loop only) from `_stop` (maintenance):
+  claiming stops first, the maintenance loop keeps renewing in-flight leases
+  through the drain window, pending dispatches are cancelled **and awaited**
+  for real completion before connections close
+  (`test_graceful_stop_renews_lease_through_drain`: sibling `_reap` returns 0
+  for a drain held 1.6s against a 1s lease; job then completes `done`).
+- The claim loop only short-loops when `_claim_once` actually claimed rows;
+  idle iterations wait for LISTEN wakeup or `poll_interval`
+  (`test_idle_claim_loop_paces_polling`: ≤12 claim queries in 0.65s idle at
+  100ms poll, previously unbounded).
+
+**Task C — DB recovery both backends**
+
+- Native claim/maintenance loops call `_ensure_conn` each cycle; any failure
+  drops the suspect connection and the next iteration reconnects, preserving
+  LISTEN wakeup (`test_native_worker_recovers_after_connection_drop`:
+  `pg_terminate_backend` on the claim conn → reconnect + LISTEN restored +
+  new job completes). The claim/notify connection is tagged
+  `application_name='keelflow-worker-claim'` so ops/tests can find it in
+  `pg_stat_activity` (LISTEN is not retained as `query`).
+- `run_worker` now runs both backends under `_run_supervised`: a worker whose
+  `wait_for_shutdown` raises is stopped and replaced by a fresh
+  `worker_factory()` after `restart_delay`, forever; the heartbeat task keeps
+  declaring liveness through the gap
+  (`test_chancy_pipeline_recovers_after_connection_drop`: every backend
+  `pg_terminate_backend`ed at once → pipeline still completes new work —
+  chancy 0.26.0 either healed itself or was replaced by supervision; in the
+  observed run the pipeline recovered without worker death, so the reported
+  upstream issue #104 worker-exit did **not** reproduce here).
+- `test_no_listener_connection_leak_after_stop` proves the LISTEN backend
+  disappears from `pg_stat_activity` after `stop()`.
+
+**Task D — dedup + consumption observability**
+
+- `test_concurrent_duplicate_enqueue_single_execution`: two concurrent
+  same-key enqueues while the handler is blocked mid-run → same `JobRef`, one
+  job row, one handler execution (both kernels).
+- `ops_metrics_snapshot` gained `pending_due` (`pending AND run_at<=now()`),
+  exported as `keelflow_pending_due`; `oldest_pending_s` HELP now explains
+  the alive-but-not-consuming pattern (heartbeat fresh + `pending_due`
+  rising). `test_pending_due_tracks_claimable_backlog` proves only due rows
+  count.
+
+**Remaining known limitation (documented, not fixed):** a chancy kernel job
+abandoned *before* the engine `mark_running` (crash in the tiny pre-dispatch
+window) does not consume an engine attempt; chancy `Recovery` requeues it
+(kernel attempts cap at engine max+1, so deliveries stay bounded but the
+engine row can end stranded `pending` if the kernel job exhausts). Fixing
+this would require an engine-level rescue for dead kernel jobs — out of
+scope, flagged for a future pass.
+
+**Validation evidence (2026-11-26):** `uv run pytest tests/ -q` → 255 passed,
+9 skipped (chancy); `--kernel=native` → 263 passed, 1 skipped; `ruff check`/
+`mypy` clean; `git diff --check` clean. The `--kernel=sqlite` suite mode has
+one pre-existing fixture error (`test_worker.py` passes the Postgres DSN as an
+SQLite path — reproduces on the unmodified baseline; unrelated to this pass).
 
 ### Decisions
 

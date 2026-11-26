@@ -142,17 +142,31 @@ class Storage(Protocol):
         job_id: str,
         *,
         progress_timeout_seconds: float | None = None,
+        claim_token: str | None = None,
     ) -> str | None:
-        """Atomic pending/claimed/running → running + attempts+1, only
-        when cancel_requested is false. None = not startable.
+        """Atomic transition to `running`, only when cancel_requested
+        is false. None = not startable.
 
-        The winning claim generates a fresh `execution_token` — the
-        non-reusable fence for progress, finish, and reschedule writes.
+        Two claim models share this contract:
+
+        - `claim_token=None` (engine-owned claim — chancy/dispatch):
+          pending or running → running, mints a fresh non-reusable
+          `execution_token` and increments `attempts` (the attempt is
+          counted when the dispatch starts, not per kernel delivery).
+          A `claimed` row carrying a token belongs to a kernel claim
+          and is not hijacked.
+        - `claim_token` supplied (kernel-owned claim — native): the
+          claim already minted the token and consumed the attempt;
+          this only validates the claim still owns the row
+          (`status='claimed' AND execution_token=claim_token`) and
+          flips to running. A dispatch whose claim was reclaimed
+          (token cleared/replaced) gets None and must not run.
+
         When `progress_timeout_seconds` is set, the attempt's progress
         clock (`progress_at`/`progress_timeout_seconds`, `progress`
         cleared) is initialized in the same unit so monitoring and
         fenced reports observe it after the running transition commits.
-        Returns the token on success."""
+        Returns the owning token on success."""
         ...
 
     async def job_cancel_requested(self, uow: UnitOfWork, job_id: str) -> bool: ...
