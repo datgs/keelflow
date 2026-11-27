@@ -1,4 +1,4 @@
-"""Native Postgres kernel — experimental T3 backend.
+"""Native Postgres kernel — default dispatch backend.
 
 `keelflow_jobs` is the only queue/lifecycle record; there is no kernel
 table. Dispatch rows are made claimable by updating the engine row
@@ -17,7 +17,7 @@ same contract as chancy recovery — handlers must be idempotent).
 Stale-claim fencing: a worker whose heartbeat no longer matches its
 `claimed_by` cancels the local dispatch task.
 
-Known capability gaps vs Chancy (native stays experimental):
+Known capability gaps vs Chancy:
 rate limits, queue pause/resume, worker tags, priority ordering
 (claims are FIFO by run_at), chancy metrics plugins. Wakeup is
 LISTEN/NOTIFY via `pg_notify` with a polling fallback.
@@ -172,6 +172,10 @@ class NativeWorker:
         self._stop_claim = asyncio.Event()
         self._tasks: list[asyncio.Task] = []
         self._conn: Any = None
+        self._conn_lock = asyncio.Lock()
+        self._start_lock = asyncio.Lock()
+        self._started = False
+        self._stopping = False
 
     # ── connection / wakeup hooks ───────────────────────────────────────
 
@@ -184,8 +188,13 @@ class NativeWorker:
             application_name="keelflow-worker-claim")
 
     async def _open(self) -> None:
-        self._conn = await self._connect()
-        await self._conn.execute("LISTEN keelflow_dispatch")
+        conn = await self._connect()
+        try:
+            await conn.execute("LISTEN keelflow_dispatch")
+        except BaseException:
+            await conn.close()
+            raise
+        self._conn = conn
 
     async def _wait_wakeup(self) -> None:
         """Block until a push notify or poll_interval elapses.
@@ -194,17 +203,30 @@ class NativeWorker:
         other transports; correctness never depends on wakeup (polling
         fallback bounds delay at `poll_interval`).
         """
-        conn = self._conn
-        async for _ in conn.notifies(
-                timeout=self.poll_interval, stop_after=1):
-            break
+        async with self._conn_lock:
+            conn = self._conn
+            if conn is None:
+                return
+            async for _ in conn.notifies(
+                    timeout=self.poll_interval, stop_after=1):
+                break
 
     async def start(self) -> None:
-        await self._open()
-        self._tasks = [
-            asyncio.create_task(self._claim_loop()),
-            asyncio.create_task(self._maintenance_loop()),
-        ]
+        async with self._start_lock:
+            if self._stopping:
+                raise RuntimeError(
+                    "NativeWorker still owns running handlers; retry stop "
+                    "or await them before restarting")
+            if self._started:
+                return
+            await self._ensure_conn()
+            self._stop.clear()
+            self._stop_claim.clear()
+            self._tasks = [
+                asyncio.create_task(self._claim_loop()),
+                asyncio.create_task(self._maintenance_loop()),
+            ]
+            self._started = True
 
     async def _claim_loop(self) -> None:
         while not self._stop_claim.is_set():
@@ -219,7 +241,7 @@ class NativeWorker:
                 # Transient DB loss must not kill the loop: drop the
                 # suspect connection and wait — the next iteration
                 # reconnects (auto-reconnect policy).
-                self._conn = None
+                await self._discard_conn()
                 log.exception("native claim loop error")
             try:
                 await self._wait_wakeup()
@@ -235,17 +257,18 @@ class NativeWorker:
 
     async def _ensure_conn(self) -> None:
         """Reconnect the worker's claim/lease connection after loss."""
-        conn = self._conn
-        if conn is not None and not getattr(conn, "closed", False):
-            return
-        self._conn = None
-        try:
-            if conn is not None:
-                await conn.close()
-        except Exception:  # closing a dead conn is best-effort
-            log.debug("closing dead claim connection failed",
-                      exc_info=True)
-        await self._open()
+        async with self._conn_lock:
+            conn = self._conn
+            if conn is not None and not getattr(conn, "closed", False):
+                return
+            self._conn = None
+            try:
+                if conn is not None:
+                    await conn.close()
+            except Exception:  # closing a dead conn is best-effort
+                log.debug("closing dead claim connection failed",
+                          exc_info=True)
+            await self._open()
 
     # ── dialect statements ──────────────────────────────────────────────
 
@@ -257,34 +280,35 @@ class NativeWorker:
         claims, not handler starts — and mints the execution_token the
         dispatch must present at `job_mark_running` to prove the claim
         was not reclaimed in the gap before dispatch."""
-        conn = self._conn
-        async with conn.cursor() as cur:
-            await cur.execute(
-                """
-                WITH cand AS (
-                    SELECT id FROM keelflow_jobs
-                     WHERE status='pending' AND run_at<=now()
-                       AND dispatch_queued
-                     ORDER BY run_at, id
-                     LIMIT %s
-                     FOR UPDATE SKIP LOCKED
+        async with self._conn_lock:
+            conn = self._conn
+            async with conn.cursor() as cur:
+                await cur.execute(
+                    """
+                    WITH cand AS (
+                        SELECT id FROM keelflow_jobs
+                         WHERE status='pending' AND run_at<=now()
+                           AND dispatch_queued
+                         ORDER BY run_at, id
+                         LIMIT %s
+                         FOR UPDATE SKIP LOCKED
+                    )
+                    UPDATE keelflow_jobs j
+                       SET status='claimed', claimed_by=%s,
+                           attempts = attempts + 1,
+                           execution_token = gen_random_uuid()::text,
+                           lease_until=now()+make_interval(secs=>%s),
+                           updated_at=now()
+                      FROM cand WHERE j.id=cand.id
+                    RETURNING j.id, j.execution_token,
+                        (SELECT s.id::text FROM keelflow_step_runs s
+                          WHERE s.job_id=j.id LIMIT 1)
+                    """,
+                    (limit, self.worker_id, self.lease_seconds),
                 )
-                UPDATE keelflow_jobs j
-                   SET status='claimed', claimed_by=%s,
-                       attempts = attempts + 1,
-                       execution_token = gen_random_uuid()::text,
-                       lease_until=now()+make_interval(secs=>%s),
-                       updated_at=now()
-                  FROM cand WHERE j.id=cand.id
-                RETURNING j.id, j.execution_token,
-                    (SELECT s.id::text FROM keelflow_step_runs s
-                      WHERE s.job_id=j.id LIMIT 1)
-                """,
-                (limit, self.worker_id, self.lease_seconds),
-            )
-            rows = await cur.fetchall()
-        self._spawn(rows)
-        return len(rows)
+                rows = await cur.fetchall()
+            self._spawn(rows)
+            return len(rows)
 
     def _spawn(self, rows) -> None:
         for job_id, execution_token, step_run_id in rows:
@@ -324,7 +348,7 @@ class NativeWorker:
             except asyncio.CancelledError:
                 raise
             except Exception:
-                self._conn = None
+                await self._discard_conn()
                 log.exception("native maintenance error")
             try:
                 await asyncio.wait_for(self._stop.wait(),
@@ -332,23 +356,34 @@ class NativeWorker:
             except TimeoutError:
                 pass
 
+    async def _discard_conn(self) -> None:
+        async with self._conn_lock:
+            conn, self._conn = self._conn, None
+            if conn is not None:
+                try:
+                    await conn.close()
+                except Exception:
+                    log.debug("closing claim connection failed",
+                              exc_info=True)
+
     async def _heartbeat(self) -> None:
         if not self._inflight:
             return
         ids = list(self._inflight)
-        conn = self._conn
-        async with conn.cursor() as cur:
-            await cur.execute(
-                """
-                UPDATE keelflow_jobs
-                   SET lease_until=now()+make_interval(secs=>%s)
-                 WHERE id = ANY(%s) AND claimed_by=%s
-                   AND status IN ('claimed','running')
-                RETURNING id
-                """,
-                (self.lease_seconds, ids, self.worker_id),
-            )
-            kept = {str(r[0]) for r in await cur.fetchall()}
+        async with self._conn_lock:
+            conn = self._conn
+            async with conn.cursor() as cur:
+                await cur.execute(
+                    """
+                    UPDATE keelflow_jobs
+                       SET lease_until=now()+make_interval(secs=>%s)
+                     WHERE id = ANY(%s) AND claimed_by=%s
+                       AND status IN ('claimed','running')
+                    RETURNING id
+                    """,
+                    (self.lease_seconds, ids, self.worker_id),
+                )
+                kept = {str(r[0]) for r in await cur.fetchall()}
         self._fence(ids, kept)
 
     def _fence(self, ids: list[str], kept: set[str]) -> None:
@@ -362,52 +397,57 @@ class NativeWorker:
                     task.cancel()
 
     async def _reap(self) -> int:
-        conn = self._conn
-        async with conn.cursor() as cur:
-            await cur.execute(
-                """
-                UPDATE keelflow_jobs
-                   SET status='pending', claimed_by=NULL, lease_until=NULL,
-                       execution_token=NULL, updated_at=now()
-                 WHERE status IN ('claimed','running')
-                   AND lease_until < now()
-                   AND dispatch_queued
-                """,
-            )
-            return cur.rowcount
+        async with self._conn_lock:
+            conn = self._conn
+            async with conn.cursor() as cur:
+                await cur.execute(
+                    """
+                    UPDATE keelflow_jobs
+                       SET status='pending', claimed_by=NULL, lease_until=NULL,
+                           execution_token=NULL, updated_at=now()
+                     WHERE status IN ('claimed','running')
+                       AND lease_until < now()
+                       AND dispatch_queued
+                    """,
+                )
+                return cur.rowcount
 
     async def stop(self, *, timeout: float | None = None) -> bool:
-        """Stop claiming, then drain in-flight dispatches up to
-        `timeout` while the maintenance loop keeps renewing their
-        leases — a graceful drain must not let a sibling worker
-        reclaim a job whose handler is still running. After the drain
-        budget is spent, remaining dispatches are cancelled, awaited
-        for real completion, and their leases left to expire for
-        recovery.
+        """Stop claiming and drain handlers within a bounded timeout.
+
+        If cancellation grace expires while a handler remains active,
+        return False and keep maintenance, connection, and lease renewals
+        running. The caller must retain this worker and may retry stop.
         """
+        self._stopping = True
         self._stop_claim.set()
         claim_task = self._tasks[0] if self._tasks else None
         if claim_task is not None:
             claim_task.cancel()
             await asyncio.gather(claim_task, return_exceptions=True)
-        drained = not self._inflight
-        if self._inflight:
+        tasks = set(self._inflight.values())
+        drained = not tasks
+        if tasks:
             _done, pending = await asyncio.wait(
-                self._inflight.values(),
-                timeout=timeout if timeout is not None else 30.0,
-            )
+                tasks, timeout=timeout if timeout is not None else 30.0)
             drained = not pending
-            for t in pending:  # lease expiry re-queues the job
-                t.cancel()
             if pending:
-                await asyncio.wait(pending)  # real completion, not cancel()
+                for task in pending:
+                    task.cancel()
+                # Give dispatch cancellation time to reach the handler task.
+                await asyncio.sleep(0)
+                _done, pending = await asyncio.wait(pending, timeout=0.5)
+                drained = not pending
+                if not drained:
+                    await self._ensure_conn()
+                    await self._heartbeat()
+                    return False
         self._stop.set()
         await asyncio.gather(*self._tasks[1:], return_exceptions=True)
-        if self._conn is not None:
-            try:
-                await self._conn.close()
-            finally:
-                self._conn = None
+        await self._discard_conn()
+        self._started = False
+        self._stopping = False
+        self._tasks = []
         return drained
 
     async def wait_for_shutdown(self) -> None:

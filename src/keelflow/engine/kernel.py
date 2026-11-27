@@ -10,9 +10,9 @@ module. A `Kernel` implementation supplies:
   never claims dispatch work itself.
 - `migrate()` / `declare_queue()` — backend schema/queue setup.
 
-Chancy is the default backend (`chancy_kernel.ChancyKernel`); native
-Postgres (`native_kernel`) and SQLite (`sqlite_kernel`) adapters
-implement the same port.
+Native Postgres (`native_kernel`) is the default backend.
+Chancy (`chancy_kernel.ChancyKernel`) is an opt-in adapter; SQLite
+(`sqlite_kernel`) is proof/local-only.
 """
 from __future__ import annotations
 

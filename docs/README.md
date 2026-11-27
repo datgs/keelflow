@@ -6,11 +6,16 @@ Start with the smallest authoritative surface.
 
 - `WORKFLOW.md`: request shape, planning, judgment, operation, validation, and
   completion.
-- `ARCHITECTURE.md`: current product, code, state, update, and ownership
-  boundaries.
-- `HARNESS.md`: product principles and installed-core model.
-- `product/`: current product behavior and installation contract.
-- `decisions/`: lasting choices future work must inherit.
+- `architecture-design-brief.md`: historical draft design rationale; use it
+  for background, not as the only current authority.
+- `reliability.md`: durability, recovery, backend limits, and upgrade policy.
+- `security.md`: data access, telemetry, and admin/MCP boundaries.
+- `../spec/`: language-agnostic schema, lifecycle, context, and conformance
+  contract.
+- `../README.md`: product overview, quickstart, feature matrix, dispatch
+  backends, and development commands.
+- `decisions/`: accepted architecture and product choices; check status and
+  follow-up notes when current code or active plans describe a later state.
 - `plans/`: one durable working-memory document for work that needs it.
 - [`patterns/encoding-invariants.md`](patterns/encoding-invariants.md): turn
   accepted architecture, reliability, security, and quality rules into native
@@ -24,17 +29,15 @@ The consumer's README, product documents, architecture, code, tests, CI,
 runtime signals, and application behavior remain authoritative. Harness does
 not overwrite those with upstream product assumptions.
 
-## Source Repository
+## Code And Validation
 
-- Root `README.md`: product overview, installation, maintenance, EOL, and
-  development.
-- `crates/harness/`: safe core installer/updater.
-- `scripts/`: platform bootstrap, release, and validation entrypoints.
-- `tests/`: behavior ownership and repository contract.
+- `../src/keelflow/`: Python implementation.
+- `../tests/`: behavior ownership and repository contract.
+- `../examples/`: runnable application examples.
+- `../alembic/`: versioned schema migrations.
+- `../pyproject.toml`: package, tool, and pytest configuration.
 
 ## History
 
-The former SQLite control plane, protocol v1, story packets, migration evidence,
-and compatibility documentation are preserved by Git history and immutable
-`harness-cli-v*` tags. They are intentionally absent from the current tree so
-search and agent retrieval return current product authority.
+Historical implementation detail is preserved by Git history and completed
+plans under `plans/completed/`.

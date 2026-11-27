@@ -154,6 +154,7 @@ async def _wait_status(db, job_id: str, want: str,
 
 @pytest.mark.asyncio
 async def test_native_claims_and_completes(env, db):
+    """The documented app-side enqueue reaches a Native worker."""
     job_id = await _enqueue(env["jobs"], "test.ok@v1",
                             {"invoice_id": "i-1"})
     assert await _wait_status(db, job_id, "done") == "done"

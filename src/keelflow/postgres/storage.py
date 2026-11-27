@@ -243,12 +243,11 @@ class PostgresStorage(Storage):
     ) -> str | None:
         if claim_token is not None:
             # Kernel-owned claim (native path): the claim already minted
-            # the token and consumed the attempt — this only validates
-            # the claim still stands (a reap or newer claim would have
-            # replaced/cleared the token) and flips the row to running.
+            # the token and consumed the attempt. This validates ownership
+            # and changes status before any engine state mutation.
             cur = await self._conn(uow).execute(
                 "UPDATE keelflow_jobs"
-                " SET status=%s,"
+                " SET status='running',"
                 "     progress = NULL, progress_at = now(),"
                 "     progress_timeout_seconds = %s,"
                 "     updated_at=now()"
@@ -257,8 +256,7 @@ class PostgresStorage(Storage):
                 "   AND execution_token=%s"
                 "   AND cancel_requested = false"
                 " RETURNING execution_token",
-                (JobStatus.RUNNING.value, progress_timeout_seconds,
-                 job_id, claim_token),
+                (progress_timeout_seconds, job_id, claim_token),
             )
         else:
             # Engine-owned claim (chancy path / direct dispatch): mint
@@ -1308,7 +1306,8 @@ class PostgresStorage(Storage):
             SELECT
                 count(*) FILTER (WHERE status='pending') AS queue_depth,
                 count(*) FILTER (WHERE status='pending'
-                                 AND run_at <= now()) AS pending_due,
+                                 AND run_at <= now()
+                                 AND dispatch_queued) AS pending_due,
                 count(*) FILTER (WHERE status='claimed') AS claimed,
                 count(*) FILTER (WHERE status='running') AS running,
                 count(*) FILTER (WHERE status='blocked') AS waiting,

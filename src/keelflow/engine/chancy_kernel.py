@@ -6,9 +6,19 @@ declaration, worker lifecycle, and `queue.pushed` notifications.
 """
 from __future__ import annotations
 
+import logging
 from typing import Any
 
 from .kernel import DEFAULT_QUEUE, KernelJobSpec, KernelWorker
+
+log = logging.getLogger("keelflow.chancy_kernel")
+
+
+def warn_best_effort() -> None:
+    log.warning(
+        "Chancy is selected as an opt-in best-effort backend; Keelflow "
+        "cannot guarantee claim fencing or bounded engine attempt "
+        "accounting for crashes before dispatch starts")
 
 
 def _cur(uow):
@@ -24,7 +34,7 @@ def _cur(uow):
 
 
 class ChancyKernel:
-    """Kernel backed by a `chancy.Chancy` client (production default)."""
+    """Kernel backed by a `chancy.Chancy` client (opt-in, best-effort)."""
 
     def __init__(self, client) -> None:
         self.client = client

@@ -1,6 +1,6 @@
-"""Reliability pass proofs — real-worker fault injection on Postgres.
+"""Native reliability proofs and explicit best-effort Chancy exclusions.
 
-Covers the follow-up hardening plan (Native + Chancy):
+Covers Native worker fault injection on isolated Postgres databases:
 
 - A: claim ownership fencing — a dispatch whose claim was reclaimed
   before it ran can never mint a token over the newer claim; repeated
@@ -40,6 +40,7 @@ from keelflow.sdk import (
     JobTypeSpec,
     RetryPolicy,
 )
+from keelflow.testing import temp_test_db
 
 log = logging.getLogger(__name__)
 
@@ -84,56 +85,54 @@ class DrainH(JobHandler):
 
 @pytest_asyncio.fixture
 async def env(kernel_kind):
+    if kernel_kind == "chancy":
+        pytest.skip(
+            "Chancy reliability claim is unsupported; see docs/reliability.md")
     if kernel_kind == "sqlite":
         pytest.skip("reliability proofs are Postgres-kernel scoped")
-    try:
-        conn = await psycopg.AsyncConnection.connect(DSN, autocommit=True)
-    except Exception as exc:  # noqa: BLE001
-        pytest.skip(f"postgres unavailable: {exc}")
-    async with conn:
-        await apply_async(conn)
-        await conn.execute(
-            "TRUNCATE keelflow_jobs, keelflow_outbox,"
-            " keelflow_outbox_deliveries CASCADE"
-        )
-    conn = await psycopg.AsyncConnection.connect(DSN, autocommit=True)
-    async with conn, open_kernel(kernel_kind) as kernel:
-        await declare_default_queue(kernel, kernel_kind, concurrency=4)
-        reg = InMemoryRegistry()
-        reg.register_job_type(
-            JobTypeSpec(
-                type="rel.ok@v1",
-                input_schema=P,
-                handler=OkH,
-                retry=RetryPolicy(max_attempts=3, base_seconds=0.05, jitter=False),
-            )
-        )
-        reg.register_job_type(
-            JobTypeSpec(
-                type="rel.stall@v1",
-                input_schema=P,
-                handler=StallOnceH,
-                retry=RetryPolicy(max_attempts=1, base_seconds=0.05, jitter=False),
-            )
-        )
-        reg.register_job_type(
-            JobTypeSpec(type="rel.drain@v1", input_schema=P, handler=DrainH)
-        )
-        storage = PostgresStorage(DSN)
-        jobs = JobService(reg, kernel, storage)
-        worker_mod.configure(registry=reg, dsn=DSN, kernel=kernel, storage=storage)
-        CALLS.clear()
-        EFFECTS.clear()
-        StallOnceH.gate = None
-        DrainH.entered = DrainH.release = None
-        yield {
-            "reg": reg,
-            "jobs": jobs,
-            "kernel": kernel,
-            "storage": storage,
-            "db": conn,
-            "kind": kernel_kind,
-        }
+    async with temp_test_db(DSN) as dsn:
+        try:
+            setup = await psycopg.AsyncConnection.connect(
+                dsn, autocommit=True)
+        except Exception as exc:  # noqa: BLE001
+            pytest.skip(f"postgres unavailable: {exc}")
+        async with setup:
+            await apply_async(setup)
+        conn = await psycopg.AsyncConnection.connect(dsn, autocommit=True)
+        async with conn, open_kernel(kernel_kind, dsn=dsn) as kernel:
+            await declare_default_queue(kernel, kernel_kind, concurrency=4)
+            reg = InMemoryRegistry()
+            reg.register_job_type(JobTypeSpec(
+                type="rel.ok@v1", input_schema=P, handler=OkH,
+                retry=RetryPolicy(
+                    max_attempts=3, base_seconds=0.05, jitter=False)))
+            reg.register_job_type(JobTypeSpec(
+                type="rel.stall@v1", input_schema=P, handler=StallOnceH,
+                retry=RetryPolicy(
+                    max_attempts=1, base_seconds=0.05, jitter=False)))
+            reg.register_job_type(JobTypeSpec(
+                type="rel.drain@v1", input_schema=P, handler=DrainH))
+            storage = PostgresStorage(dsn)
+            jobs = JobService(reg, kernel, storage)
+            worker_mod.configure(registry=reg, dsn=dsn, kernel=kernel,
+                                 storage=storage)
+            CALLS.clear()
+            EFFECTS.clear()
+            StallOnceH.gate = None
+            DrainH.entered = DrainH.release = None
+            worker = make_worker(
+                kernel, kernel_kind, concurrency=4, poll_interval=0.05,
+                lease_seconds=1, heartbeat_interval=0.2)
+            await worker.start()
+            try:
+                yield {
+                    "reg": reg, "jobs": jobs, "kernel": kernel,
+                    "storage": storage, "worker": worker, "db": conn,
+                    "dsn": dsn, "kind": kernel_kind,
+                }
+            finally:
+                await worker.stop(timeout=5)
+                await conn.close()
 
 
 async def _enqueue(env, type_name="rel.ok@v1", **kwargs):
@@ -179,8 +178,10 @@ async def test_stale_dispatch_cannot_steal_reclaimed_claim(env):
     if env["kind"] != "native":
         pytest.skip("kernel-owned claims are a native mechanism")
     ref = await _enqueue(env)
+    await env["worker"].stop(timeout=5)
     w = make_worker(env["kernel"], env["kind"], lease_seconds=1)
     await w._open()
+    await declare_default_queue(env["kernel"], env["kind"], concurrency=4)
 
     ran: list[tuple] = []
     spy_release = asyncio.Event()
@@ -228,8 +229,13 @@ async def test_repeated_crash_abandoned_claims_exhaust_to_dlq(env):
         pytest.skip("kernel-owned claims are a native mechanism")
     StallOnceH.gate = asyncio.Event()
     ref = await _enqueue(env, "rel.stall@v1")
+    await env["worker"].stop(timeout=5)
+    await env["db"].execute(
+        "UPDATE keelflow_jobs SET dispatch_queued=true WHERE id=%s",
+        (ref.id,))
     w = make_worker(env["kernel"], env["kind"], lease_seconds=1)
     await w._open()
+    await declare_default_queue(env["kernel"], env["kind"], concurrency=4)
 
     assert await w._claim_once(1) == 1  # claim1 → attempts=1
     for _ in range(50):
@@ -268,7 +274,7 @@ async def test_repeated_crash_abandoned_claims_exhaust_to_dlq(env):
 
 
 @pytest.mark.asyncio
-async def test_chancy_redelivery_settles_exhausted_claim(env):
+async def test_engine_redelivery_settles_exhausted_claim(env):
     """Engine-owned claim path: every dispatch (including a chancy
     recovery redelivery) consumes an attempt at mark_running. A second
     dispatch while the first is still running owns the row, sees the
@@ -347,6 +353,53 @@ async def test_graceful_stop_renews_lease_through_drain(env):
     row = await _wait_status(env, ref.id, "done")
     assert row[0] == "done"
     assert EFFECTS == ["drain"]
+
+
+class CancellationResistantH(JobHandler):
+    entered: asyncio.Event
+    release: asyncio.Event
+
+    async def run(self, ctx, payload):
+        type(self).entered.set()
+        await type(self).release.wait()
+        return JobResult(status="done")
+
+
+@pytest.mark.asyncio
+async def test_native_stop_returns_false_and_retains_live_handler(env):
+    if env["kind"] != "native":
+        pytest.skip("shutdown ownership policy is native-specific")
+    CancellationResistantH.entered = asyncio.Event()
+    CancellationResistantH.release = asyncio.Event()
+    assert await env["worker"].stop(timeout=5) is True
+    env["reg"].register_job_type(JobTypeSpec(
+        type="rel.cancel-resistant@v1", input_schema=P,
+        handler=CancellationResistantH))
+    ref = await _enqueue(env, "rel.cancel-resistant@v1")
+    w = make_worker(
+        env["kernel"], env["kind"], concurrency=1,
+        lease_seconds=1, heartbeat_interval=0.1)
+    await w.start()
+    await asyncio.wait_for(CancellationResistantH.entered.wait(), timeout=15)
+    task = w._inflight[ref.id]
+    conn = w._conn
+    cancellation = task.cancel
+    task.cancel = lambda *args, **kwargs: 1
+
+    assert await w.stop(timeout=0.05) is False
+    task.cancel = cancellation
+    assert w._inflight[ref.id] is task
+    assert not task.done()
+    assert w._conn is conn and not conn.closed
+    assert any(not loop.done() for loop in w._tasks[1:])
+    with pytest.raises(RuntimeError, match="still owns running handlers"):
+        await w.start()
+
+    CancellationResistantH.release.set()
+    await asyncio.wait_for(task, timeout=5)
+    assert await w.stop(timeout=5) is True
+    assert w._conn is None
+    assert (await _wait_status(env, ref.id, "done"))[0] == "done"
 
 
 @pytest.mark.asyncio
@@ -456,10 +509,15 @@ async def test_chancy_pipeline_recovers_after_connection_drop(env):
         EFFECTS.clear()
 
         # one-way loss: every client connection dies at once
+        # This test owns a fresh disposable database. Verify its exact
+        # database name before terminating any backend inside it.
+        db_name = env["dsn"].rsplit("/", 1)[-1]
+        current = await (await env["db"].execute(
+            "SELECT current_database()")).fetchone()
+        assert current[0] == db_name and db_name.startswith("keelflow_test_")
         await env["db"].execute(
             "SELECT pg_terminate_backend(pid) FROM pg_stat_activity"
-            " WHERE datname=current_database() AND pid<>pg_backend_pid()"
-        )
+            " WHERE datname=current_database() AND pid<>pg_backend_pid()")
         await asyncio.sleep(2.0)  # outage window
 
         ref2 = await _enqueue(env)
@@ -539,19 +597,28 @@ async def test_concurrent_duplicate_enqueue_single_execution(env):
 
 @pytest.mark.asyncio
 async def test_pending_due_tracks_claimable_backlog(env):
-    """pending_due counts only pending rows whose run_at has arrived —
-    the consumption signal. Scheduled-future pending rows are backlog
-    but not due."""
+    """pending_due includes only dispatchable rows that are due."""
+    import uuid
     from datetime import UTC, datetime, timedelta
 
-    await _enqueue(env)  # due now
+    due_id = await _enqueue(env)
     await _enqueue(env, run_at=datetime.now(UTC) + timedelta(hours=1))
+    await env["worker"].stop(timeout=5)
+    machine_id = uuid.uuid4()
+    await env["db"].execute(
+        "INSERT INTO keelflow_jobs"
+        " (id,type,status,payload,context,run_at,dispatch_queued)"
+        " VALUES (%s,'rel.ok@v1','pending','{}','{}',now(),false)",
+        (machine_id,))
+    await env["db"].execute(
+        "UPDATE keelflow_jobs SET status='pending', dispatch_queued=true"
+        " WHERE id=%s", (due_id.id,))
     sess = await env["storage"].connect()
     try:
         async with sess.begin() as uow:
             snap = await env["storage"].ops_metrics_snapshot(uow)
     finally:
         await sess.close()
-    assert snap["queue_depth"] == 2
+    assert snap["queue_depth"] == 3
     assert snap["pending_due"] == 1
     assert 0 <= snap["oldest_pending_s"] < 60

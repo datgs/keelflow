@@ -26,8 +26,8 @@ pip install keelflow
 │ keelflow_entity_state · keelflow_audit · keelflow_dlq                │
 └──────────────┬───────────────────────────────────────────────────────┘
                │  claim / retry / schedule
-┌──────────────▼────────────── Chancy kernel ──────────────────────────┐
-│ keelflow_kernel_* tables — leases, queues, workers                    │
+┌──────────────▼──────────── NativeKernel (default) ───────────────────┐
+│ Native claims keelflow_jobs; Chancy is an explicit opt-in adapter     │
 └──────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -80,27 +80,24 @@ from keelflow.engine.worker import run_worker
 run_worker(registry=build_registry())
 ```
 
-`run_worker` migrates the kernel, declares the `default` queue, and
-claims jobs. Run it under a supervisor (systemd/docker restart policy):
-upstream Chancy ≤0.26 can crash the worker loop after a transient DB
-disconnect — a restart policy recovers automatically.
+`run_worker` uses NativeKernel by default and claims jobs from the
+`keelflow_jobs` table. Chancy is opt-in and does not guarantee claim
+fencing or bounded engine attempt accounting before dispatch starts.
 
 ### 2.3 App-side services
 
 ```python
-import chancy
 from keelflow.engine.enqueue import JobService
 from keelflow.engine.workflow import WorkflowService
 from keelflow.engine.statemachine import EngineStateMachineService
 from keelflow.engine.human import HumanTaskService
 from keelflow.engine.audit import PostgresAuditService
+from keelflow.engine.native_kernel import NativeKernel
 from keelflow.postgres.storage import PostgresStorage
 
-kernel = chancy.Chancy(DSN, prefix="keelflow_kernel_")
+kernel = NativeKernel(DSN)
 await kernel.migrate()
-await kernel.declare(chancy.Queue(
-    "default", concurrency=8, executor=chancy.Chancy.Executor.Async),
-    upsert=True)
+await kernel.declare_queue("default", upsert=True)
 
 storage = PostgresStorage(DSN)
 audit  = PostgresAuditService(storage)
@@ -110,8 +107,16 @@ sm     = EngineStateMachineService(registry, kernel, audit=audit)
 human  = HumanTaskService(registry, kernel, sm=sm)
 ```
 
-The kernel prefix **must not** be `keelflow_` (engine prefix) — kernel
-tables would collide with `keelflow_jobs`.
+This example stays on Native so the enqueue and worker paths share the
+same backend. The integration proof for Native enqueue-to-claim is
+`tests/test_native_kernel.py::test_native_claims_and_completes`. To opt
+into Chancy, construct a `chancy.Chancy` client, wrap it with
+`ChancyKernel`, declare its queue, and run the worker with
+`--kernel chancy` or pass that same adapter to `run_worker`. Native/Chancy
+claim-fencing and bounded-attempt parity has not yet passed its release gate.
+
+When choosing Chancy, the kernel prefix **must not** be `keelflow_` (engine
+prefix) — kernel tables would collide with `keelflow_jobs`.
 
 ---
 
@@ -769,17 +774,18 @@ class LoadH(JobHandler):
 - External side effects (HTTP, email, filesystem) are **not** rolled
   back — make them idempotent or checkpoint before issuing them.
 - `JobHandler.on_cancel` is an unused experimental placeholder. Worker
-  liveness/recovery is kernel-owned (chancy), not heartbeat-per-job.
+  liveness and recovery are managed by the selected kernel worker; they are
+  distinct from application-reported job progress.
 
-## 16. Dispatch backends (experimental)
+## 16. Dispatch backends
 
 Engine dispatch goes through a kernel port (`keelflow.engine.kernel`):
 
 | Backend | Class | Status | Notes |
 |---|---|---|---|
-| chancy | `ChancyKernel` (wraps `chancy.Chancy`) | default | full ADR feature set |
-| native | `NativeKernel` | experimental | claims `keelflow_jobs` directly; no rate limits/pause/tags/priority/metrics plugins |
-| sqlite | `SQLiteKernel` (`pip install keelflow[sqlite]`) | proof only | kernel-portability proof; in-process wakeup, single-writer; engine services remain Postgres-bound |
+| native | `NativeKernel` | current default | Claims `keelflow_jobs`; claim-token fencing and bounded pre-handler attempt accounting are tested. No rate limits, pause/resume, worker tags, priority ordering, or Chancy metrics plugins. Native/Chancy reliability parity remains a release gate. |
+| chancy | `ChancyKernel` (wraps `chancy.Chancy`) | opt-in, best-effort | Warns when selected. No proven claim-to-dispatch fencing or bounded engine attempt accounting before `mark_running`; parity gate is not met. |
+| sqlite | `SQLiteKernel` (`pip install keelflow[sqlite]`) | local/proof only | Separate table, in-process wakeup, single-writer; engine services remain Postgres-bound. Not a production durability target. |
 
 Kernel contract tests run per backend:
 
@@ -795,16 +801,17 @@ parameterized for chancy/native; files touching chancy internals gate on
 Standalone worker bootstrap accepts the backend explicitly:
 
 ```python
-run_worker(registry=reg)                      # Chancy default (owns the client)
+run_worker(registry=reg)                      # Native default (owned by helper)
 run_worker(registry=reg, kernel=NativeKernel(dsn))  # caller-owned adapter
-run_worker(registry=reg, kernel=ChancyKernel(client))  # client ctx owned by caller
+run_worker(registry=reg, kernel=ChancyKernel(client))  # explicit Chancy opt-in
 ```
 
-A supplied kernel is caller-owned — `run_worker` migrates + starts its
-worker through the port and stops the worker on exit, but never closes
-the kernel/client. `queues=` is Chancy-specific and raises `ValueError`
-on other backends; engine `dispatch` itself remains Postgres-bound
-(SQLite kernel is a portability proof, not an engine backend).
+A supplied kernel is caller-owned — `run_worker` migrates, starts, and stops
+its worker through the port, but does not close the kernel. A Native kernel
+created by the helper is owned and cleaned up by the helper. `queues=` is
+Chancy-specific and raises `ValueError` on other backends. SQLite is a
+portability proof, not a production engine backend. Chancy does not guarantee
+claim fencing or bounded attempt accounting for crashes before engine dispatch.
 
 ## 17. Environment variables
 

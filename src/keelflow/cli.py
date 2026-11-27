@@ -70,9 +70,14 @@ def _kernel(args, dsn: str):
 def cmd_worker(args) -> None:
     from .engine.worker import run_worker
 
+    if args.queue and args.kernel != "chancy":
+        raise SystemExit("--queue is supported only with --kernel chancy")
     registry = _load_registry(args.registry)
     dsn = _dsn(args)
     kernel = _kernel(args, dsn)
+    if args.kernel == "chancy":
+        from .engine.chancy_kernel import warn_best_effort
+        warn_best_effort()
     queues = None
     if args.kernel == "chancy" and args.queue:
         import chancy
@@ -90,6 +95,9 @@ def cmd_scheduler(args) -> None:
     registry = _load_registry(args.registry)
     dsn = _dsn(args)
     kernel = _kernel(args, dsn)
+    if args.kernel == "chancy":
+        from .engine.chancy_kernel import warn_best_effort
+        warn_best_effort()
 
     from .postgres.storage import PostgresStorage
     storage = PostgresStorage(dsn)
@@ -193,9 +201,9 @@ def main(argv: list[str] | None = None) -> None:
                             help="module:attr — Registry or factory")
             sp.add_argument("--kernel",
                             choices=["chancy", "native", "sqlite"],
-                            default="chancy",
-                            help="dispatch backend (sqlite = local/proof "
-                                 "only, not production)")
+                            default="native",
+                            help="dispatch backend (default: native; chancy is "
+                                 "opt-in; sqlite is local/proof only, not production)")
             sp.add_argument("--prefix", default="keelflow_kernel_",
                             help="kernel table prefix (chancy)")
 

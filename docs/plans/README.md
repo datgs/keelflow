@@ -30,4 +30,9 @@ decision into `docs/decisions/`; keep task-local choices in the plan.
 
 ## Active Plans
 
-No active execution plans are currently indexed.
+Tracked execution plans currently under `active/`:
+
+- [optional-job-progress-heartbeat.md](active/optional-job-progress-heartbeat.md)
+- [stress-evidence-and-cancellation-correctness.md](active/stress-evidence-and-cancellation-correctness.md)
+- [internal-readiness-obs-cli-testing.md](active/internal-readiness-obs-cli-testing.md)
+- [acceptance-evidence.md](active/acceptance-evidence.md)

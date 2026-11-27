@@ -16,14 +16,14 @@ must own. Proofs referenced are executable tests — see
 | **Idempotent enqueue** — same `(type, deduplication_key)` lands at most one live job | non-terminal jobs | partial unique index |
 | **No lost intent** — enqueue inside a committed TX is durably claimable | transactional outbox model | `test_recovery` |
 | **Cancel is cooperative** — `cancel()` terminalizes pending jobs and flags running ones; only `cooperative_cancel` types stop mid-run | job lifecycle | `test_engine_hardening` |
-| **Bounded crash recovery** — every claim consumes one `attempts` slot whether or not the handler ran; claims beyond `max_attempts` settle the job `failed` + DLQ + step settle atomically | both worker kernels | `test_reliability::test_repeated_crash_abandoned_claims_exhaust_to_dlq`, `test_chancy_redelivery_settles_exhausted_claim` |
+| **Bounded crash recovery** — every Native claim consumes one `attempts` slot, including claims abandoned before handler start; claims beyond `max_attempts` settle `failed` + DLQ | Native only; equivalent Chancy behavior is required before parity gate passes | `test_reliability::test_repeated_crash_abandoned_claims_exhaust_to_dlq` |
 | **Lease-safe drain** — `stop(timeout)` keeps renewing in-flight leases through the drain window; a sibling worker cannot steal a draining job | native kernel | `test_reliability::test_graceful_stop_renews_lease_through_drain` |
-| **Worker survives DB loss** — a severed connection reconnects (native claim/maintenance loops; chancy worker supervision in `run_worker`) and keeps consuming | both worker kernels | `test_reliability::test_native_worker_recovers_after_connection_drop`, `test_chancy_pipeline_recovers_after_connection_drop` |
+| **Worker survives DB loss** — Native claim/maintenance loops reconnect; `run_worker` supervises backend workers | tested paths only; not proof of claim/attempt parity | `test_reliability::test_native_worker_recovers_after_connection_drop`, `test_chancy_pipeline_recovers_after_connection_drop` |
 
 ## What is NOT guaranteed
 
 - **Progress is not proof of work.** Opt-in job progress is an application-reported snapshot visible independently of the handler transaction. A report is not proof that the corresponding business work committed. No-progress timeouts cancel the local attempt and use normal retries; they cannot cancel an external request already in flight. Configure automatic retry only with a stable provider idempotency key, a transactional outbox plus receiver deduplication, or an explicit reconciliation strategy. If an external outcome is ambiguous and cannot be deduplicated or reconciled, do not configure blind automatic retry; use alerting/manual reconciliation.
-- **Stale dispatches cannot overwrite a newer claim.** Each claim mints a non-reusable `execution_token`; progress, finish, and retry-reschedule writes carrying an outdated token are rejected (`ExecutionLostError`) and the attempt's UoW rolls back. Fencing prevents stale local commits — it does not undo external side effects already issued.
+- **Native claim fencing.** Native claims mint a non-reusable `execution_token`; stale dispatch status writes carrying an outdated token are rejected. This does not undo external side effects. Chancy does not currently expose a proven supported claim-to-dispatch fencing seam, so equivalent fencing is not guaranteed there.
 - **Exactly-once external effects.** Email, payment calls, webhooks,
   and any write outside the UoW are **not rolled back** and may repeat
   on redelivery. Applications must use idempotency keys, dedup
@@ -43,18 +43,34 @@ must own. Proofs referenced are executable tests — see
 - **`ConcurrencySpec.max_workers`** is declared but not enforced;
   registration rejects it until consistent enforcement exists.
 
+## Backend operation
+
+NativeKernel is the current default and has tested pre-dispatch claim-token
+fencing and attempt accounting. Chancy remains an explicitly usable adapter,
+but equivalent pre-dispatch fencing and bounded attempt accounting have not
+been proven. Native/Chancy reliability parity is a release gate and is not yet
+passed; the current default does not imply equivalent guarantees. SQLite is a
+local/proof backend, not a production durability target.
+
+Mixed Chancy/Native fleets are unsupported. Stop schedulers and workers, drain
+in-flight work, and inspect/reconcile outstanding jobs before changing every
+worker and scheduler together. Preserve old backend rows. This operation has
+not been rehearsed end-to-end; treat it as a conservative procedure, not a
+verified migration guarantee.
+
 ## Recovery behavior
 
 | Scenario | What happens | Operator action |
 |---|---|---|
 | Worker dies mid-handler | UoW rolls back; kernel lease expires; job redelivered | none (at-least-once) |
-| Worker dies before its dispatch starts (native) | claim token retired on reclaim; the stale dispatch loses at `job_mark_running` | none |
-| Repeated crash-before-handler | each claim counts an attempt; `attempts > max_attempts` → `failed` + DLQ | `dlq_replay` after fixing |
+| Worker dies before its dispatch starts (Native) | claim token retires on reclaim; stale dispatch cannot start | none |
+| Repeated crash-before-handler (Native) | each claim counts an attempt; `attempts > max_attempts` → `failed` + DLQ | `dlq_replay` after fixing |
+| Chancy worker dies before engine dispatch starts | Chancy may redeliver, but bounded engine attempts and claim fencing are unproven | monitor and reconcile stuck or repeated work |
 | Worker dies after commit | job is terminal; dispatch may see a stale claim and skip | none |
 | DB disconnect mid-handler | TX aborts; job redelivered; idempotent write lands once | none |
 | DB connectivity lost (worker idle) | claim/maintenance loops drop the dead conn and reconnect; `run_worker` supervision replaces a dead chancy worker | none |
-| `stop()` during a long handler | claiming stops; the lease keeps renewing while the handler drains within `timeout`; overrun → cancel + lease expiry re-queues | none |
-| Chancy kernel job abandoned before engine `mark_running` | chancy `Recovery` requeues it (kernel attempts are `engine max_attempts + 1`, so the engine always gets the final delivery to settle) | none |
+| Native `stop()` during a long handler | claiming stops; leases renew while draining. If the handler remains after timeout plus cancellation grace, `stop()` returns `False` and retains worker ownership and resources; retry stop later | keep the worker alive while it owns handlers |
+| Chancy worker loses a connection or abandons a pre-dispatch claim | behavior depends on Chancy recovery; no bounded engine claim accounting or stale-claim fence is promised | supervise/restart and inspect job state |
 | Scheduler restart | ticks replay; `cron:<type>:<slot>` unique keys dedup | none |
 | Outbox dispatcher restart | events re-claimed; subscriber dedup skips delivered ones | none |
 | Job exhausts attempts | `failed` + DLQ row | `dlq_replay` after fixing |
@@ -81,8 +97,12 @@ must own. Proofs referenced are executable tests — see
 
 ## Unsupported / experimental surface
 
-- `NativeKernel` is experimental: no rate limits, queue pause/resume,
-  worker tags, priority ordering, or plugin metrics
-  (`engine/native_kernel.py` header).
+- Chancy is explicitly usable, but pre-dispatch claim fencing and bounded
+  attempt accounting before `mark_running` are unproven. This leaves the
+  Native/Chancy reliability parity release gate unsatisfied; do not claim
+  equivalent crash guarantees until Chancy behavior is implemented and tested.
+- NativeKernel is the current default Postgres backend. It does not support rate
+  limits, queue pause/resume, worker tags, priority ordering, or Chancy plugin
+  metrics (`engine/native_kernel.py` header).
 - `SQLiteKernel` is local/proof-level: single-writer, no cross-process
   notify, no advisory locks — not a production durability target.

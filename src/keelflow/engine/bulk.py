@@ -524,6 +524,15 @@ class ChunkJobHandler(JobHandler):
                     step, JobStatus(final), result,
                 )
 
+    async def settle_exhausted(
+        self, uow, storage, payload: ChunkPayload, error: str
+    ) -> None:
+        """Settle chunk and parent bookkeeping when dispatch exhausts
+        before the chunk handler can run its own failure path."""
+        await storage.chunk_mark(
+            uow, payload.chunk_id, "failed", {"error": error})
+        await self._fan_in(uow, storage, payload.parent_job_id)
+
     async def _safe_mark_failed(
         self, scope, storage, chunk_id, parent_job_id, error
     ) -> None:

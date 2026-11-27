@@ -120,6 +120,57 @@ def test_upgrade_db_advances_versioned_database():
     asyncio.run(_run())
 
 
+def test_cli_defaults_to_native(capsys):
+    with pytest.raises(SystemExit):
+        main(["worker", "--help"])
+    out = capsys.readouterr().out
+    assert "default: native" in out
+    with pytest.raises(SystemExit):
+        main(["scheduler", "--help"])
+    assert "default: native" in capsys.readouterr().out
+
+
+def test_cli_warns_for_explicit_chancy(monkeypatch, caplog):
+    import logging
+    from argparse import Namespace
+
+    from keelflow.cli import cmd_scheduler
+    from keelflow.engine.native_kernel import NativeKernel
+
+    monkeypatch.setattr("keelflow.cli._load_registry", lambda _: _factory())
+    monkeypatch.setattr("keelflow.cli._dsn", lambda _: "postgresql://unused")
+    from keelflow import cli
+
+    monkeypatch.setattr(cli, "asyncio", type("FakeAsyncio", (), {
+        "run": staticmethod(lambda coroutine: coroutine.close())})())
+    monkeypatch.setattr(
+        "keelflow.postgres.storage.PostgresStorage",
+        lambda dsn: object(),
+    )
+    monkeypatch.setattr(
+        "keelflow.cli._kernel",
+        lambda *_: NativeKernel("postgresql://unused"),
+    )
+    monkeypatch.setattr(
+        "keelflow.engine.chancy_kernel.warn_best_effort",
+        lambda: logging.getLogger("test").warning("Chancy best effort"),
+    )
+    caplog.set_level(logging.WARNING)
+    args = Namespace(registry="ignored", dsn="unused", kernel="chancy")
+    cmd_scheduler(args)
+    assert "Chancy best effort" in caplog.text
+
+
+def test_cli_rejects_queue_for_native():
+    from argparse import Namespace
+
+    from keelflow.cli import cmd_worker
+
+    args = Namespace(queue=["default@2"], kernel="native")
+    with pytest.raises(SystemExit, match="only with --kernel chancy"):
+        cmd_worker(args)
+
+
 def test_sqlite_help_labels_proof_only(capsys):
     with pytest.raises(SystemExit):
         main(["worker", "--help"])

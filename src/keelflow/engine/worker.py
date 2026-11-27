@@ -135,6 +135,14 @@ async def dispatch(
             ctx_json = row["context"]
             _ck = row["concurrency_key"]
             cancel_req = row["cancel_requested"]
+            if execution_token is not None and (
+                status != JobStatus.CLAIMED.value
+                or row["execution_token"] != execution_token
+            ):
+                log.warning(
+                    "job %s claim lost before dispatch; abandoning stale "
+                    "dispatch", job_id)
+                return
             # Re-claim of an already-terminal job (e.g. double execution or
             # kernel retry of a declared-failed job): mark kernel-side done
             # and idempotently advance the run — never re-run the handler,
@@ -144,7 +152,8 @@ async def dispatch(
                 JobStatus.FAILED.value,
             ):
                 log.info("job %s already %s; skipping", job_id, status)
-                if step_run_id and _kernel_client is not None:
+                if (execution_token is None and step_run_id
+                        and _kernel_client is not None):
                     from .workflow import on_job_finished
 
                     sr = await storage.step_run_get(uow, step_run_id)
@@ -153,9 +162,9 @@ async def dispatch(
                         step_run_id, JobStatus(status),
                         (sr["outputs"] or {}) if sr else {},
                     )
-                if status == JobStatus.CANCELLED.value:
-                    # A pre-cancelled bulk chunk still has to settle its
-                    # chunk row + run fan-in or the parent never finishes.
+                if (execution_token is None
+                        and status == JobStatus.CANCELLED.value):
+                    # Engine-owned pre-cancelled chunks still need fan-in.
                     await _settle_cancelled_chunk(
                         uow, session, storage, type_name, payload_json)
                 return
@@ -163,17 +172,34 @@ async def dispatch(
             # honored at claim time — an in-flight job drains to completion
             # unless it checkpoints (cooperative_cancel opt-in).
             if cancel_req:
+                execution_token = await storage.job_mark_running(
+                        uow, job_id, claim_token=execution_token)
+                if execution_token is None:
+                    log.warning(
+                        "job %s claim lost before cancellation", job_id)
+                    return
                 await _cancel_terminalize(
                     uow, session, storage, registry, job_id, step_run_id,
                     _job_logger(job_id, type_name, ""),
-                    type_name, payload_json)
+                    type_name, payload_json,
+                    execution_token=execution_token)
                 return
             try:
                 spec = registry.job_type(type_name)
             except KeyError:
-                await storage.job_finish(uow, job_id, JobFinish(
-                    status=JobStatus.FAILED,
-                    error=f"unregistered job type {type_name}"))
+                if execution_token is not None:
+                    execution_token = await storage.job_mark_running(
+                        uow, job_id, claim_token=execution_token)
+                    if execution_token is None:
+                        log.warning(
+                            "job %s claim lost before type-failure settle",
+                            job_id)
+                        return
+                await storage.job_finish(
+                    uow, job_id, JobFinish(
+                        status=JobStatus.FAILED,
+                        error=f"unregistered job type {type_name}"),
+                    execution_token=execution_token)
                 log.error("job %s has unregistered type %s",
                           job_id, type_name)
                 return
@@ -204,12 +230,40 @@ async def dispatch(
             try:
                 payload = spec.input_schema.model_validate(payload_json)  # type: ignore[attr-defined]
             except ValidationError as exc:
-                await storage.job_finish(uow, job_id, JobFinish(
-                    status=JobStatus.FAILED,
-                    error=f"payload invalid: {exc}"))
+                if execution_token is not None:
+                    execution_token = await storage.job_mark_running(
+                        uow, job_id, claim_token=execution_token)
+                    if execution_token is None:
+                        log.warning(
+                            "job %s claim lost before payload-failure settle",
+                            job_id)
+                        return
+                await storage.job_finish(
+                    uow, job_id, JobFinish(
+                        status=JobStatus.FAILED,
+                        error=f"payload invalid: {exc}"),
+                    execution_token=execution_token)
                 jlog.error("payload invalid: %s", exc)
                 return
 
+            # Native must atomically enter running before any later mutation;
+            # tokenless dispatches retain the existing engine-owned start path.
+            if execution_token is not None:
+                execution_token = await storage.job_mark_running(
+                    uow, job_id,
+                    progress_timeout_seconds=(
+                        spec.progress_report_timeout_seconds),
+                    claim_token=execution_token)
+                if execution_token is None:
+                    if await storage.job_cancel_requested(uow, job_id):
+                        log.warning(
+                            "job %s claim lost while cancellation was "
+                            "requested; abandoning stale dispatch", job_id)
+                    else:
+                        log.warning(
+                            "job %s claim lost before handler start; "
+                            "abandoning stale dispatch", job_id)
+                    return
             # Atomic start/cancel decision (T-cancel): the transition
             # into `running` is conditioned on cancel_requested=false,
             # so a cancellation committed between the load above and
@@ -219,12 +273,16 @@ async def dispatch(
             # the same atomic UPDATE: fenced progress/finish/reschedule
             # writes reject anything older than this claim, and ops
             # retry (attempts=0) can never collide with a live token.
-            execution_token = await storage.job_mark_running(
-                uow, job_id,
-                progress_timeout_seconds=spec.progress_report_timeout_seconds,
-                claim_token=execution_token)
+            if execution_token is None:
+                execution_token = await storage.job_mark_running(
+                    uow, job_id,
+                    progress_timeout_seconds=(
+                        spec.progress_report_timeout_seconds))
             if execution_token is None:
                 if await storage.job_cancel_requested(uow, job_id):
+                    # Only a tokenless engine-owned dispatch may treat a
+                    # failed start as a pre-start cancellation. A Native
+                    # dispatch with a lost claim must simply abandon it.
                     await _cancel_terminalize(
                         uow, session, storage, registry, job_id,
                         step_run_id, jlog, type_name, payload_json)
@@ -434,12 +492,10 @@ def run_worker(
 ) -> None:
     """Run a kernel worker claiming keelflow jobs. Blocks until SIGINT/SIGTERM.
 
-    `kernel=None` (default) bootstraps a Chancy backend, creating and
-    owning the `chancy.Chancy` client for the process. `prefix`
-    namespaces the KERNEL tables (chancy's `*_jobs`, `*_queues`…). It
-    MUST differ from the engine's `keelflow_` schema prefix or kernel
-    tables collide with `keelflow_jobs`/`keelflow_queues` (chancy also
-    creates `<prefix>jobs`).
+    `kernel=None` (default) bootstraps a NativeKernel owned by this
+    process. Pass `ChancyKernel` explicitly to opt into Chancy; the
+    helper owns and closes its client only in that bootstrap path.
+    `prefix` configures Chancy's kernel tables when Chancy is selected.
 
     Pass `kernel=` to run a caller-owned Kernel adapter (e.g.
     `NativeKernel`, `SQLiteKernel`): the helper configures dispatch,
@@ -455,8 +511,7 @@ def run_worker(
     from .kernel import as_kernel
 
     injected = as_kernel(kernel) if kernel is not None else None
-    if injected is not None and queues is not None \
-            and not isinstance(injected, ChancyKernel):
+    if queues is not None and not isinstance(injected, ChancyKernel):
         raise ValueError(
             "queues= is chancy-specific; configure concurrency on the"
             " kernel's create_worker instead")
@@ -469,34 +524,33 @@ def run_worker(
         storage = PostgresStorage(dsn)
     configure(registry=registry, dsn=dsn, storage=storage)
 
-    if injected is not None:
-        async def _run_injected() -> None:
-            configure(registry=registry, dsn=dsn, kernel=injected,
-                      storage=storage)
-            await injected.migrate()
-            await _run_supervised(storage, event_bus,
-                                  injected.create_worker)
+    async def _run_kernel(port) -> None:
+        configure(registry=registry, dsn=dsn, kernel=port,
+                  storage=storage)
+        if isinstance(port, ChancyKernel):
+            from .chancy_kernel import warn_best_effort
 
-        asyncio.run(_run_injected())
-        return
-
-    async def _run() -> None:
-        async with chancy.Chancy(dsn, prefix=prefix) as client:
-            kernel = ChancyKernel(client)
-            configure(registry=registry, dsn=dsn, kernel=kernel,
-                      storage=storage)
-            await kernel.migrate()
+            warn_best_effort()
+        await port.migrate()
+        if isinstance(port, ChancyKernel):
             for q in queues or [
                 chancy.Queue(
-                    "default",
-                    concurrency=16,
+                    "default", concurrency=16,
                     executor=chancy.Chancy.Executor.Async,
-                    eager_polling=True,
-                )
+                    eager_polling=True)
             ]:
-                await kernel.declare_queue(q, upsert=True)
-            await _run_supervised(storage, event_bus,
-                                  kernel.create_worker)
+                await port.declare_queue(q, upsert=True)
+        await _run_supervised(storage, event_bus, port.create_worker)
+
+    async def _run() -> None:
+        if kernel is None:
+            from .native_kernel import NativeKernel
+            await _run_kernel(NativeKernel(dsn))
+        elif isinstance(injected, ChancyKernel):
+            async with injected.client:
+                await _run_kernel(injected)
+        else:
+            await _run_kernel(injected)
 
     asyncio.run(_run())
 
@@ -530,7 +584,13 @@ async def _run_supervised(storage, event_bus, worker_factory,
                     continue
                 finally:
                     try:
-                        await worker.stop()
+                        stopped = await worker.stop(timeout=30)
+                        while stopped is False:
+                            log.error(
+                                "worker stop timed out with active handlers; "
+                                "retaining worker and lease ownership")
+                            await asyncio.sleep(1)
+                            stopped = await worker.stop(timeout=30)
                     except Exception:
                         log.exception("worker.stop failed during "
                                       "supervision")
@@ -668,6 +728,12 @@ async def _settle_exhausted(
         attempts=att[0] if att else 0,
         run_id=_dlq_run_id, step_run_id=step_run_id,
     ))
+    if type_name == "bulk.chunk@v1" and isinstance(payload_json, dict):
+        from .bulk import ChunkJobHandler, ChunkPayload
+
+        bulk = ChunkJobHandler()
+        payload = ChunkPayload.model_validate(payload_json)
+        await bulk.settle_exhausted(uow, storage, payload, error)
     if step_run_id and _kernel_client is not None:
         from .workflow import on_job_finished
 

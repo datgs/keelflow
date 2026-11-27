@@ -74,11 +74,10 @@ permissions, and transactions.
    unit of work (`ctx.uow`) which commits with the job finish — so
    retries are safe, and idempotent-by-construction patterns (natural
    keys, upserts) cover the rest.
-3. **Delegate the boring machinery.** Claiming, leases, retries,
-   leader election = Chancy by default — behind a real kernel port
-   (`engine/kernel.py`). Everything that differentiates —
-   transactional enqueue, DAG semantics, trigger callbacks, bulk
-   row state — is keelflow's own ~4k LOC, 7 deps.
+3. **One Postgres source of truth.** NativeKernel claims and leases jobs
+   directly from `keelflow_jobs` by default, behind the kernel port
+   (`engine/kernel.py`). Chancy is an explicit opt-in adapter. Workflow,
+   transaction, and bulk semantics remain owned by Keelflow.
 4. **The spec is portable, the code is honest.** `spec/` defines the
    contract (schema, enums, lifecycle) so another implementation can
    claim conformance; `src/` is the reference. The dispatch port is
@@ -103,9 +102,11 @@ permissions, and transactions.
   "roles" mean.
 - **SuperAdmin has no auth** — bind localhost or put it behind your own
   proxy.
-- **Chancy ≤0.26 kernel**: a DB disconnect can crash the worker loop
-  (upstream issue); run workers under a restart supervisor — systemd,
-  Docker restart policy, or a process manager.
+- **Chancy is opt-in and best-effort for pre-dispatch failures.** Keelflow
+  cannot prove claim fencing or bounded engine attempt accounting when a
+  Chancy delivery crashes before `mark_running`. Chancy remains usable, but
+  operators must supervise workers and inspect/reconcile repeated or stuck
+  jobs. Native's stronger claim-token behavior is tested in Keelflow's suite.
 - **Cancellation is cooperative** — running jobs drain by default;
   mid-run stops only happen at `ctx.execution.checkpoint()` on job
   types that opt in, and external side effects never roll back.
@@ -143,10 +144,30 @@ permissions, and transactions.
 | Language-agnostic spec | ✅ | `spec/` + conformance checklist |
 | Single-TX dispatch (`ctx.uow`) | ✅ | handler writes + finish + advance in one commit |
 
-Kernel lifecycle (claim/retry/schedule) rides on **Chancy** by default;
-the `Kernel` port also ships experimental `NativeKernel` (claims
-`keelflow_jobs` directly — ~14% faster than Chancy on the 1M bench) and
-proof-level `SQLiteKernel`. See `docs/guide.md` §16.
+## Dispatch backends
+
+NativeKernel is the current default for CLI workers, schedulers, and
+`run_worker(kernel=None)`. Chancy remains available as an explicit opt-in.
+Both adapters remain part of the framework, but Native/Chancy claim-fencing
+and bounded-attempt parity is a release gate that has not yet passed; the
+current default does not imply equivalent reliability guarantees. SQLite is
+for local/proof use only and does not make engine storage portable.
+
+| Backend | Use | Claim and recovery | Operational limits |
+|---|---|---|---|
+| NativeKernel (default) | Postgres production | Claims `keelflow_jobs`; each claim consumes an attempt and uses a non-reusable execution token. Bounded crash exhaustion is covered by Native tests. | No rate limits, pause/resume, worker tags, priority ordering, or Chancy plugin metrics. `stop(timeout)` may return `False`; keep the worker alive and retry stop after a running handler exits. |
+| Chancy (opt-in) | Deployments that require Chancy queue operations | Adapts Chancy dispatch; Keelflow does not prove stale-claim fencing or bounded engine attempts for crashes before dispatch starts. | Usable with explicit limits and a selection warning; Native/Chancy reliability parity is not yet proven and remains a release gate. Use `--kernel chancy` or pass `ChancyKernel` to `run_worker`. |
+| SQLiteKernel | Local and portability proof | Separate SQLite job table; single-writer behavior. | Not production durable; no cross-process notify or Postgres advisory locks. Engine services remain Postgres-bound. |
+
+**Backend cutover:** do not assume Chancy and Native workers or schedulers
+can share a deployment. Stop scheduling, drain and stop all workers, inspect
+outstanding work in the old backend, and reconcile it before selecting the new
+backend for every component. Preserve old backend rows; do not delete them.
+This conservative procedure has not been rehearsed end-to-end.
+
+Keep Chancy explicitly with `keelflow worker --kernel chancy` and
+`keelflow scheduler --kernel chancy`; Python callers can pass a
+`ChancyKernel` to `run_worker`. See `docs/guide.md` §16 and `docs/reliability.md`.
 
 ## Roadmap
 
@@ -235,7 +256,7 @@ error queue, human map/approve),
 - `src/keelflow/admin/` — minimal SuperAdmin (dev/ops, no auth)
 - `src/keelflow/mcp/` — read-only agent tools
 - `spec/` — language-agnostic keelflow spec (port to .NET/Java/PHP)
-- `docs/architecture-design-brief.md` — design source of truth
+- `docs/architecture-design-brief.md` — historical draft design rationale
 - `docs/reliability.md` — durability/recovery guarantee matrix + upgrade policy
 - `docs/security.md` — data access, telemetry, admin/MCP boundaries
 - `docs/plans/active/` — execution plan + acceptance evidence

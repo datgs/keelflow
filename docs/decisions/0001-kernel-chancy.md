@@ -4,7 +4,11 @@ Date: 2026-11-18
 
 ## Status
 
-Accepted
+Accepted for the original Chancy adoption decision.
+
+This record preserves that historical choice and its rationale; it does not
+establish Native/Chancy reliability parity. Native is the current code default,
+but backend parity remains a release gate as recorded under Follow-Up.
 
 ## Context
 
@@ -75,6 +79,10 @@ Tradeoffs:
 
 ## Follow-Up
 
+- Backend parity gate: Native and Chancy must both prove claim fencing and
+  bounded pre-dispatch attempt accounting before release treats them as
+  equivalent. Until then, keep backend limitations explicit; do not claim
+  Chancy parity from the prior decision.
 - T4 enqueue pipeline: wrap `push` in caller TX + outbox record.
 - T5 worker: queue `eager_polling=True`, `heartbeat_poll_interval`/timeout
   tuned, Recovery plugin enabled (default).

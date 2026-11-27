@@ -74,23 +74,24 @@ def _install_fake_chancy(monkeypatch):
     _FakeQueue.calls.clear()
 
 
-def test_default_chancy_bootstrap(monkeypatch):
-    """kernel=None preserves the Chancy client/queue/worker lifecycle."""
-    _install_fake_chancy(monkeypatch)
-    worker_mod.run_worker(InMemoryRegistry(), dsn="postgresql://x",
-                          prefix="p_")
+def test_default_native_bootstrap(monkeypatch):
+    """kernel=None owns and starts NativeKernel, without Chancy tables."""
+    created = []
 
-    client = _FakeChancyClient.created[0]
-    assert client.prefix == "p_"
-    assert client.log[0] == "enter"
-    assert "migrate" in client.log
-    assert client.log[-1] == "exit"
-    declares = [e for e in client.log
-                if isinstance(e, tuple) and e[0] == "declare"]
-    assert declares and declares[0][2] is True
-    assert _FakeQueue.calls  # default queue declared
-    w = _FakeChancyClient.workers[0]
-    assert w.state == {"started": 1, "waited": 1, "stopped": 1}
+    class FakeNativeKernel(_FakeKernel):
+        def __init__(self, dsn):
+            super().__init__(dsn)
+            created.append(self)
+
+    from keelflow.engine import native_kernel
+    monkeypatch.setattr(native_kernel, "NativeKernel", FakeNativeKernel)
+    monkeypatch.delenv(worker_mod.DSN_ENV, raising=False)
+    worker_mod.run_worker(InMemoryRegistry(), dsn="postgresql://x")
+
+    kernel = created[0]
+    assert kernel.log == ["migrate"]
+    assert kernel.worker.state == {"started": 1, "waited": 1, "stopped": 1}
+    assert _FakeChancyClient.created == []
 
 
 class _FakeKernel:
@@ -121,6 +122,28 @@ class _FakeKernel:
 
     async def declare_queue(self, queue, *, upsert=False):
         self.log.append(("declare", queue))
+
+
+def test_explicit_chancy_bootstrap(monkeypatch, caplog):
+    """An explicit Chancy adapter owns and closes its client."""
+    _install_fake_chancy(monkeypatch)
+    import logging
+    caplog.set_level(logging.WARNING)
+    monkeypatch.setattr(
+        "keelflow.engine.chancy_kernel.warn_best_effort",
+        lambda: logging.getLogger("test.chancy").warning(
+            "cannot guarantee claim fencing"),
+    )
+    monkeypatch.delenv(worker_mod.DSN_ENV, raising=False)
+    client = _FakeChancyClient("postgresql://x", prefix="p_")
+    from keelflow.engine.chancy_kernel import ChancyKernel
+    worker_mod.run_worker(
+        InMemoryRegistry(), kernel=ChancyKernel(client), prefix="p_")
+
+    assert client.log[0] == "enter" and client.log[-1] == "exit"
+    assert any(isinstance(e, tuple) and e[0] == "declare"
+               for e in client.log)
+    assert "cannot guarantee claim fencing" in caplog.text
 
 
 def test_injected_kernel_bootstrap(monkeypatch):

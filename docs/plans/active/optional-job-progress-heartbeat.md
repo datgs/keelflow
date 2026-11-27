@@ -5,9 +5,12 @@ Date: 2026-11-25
 ## Status
 
 Progress reporting and the two prior hardening passes are implemented and
-verified. A broader Native + Chancy reliability pass is planned below; this
-plan remains active until those recovery findings have executable evidence.
-SQLite progress/watchdog remains out of scope as documented.
+verified. The Native + Chancy reliability pass was implemented in commit
+`a3aca0c`, but review found unresolved correctness gaps. The reliability work
+and a gated switch to NativeKernel as the default are planned below; this plan
+remains active until the reviewed guarantees have executable evidence and the
+backend migration behavior is documented. SQLite progress/watchdog remains out
+of scope as documented.
 
 ## Outcome
 
@@ -798,13 +801,18 @@ state, and PostgreSQL query/connection evidence together.
   Chancy version, injected fault duration, lease settings, observations, and
   cleanup evidence.
 
-### Result — implemented 2026-11-26
+### Prior implementation record — not completion
 
-All four tasks landed; every acceptance item above is executable evidence in
-`tests/test_reliability.py` (new file, 10 tests — run under both
-`--kernel=native` and the default `--kernel=chancy`).
+Commit `a3aca0c` implemented the first version of these tasks. The claims below
+are historical implementation/test records, not a completion declaration; the
+review findings and corrective plan in “Follow-up: reviewed reliability fixes
+and Native default” supersede them. Do not move this plan to completed until
+that follow-up passes its acceptance gates.
 
-**Task A — claim identity + bounded crash recovery**
+The prior implementation added `tests/test_reliability.py` (10 tests — run under
+both `--kernel=native` and `--kernel=chancy`).
+
+**Task A — claim identity + bounded crash recovery (prior implementation)**
 
 - Native claim now mints the `execution_token` and consumes the attempt inside
   `_claim_once`'s single UPDATE (`native_kernel.py`); `_run` passes the token
@@ -830,7 +838,7 @@ All four tasks landed; every acceptance item above is executable evidence in
 - `_run`'s inflight cleanup pops by task identity so an older dispatch
   finishing last cannot clear a newer dispatch's slot.
 
-**Task B — lease-safe drain + paced idle polling**
+**Task B — lease-safe drain + paced idle polling (prior implementation)**
 
 - `stop()` splits `_stop_claim` (claim loop only) from `_stop` (maintenance):
   claiming stops first, the maintenance loop keeps renewing in-flight leases
@@ -843,7 +851,7 @@ All four tasks landed; every acceptance item above is executable evidence in
   (`test_idle_claim_loop_paces_polling`: ≤12 claim queries in 0.65s idle at
   100ms poll, previously unbounded).
 
-**Task C — DB recovery both backends**
+**Task C — DB recovery both backends (prior implementation)**
 
 - Native claim/maintenance loops call `_ensure_conn` each cycle; any failure
   drops the suspect connection and the next iteration reconnects, preserving
@@ -864,7 +872,7 @@ All four tasks landed; every acceptance item above is executable evidence in
 - `test_no_listener_connection_leak_after_stop` proves the LISTEN backend
   disappears from `pg_stat_activity` after `stop()`.
 
-**Task D — dedup + consumption observability**
+**Task D — dedup + consumption observability (prior implementation)**
 
 - `test_concurrent_duplicate_enqueue_single_execution`: two concurrent
   same-key enqueues while the handler is blocked mid-run → same `JobRef`, one
@@ -875,13 +883,15 @@ All four tasks landed; every acceptance item above is executable evidence in
   rising). `test_pending_due_tracks_claimable_backlog` proves only due rows
   count.
 
-**Remaining known limitation (documented, not fixed):** a chancy kernel job
-abandoned *before* the engine `mark_running` (crash in the tiny pre-dispatch
-window) does not consume an engine attempt; chancy `Recovery` requeues it
-(kernel attempts cap at engine max+1, so deliveries stay bounded but the
-engine row can end stranded `pending` if the kernel job exhausts). Fixing
-this would require an engine-level rescue for dead kernel jobs — out of
-scope, flagged for a future pass.
+**Known Chancy limitation (not fixed):** a Chancy kernel job abandoned
+*before* the engine `mark_running` does not consume an engine attempt. Chancy
+`Recovery` requeues abandoned jobs and increases the kernel job's own
+`max_attempts`; the `engine max_attempts + 1` setting therefore does **not**
+prove a bounded number of pre-dispatch crashes. The engine row may remain
+`pending` if Chancy stops delivering it. Chancy claim fencing and bounded
+pre-dispatch accounting remain unsupported unless a supported seam and real
+worker tests prove otherwise. Native is the intended default for the stronger
+claim/recovery contract.
 
 **Validation evidence (2026-11-26):** `uv run pytest tests/ -q` → 255 passed,
 9 skipped (chancy); `--kernel=native` → 263 passed, 1 skipped; `ruff check`/
@@ -889,7 +899,353 @@ scope, flagged for a future pass.
 one pre-existing fixture error (`test_worker.py` passes the Postgres DSN as an
 SQLite path — reproduces on the unmodified baseline; unrelated to this pass).
 
+### Follow-up: reviewed reliability fixes and Native default
+
+#### Outcome
+
+Close the review findings against commit `a3aca0c`, establish and test NativeKernel
+as the default backend, keep Chancy explicitly selectable with honest best-effort
+limits, and document the support boundaries of Chancy, Native, and SQLite in
+`README.md`. Do not claim a reliability guarantee unless the corresponding
+backend-level behavior is proven by tests.
+
+The user accepts NativeKernel as the default and accepts that each backend has
+limitations. Requests for a capability a selected backend cannot serve must fail
+clearly rather than being silently ignored. Chancy remains opt-in; warn once when
+it is selected about reliability limits that affect all Chancy jobs. Do not make
+Chancy unusable merely because some optional capabilities are unsupported.
+
+#### Verified review findings and repository evidence
+
+- **VERIFIED — destructive test scope:**
+  `tests/test_reliability.py` terminates every other backend in the active DB
+  (`:458-462`). The database-name guard in `conftest.py` does not make that DB
+  exclusive. Replace this with test-owned PIDs or a per-test disposable database
+  via `keelflow.testing.temp_test_db()`.
+- **VERIFIED — Native dispatch writes before fence:**
+  cancel, unregistered-type, and invalid-payload branches can write before
+  `job_mark_running(claim_token=...)` (`engine/worker.py:162-210`). Fenced
+  `job_finish` only applies a token predicate when supplied
+  (`postgres/storage.py:311-335`). Validate ownership before every mutating
+  dispatch path, including workflow and bulk settlement.
+- **VERIFIED — Chancy pre-dispatch ownership is not fenced:**
+  Chancy creates `claim_id` at claim time (`chancy/worker.py:930-934`), but the
+  adapter invokes engine `dispatch` without that identity; the tokenless storage
+  path can replace a running token (`postgres/storage.py:263-280`). The current
+  Chancy test invokes `dispatch()` twice directly rather than exercising two
+  Chancy claims (`tests/test_reliability.py:271-301`). Do not depend on private
+  Chancy internals to force a guarantee it does not support.
+- **VERIFIED — exhausted bulk chunk lacks bookkeeping:**
+  `_settle_exhausted` marks the job/DLQ/workflow, but does not mark the chunk or
+  invoke bulk fan-in (`engine/worker.py:646-676`); bulk handler bookkeeping lives
+  in `engine/bulk.py:305-345,449-538`. A crash-exhausted chunk may strand parent
+  and workflow state.
+- **VERIFIED — Chancy bounded crash claim is overstated:**
+  Chancy Recovery requeues abandoned jobs and increases kernel `max_attempts`
+  (`.venv/lib/python3.12/site-packages/chancy/plugins/recovery.py:105-111`),
+  while engine attempts increment at `job_mark_running`. The existing
+  `engine max_attempts + 1` does not prove bounded pre-dispatch recovery.
+  Remove the shared guarantee unless new evidence supports it.
+- **VERIFIED — Native reconnect race and shutdown timeout gap:**
+  two loops call `_ensure_conn` without serialization
+  (`engine/native_kernel.py:209-248`); after the first `stop(timeout)` wait,
+  pending tasks are awaited without a second bound (`:379-411`).
+- **VERIFIED — backlog metric includes non-worker work:**
+  `pending_due` counts every due pending row (`postgres/storage.py:1304-1314`),
+  while state-machine human jobs are not dispatched to a worker
+  (`engine/statemachine.py:191-205`).
+- **VERIFIED — backend defaults and capabilities:**
+  CLI worker and scheduler share `--kernel=chancy` default
+  (`cli.py:188-210`); `run_worker(kernel=None)` owns Chancy
+  (`engine/worker.py:425-449`). The guide labels Chancy default and Native
+  experimental, with gaps for rate limits, pause/resume, tags, priority, and
+  plugin metrics (`docs/guide.md:774-807`). README currently repeats the old
+  default (`README.md:77-87,146-149`) and has a stale Chancy disconnect warning
+  (`:106-108`).
+
+#### Task graph
+
+**Status: partially complete.** Tasks 1, 2, 3, 5, and 7 have implementation
+work and focused proof. Tasks 4 and 6 remain incomplete; Task 8 release validation
+is not complete. No cutover rehearsal, full-suite run, or complete bulk-exhaustion
+integration proof has been recorded. Keep this plan active.
+
+**Task 1 — Make destructive fault tests test-owned (P1, prerequisite)**
+
+- Goal: fault injection cannot terminate or roll back work owned by another
+  test, developer, or application.
+- Required outcomes: run Chancy reconnect/recovery tests on a uniquely named
+  disposable Postgres database or target only connection PIDs created by that
+  test; cleanup only test-owned resources. Prefer the existing
+  `temp_test_db()` helper when Chancy prefixes and migrations fit its lifecycle.
+- Constraints: no cluster-wide kill, no shared-DB outage, no broad
+  `pg_terminate_backend` predicate.
+- Acceptance evidence: test asserts each terminated PID was captured from its
+  own worker/client; test cleanup removes only its own database/prefix/state.
+- Verification: focused fault test repeated; inspect emitted SQL/target list.
+- Ownership: `tests/test_reliability.py`, test fixture/helper only if needed.
+- Dependencies: none.
+- Progress: changed the reliability fixture to a fresh disposable DB per case;
+  Chancy recovery fault injection is excluded from the shared suite until it can
+  be proven against test-owned resources. Native reliability suite passes.
+
+**Task 2 — Fence Native dispatch before every mutation and settle bulk exhaustion (P1)**
+
+- Goal: an obsolete Native claim cannot alter a newer execution through any
+  early-error, cancellation, bulk, workflow, or terminal path.
+- Required outcomes: validate claim identity before cancel/type/payload branches
+  mutate state; require the fence in all status-changing storage operations for
+  a claimed dispatch. Exhausted bulk chunks must atomically mark the chunk
+  failed, run fan-in, terminalize the parent/workflow as appropriate, and write
+  one DLQ record. Keep settlement idempotent.
+- Constraints: cancellation of a running job keeps the accepted drain semantics;
+  no stale dispatch may terminalize a newer claim. Preserve business UoW
+  rollback and external-effects caveats.
+- Acceptance evidence: real Postgres races where A is reclaimed, B is running,
+  then A encounters (a) cancel request, (b) unregistered type, and (c) invalid
+  payload; B's job/workflow remains unchanged by A. Crash a bulk chunk through
+  exhaustion; assert job, chunk, parent, workflow, DLQ, and effect counts.
+- Verification: focused storage/worker tests plus `tests/test_bulk.py`, workflow,
+  cancellation, and reliability tests on Native.
+- Ownership: `engine/worker.py`, storage contract/implementation, bulk settlement,
+  and focused tests.
+- Dependencies: Task 1 for safe integration fault tests.
+- Progress: Native dispatch rejects stale tokens before mutation, establishes
+  the running state atomically before cancel/type/payload failures, and bulk
+  attempt exhaustion now settles chunk fan-in in the same UoW. Claim-race and
+  existing Native tests pass. Dedicated cancel/type/payload stale-race and
+  exhausted-bulk parent/workflow proofs remain outstanding.
+
+**Task 3 — Make Native reconnect and shutdown truthful and leak-safe (P2)**
+
+- Goal: one owned DB connection survives reconnect races; each `stop(timeout)`
+  call reports within a documented bound without falsely claiming a
+  cancellation-resistant handler has stopped.
+- Required outcomes: serialize reconnect/open/close across claim and maintenance
+  loops; ensure stop does not close a connection while maintenance uses it. On
+  timeout, request cancellation and wait a defined cancellation grace. If a
+  handler still runs, return `False` (incomplete drain) while keeping the worker,
+  maintenance loop, connection, and lease renewals alive. A later `stop()` may
+  finish cleanup after all dispatch tasks end. The caller must keep the worker
+  object alive and must not treat `False` as stopped. A hard process kill remains
+  an at-least-once crash; fencing must prevent a later stale DB commit.
+- Constraints: user decision is **keep ownership** rather than teardown after
+  grace. Never close lease/fence resources while a handler may still commit.
+  Do not equate cancellation request with task termination.
+- Acceptance evidence: concurrent `_ensure_conn` after repeated connection
+  termination leaves exactly one live claim connection and zero after completed
+  stop; a handler that catches/delays cancellation makes `stop()` return `False`
+  within `timeout + grace`, keeps lease renewal active, cannot be reclaimed by a
+  sibling, and can later be stopped/cleaned up after release.
+- Verification: deterministic asyncio tests plus real Postgres reconnect,
+  lease-reclaim, and repeated-stop lifecycle tests.
+- Ownership: `engine/native_kernel.py`, Native lifecycle tests, reliability docs.
+- Dependencies: Task 2's ownership contract.
+- Progress: reconnect/open/close use a connection lock; start/stop are
+  synchronized; timeout plus cancellation grace is bounded; incomplete stop
+  retains resources and reports `False`. Native lifecycle tests pass. A
+  concurrent reconnect stress/leak test remains outstanding.
+
+**Task 4 — Define honest Chancy compatibility and reliability policy (P1)**
+
+- Goal: keep Chancy usable while closing the reliability gap; Native and
+  Chancy must provide equivalent claim fencing and bounded pre-dispatch attempt
+  accounting before the framework release gate passes.
+- Required outcomes: emit one clear warning per bootstrap invocation while
+  Chancy's pre-dispatch fencing and bounded engine attempt accounting remain
+  unproven. The warning names those limits without labeling Chancy generally
+  unreliable. Investigate a supported fencing seam and implement/verify parity
+  or keep the release gate blocked; documentation alone does not close the gap.
+  Correct `docs/reliability.md` and guide claims accordingly.
+- Constraints: no private Chancy monkey-patching/fork. Do not infer a supported
+  claim-id injection seam without proof. If a request/guarantee is not currently
+  expressible at an API boundary, document that limitation rather than creating
+  broad capability machinery.
+- Acceptance evidence: test the warning once per bootstrap invocation on each
+  Chancy selection path; tests show ordinary explicit Chancy remains available
+  and any explicit unsupported request fails before worker startup. Docs make no
+  shared bounded-recovery/fencing claim. If a supported claim-id seam is
+  discovered, add a real two-worker/recovery race; otherwise explicitly mark
+  claim fencing/bounded pre-dispatch accounting unsupported.
+- Verification: Chancy bootstrap tests and reliability tests on isolated DB.
+- Ownership: Chancy adapter/bootstrap, docs and tests.
+- Dependencies: Tasks 1-2; decision gate before attempting dependency-specific
+  behavior.
+- Progress: removed the shared Chancy bounded-recovery claim and documented
+  Chancy as best-effort. CLI worker/scheduler and Python bootstrap warning
+  coverage is incomplete; Chancy reliability tests are skipped because no
+  supported fencing seam exists and the existing disconnect test has unsafe
+  broad session termination.
+
+**Task 5 — Current Native default and Native/Chancy parity release gate**
+
+- Goal: distinguish the implemented Native code default from a release decision;
+  require Native/Chancy reliability parity before the release gate passes, and
+  reject unsupported backend-specific options.
+- Required outcomes: change defaults for CLI worker, CLI scheduler, and
+  `run_worker(kernel=None)` together. When `run_worker` creates Native itself,
+  it owns migrate/start/stop/close on success, startup failure, and cancellation;
+  an explicitly injected kernel remains caller-owned. Explicit `--kernel chancy`
+  continues to work. Reject Chancy-only `--queue` / `queues=` when Native is
+  selected. Build a concrete request matrix for CLI worker, CLI scheduler,
+  `run_worker`, and public job/kernel APIs: for each queue/prefix/priority/limits/
+  rate/pause/tags/metrics option record support, how explicit request differs
+  from default/omission, validation boundary, and actionable error. Validate
+  only options users can actually request; do not infer explicit `--prefix`
+  from argparse's default value. Keep SQLite clearly proof/local-only. Define
+  Native's implicit queue/concurrency behavior.
+- Constraints: do not change job data schema solely to switch defaults. Keep
+  SQLite out of production recommendations. Do not silently reinterpret a
+  Chancy-only option.
+- Acceptance evidence: Native and Chancy both pass claim-fencing and bounded
+  pre-dispatch attempt-accounting proofs; CLI/parser and bootstrap tests show
+  the implemented default selects Native without silently applying Chancy-only
+  options. Chancy remains explicitly selectable and capability errors are
+  actionable.
+- Verification: CLI/bootstrap tests, both kernel contract suites, worker and
+  scheduler integration tests.
+- Ownership: `cli.py`, `worker.py`, kernel selection tests, API docs.
+- Dependencies: Tasks 2-4; Native reliability gate must pass first.
+- Progress: CLI and Python worker defaults now select Native; Chancy is explicit
+  opt-in; `--queue`/`queues=` is rejected outside Chancy. CLI/bootstrap tests
+  pass. Native owned-kernel cleanup on startup failure/cancellation and the
+  full explicit capability request matrix remain unproven.
+
+**Task 6 — Backend cutover policy and README support matrix**
+
+- Goal: operators can safely move existing deployments to the new default and
+  understand backend limits before choosing one.
+- Required outcomes: test whether Chancy and Native dispatch rows can coexist or
+  be consumed by mismatched workers/schedulers. If safe coexistence is not
+  proven, prescribe a drain-first, stop-scheduler/workers, inspect/reconcile
+  outstanding backend jobs, then switch all components together; do not run a
+  mixed fleet. State how to handle pending Chancy deliveries and in-flight jobs.
+  Update README with a comparison for Chancy, Native, SQLite: support level,
+  claim/retry behavior, operational features, reconnect/recovery limits, and
+  production suitability. Update stale README defaults and Chancy disconnect
+  warning. Provide explicit commands/configuration for retaining Chancy.
+- Constraints: do not assert mixed-backend safety based only on separate kernel
+  tests. No unverified migration/cleanup command; describe only rehearsed steps.
+- Acceptance evidence: isolated integration tests in both directions (Chancy→
+  Native and Native→Chancy) for ready pending jobs, scheduled-future jobs,
+  in-flight claims, scheduler/worker mismatch, and mixed worker fleets. The
+  result must establish one of: (a) safe convergence, (b) mismatch is detected
+  and rejected before consumption, or (c) mixed operation is unsupported and a
+  tested drain-first all-components-together cutover prevents it. If neither
+  safe convergence nor detection exists, characterize the stranded/duplicate
+  states and prescribe a tested operational ban on mixed fleets. Do not delete
+  kernel rows or claim rollback safety without a rehearsal. README accurately
+  matches test results, lists Chancy/Native/SQLite limitations, gives explicit
+  Chancy opt-in instructions, and includes the tested cutover/rollback sequence.
+- Verification: isolated disposable DB cutover tests; README link/command
+  checks; full backend test matrix.
+- Ownership: README and cutover procedure; Task 4 owns reliability docs, Task 5
+  owns guide/API/CLI docs, avoiding shared-file edits.
+- Dependencies: Task 5; choose the cutover policy from this task's mismatch-test results.
+- Progress: README now documents the backends and a conservative drain-first
+  policy, explicitly noting no end-to-end rehearsal. Mixed-backend/pending-work
+  integration tests and a verified cutover procedure remain outstanding.
+
+**Task 7 — Worker-eligible backlog metric (P2)**
+
+- Goal: the consumption metric counts due machine work a worker can actually
+  claim, not human tasks or external waits.
+- Context: current `pending_due` counts every due pending row; state-machine
+  human jobs can remain pending without a kernel dispatch.
+- Required outcomes: define a reliable eligibility predicate shared with the
+  Native claim contract, or use a separately named metric if backend eligibility
+  differs. Exclude human and external-wait work that is not worker-dispatchable.
+  Update metric help/docs to state its precise scope.
+- Constraints: no broad monitoring redesign and no false claim that queue age
+  proves business progress.
+- Acceptance evidence: with due machine job, future-scheduled machine job, due
+  human task, and external wait present together, only claimable machine jobs
+  contribute; prove the metric rises when a worker is stopped and drains when
+  consumption resumes.
+- Verification: Postgres monitoring tests on the default Native backend and
+  explicit Chancy; test exact eligibility against each backend's claim query.
+- Ownership: storage metrics, monitoring/observability tests, metric docs.
+- Dependencies: Task 2's ownership/eligibility contract.
+- Progress: `pending_due` now counts due rows with `dispatch_queued`; Native test
+  covers future and non-dispatchable rows. A due human/external-wait integration
+  case and explicit Chancy metric validation remain outstanding.
+
+**Task 8 — Backend parity validation and closeout**
+
+- Goal: complete fresh behavior-level evidence for the current Native default,
+  the required Native/Chancy reliability parity gate, and the supported backend
+  matrix.
+- Acceptance evidence: Native and Chancy both pass claim-fencing, bounded
+  pre-dispatch attempt accounting, cancellation, bulk/workflow, reconnect, stop,
+  dedup, and metric eligibility tests; cutover behavior is rehearsed. SQLite
+  contract tests pass and its limitations are explicit. README, guide,
+  reliability docs, CLI help, and module support notes agree on current
+  defaults, the parity gate, capability gaps, warnings, and cutover status.
+- Verification: focused suites per task; then full tests with Native default,
+  explicit Chancy tests, SQLite contract tests, examples, `ruff check`, `mypy`,
+  and `git diff --check`. Fault injection only on isolated/test-owned DBs.
+- Ownership: integration owner; no unrelated cleanup.
+- Dependencies: Tasks 1-7.
+- Progress: Native-focused reliability suite (34 passed, 1 skipped), Native +
+  Chancy kernel contract suite (15 passed, 3 skipped), bootstrap/CLI suite
+  (14 passed), `ruff`, `mypy`, and `git diff --check` pass. Full tests/examples,
+  Chancy lifecycle proof, cutover rehearsal, and complete acceptance criteria
+  remain outstanding.
+
+#### Independent plan review
+
+Oracle reviewed the plan after the user's direction to default to Native and
+accept backend limitations. The review found five material gaps; this revision
+adds the missing worker-eligible metric task, selects the shutdown behavior,
+requires owned-Native cleanup tests, specifies request-vs-default capability
+validation, and makes the cutover acceptance alternatives consistent.
+
+#### Dependency order and decision gates
+
+`1 → 2 → 3`; Task 4 follows Task 1 and can proceed alongside Tasks 2-3 where
+file ownership is separate. Task 5's release gate remains blocked until Native
+and Chancy pass reliability parity and capability gates in Tasks 2-4. Task 6
+tests cutover after the default selection is implemented. Task 7 follows Task 2's eligibility definition and
+can proceed independently of CLI cutover; Task 8 integrates all outputs.
+Chancy claim-identity work is a discovery gate inside Task 4: if no supported
+seam exists, accept and document the limitation; do not block Native default or
+patch private dependency code.
+
+#### Risks and recovery
+
+- **High:** claim fencing and terminalization cross storage, workflow and bulk
+  state. Use deterministic Postgres fault tests before broad suite runs.
+- **High:** changing defaults affects worker and scheduler and may alter active
+  deployments. Require a tested drain-first cutover if mixed backend operation
+  is not proven.
+- **Medium:** warning/error semantics and unsupported-option validation are
+  public behavior; errors must identify selected backend, unsupported request,
+  and supported alternative.
+- **Medium:** shutdown cancellation policy must not create false claims that a
+  non-cooperative coroutine stopped. After timeout+grace, `stop()` returns
+  incomplete and retains worker/maintenance/lease ownership; callers must keep
+  the worker alive and retry cleanup after the handler exits.
+- Recovery: do not delete old Chancy kernel rows as part of cutover. Stop new
+  scheduling, preserve rows, inspect status/claim/attempts, and use only a
+  rehearsed migration procedure. Rollback by explicitly selecting Chancy only
+  after deciding how Native-created work is handled; never mix workers by
+  assumption.
+
 ### Decisions
+
+- 2026-11-26: NativeKernel is the current code default, with focused Native
+  tests passing; this is not a release decision. Chancy remains explicitly
+  usable and warns about its unproven pre-dispatch limits. Native/Chancy
+  claim-fencing and bounded attempt-accounting parity is a required release
+  gate, not yet passed. Do not claim the backends are reliability-equivalent
+  until both satisfy that gate. SQLite remains proof/local-only.
+- 2026-11-26: Do not depend on or patch unsupported private Chancy internals for
+  claim fencing. If no supported seam proves the claim contract, keep Chancy
+  best-effort and state the limitation; Native owns the stronger guarantee.
+- 2026-11-26: On Native `stop(timeout)`, if a handler remains after the timeout
+  and cancellation grace, return `False` and keep the worker, maintenance loop,
+  connection, and lease renewals alive. The caller retains ownership and may
+  retry stop after the handler exits; do not tear down resources underneath it.
 
 - 2026-11-25: User accepts a breaking change to rename
   `no_progress_timeout_seconds` to `progress_report_timeout_seconds`; do not
