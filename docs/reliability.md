@@ -16,7 +16,7 @@ must own. Proofs referenced are executable tests — see
 | **Idempotent enqueue** — same `(type, deduplication_key)` lands at most one live job | non-terminal jobs | partial unique index |
 | **No lost intent** — enqueue inside a committed TX is durably claimable | transactional outbox model | `test_recovery` |
 | **Cancel is cooperative** — `cancel()` terminalizes pending jobs and flags running ones; only `cooperative_cancel` types stop mid-run | job lifecycle | `test_engine_hardening` |
-| **Bounded crash recovery** — every Native claim consumes one `attempts` slot, including claims abandoned before handler start; claims beyond `max_attempts` settle `failed` + DLQ | Native only; equivalent Chancy behavior is required before parity gate passes | `test_reliability::test_repeated_crash_abandoned_claims_exhaust_to_dlq` |
+| **Bounded crash recovery** — every Native claim consumes one `attempts` slot, including claims abandoned before handler start; claims beyond `max_attempts` settle `failed` + DLQ | Native only; not guaranteed for Chancy before engine dispatch starts | `test_reliability::test_repeated_crash_abandoned_claims_exhaust_to_dlq` |
 | **Lease-safe drain** — `stop(timeout)` keeps renewing in-flight leases through the drain window; a sibling worker cannot steal a draining job | native kernel | `test_reliability::test_graceful_stop_renews_lease_through_drain` |
 | **Worker survives DB loss** — Native claim/maintenance loops reconnect; `run_worker` supervises backend workers | tested paths only; not proof of claim/attempt parity | `test_reliability::test_native_worker_recovers_after_connection_drop`, `test_chancy_pipeline_recovers_after_connection_drop` |
 
@@ -46,11 +46,11 @@ must own. Proofs referenced are executable tests — see
 ## Backend operation
 
 NativeKernel is the current default and has tested pre-dispatch claim-token
-fencing and attempt accounting. Chancy remains an explicitly usable adapter,
-but equivalent pre-dispatch fencing and bounded attempt accounting have not
-been proven. Native/Chancy reliability parity is a release gate and is not yet
-passed; the current default does not imply equivalent guarantees. SQLite is a
-local/proof backend, not a production durability target.
+fencing and attempt accounting. Chancy remains a supported, explicitly usable
+adapter with weaker pre-dispatch guarantees: equivalent fencing and bounded
+attempt accounting have not been proven. This limitation is accepted for
+release; do not claim Native/Chancy reliability parity. SQLite is a local/proof
+backend, not a production durability target.
 
 Mixed Chancy/Native fleets are unsupported. Stop schedulers and workers, drain
 in-flight work, and inspect/reconcile outstanding jobs before changing every
@@ -97,10 +97,10 @@ verified migration guarantee.
 
 ## Unsupported / experimental surface
 
-- Chancy is explicitly usable, but pre-dispatch claim fencing and bounded
-  attempt accounting before `mark_running` are unproven. This leaves the
-  Native/Chancy reliability parity release gate unsatisfied; do not claim
-  equivalent crash guarantees until Chancy behavior is implemented and tested.
+- Chancy is supported with accepted limits: pre-dispatch claim fencing and
+  bounded attempt accounting before `mark_running` are unproven. This is not a
+  release blocker, but do not claim Native/Chancy reliability parity or
+  equivalent crash guarantees.
 - NativeKernel is the current default Postgres backend. It does not support rate
   limits, queue pause/resume, worker tags, priority ordering, or Chancy plugin
   metrics (`engine/native_kernel.py` header).

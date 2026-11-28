@@ -645,8 +645,10 @@ reported upstream cases, not yet reproduced as Keelflow failures:
   after broker reconnect. This supports checking queue age/consumption separate
   from process heartbeat; it does not establish a Keelflow defect.
 - **User-approved decisions (2026-11-25):** DB outage behavior should be
-  automatic reconnect (not fail-fast); every successful claim counts toward
-  `max_attempts`, including a claim abandoned before handler start.
+  automatic reconnect (not fail-fast); Native claims count toward
+  `max_attempts` at claim time, including claims abandoned before handler start.
+  Chancy pre-dispatch attempt accounting is not proven and is an accepted
+  documented limitation, not a release gate.
 
 ### Approach and task graph
 
@@ -659,8 +661,9 @@ state, and PostgreSQL query/connection evidence together.
 
 **Task A — Claim identity and bounded crash recovery (foundation)**
 
-- Goal: one unambiguous claim generation owns each dispatch; a successful
-  claim consumes one attempt and repeated abandoned claims terminalize safely.
+- Goal: Native claim generation owns each dispatch; each Native claim consumes
+  one attempt and repeated abandoned claims terminalize safely. Chancy is not
+  required to provide equivalent pre-dispatch accounting for release.
 - Context: Native has a pre-dispatch gap and attempt count currently starts at
   handler start; user approved count-at-claim semantics. Chancy is the default
   backend and must meet the same engine-visible outcome.
@@ -909,11 +912,12 @@ limits, and document the support boundaries of Chancy, Native, and SQLite in
 `README.md`. Do not claim a reliability guarantee unless the corresponding
 backend-level behavior is proven by tests.
 
-The user accepts NativeKernel as the default and accepts that each backend has
-limitations. Requests for a capability a selected backend cannot serve must fail
-clearly rather than being silently ignored. Chancy remains opt-in; warn once when
-it is selected about reliability limits that affect all Chancy jobs. Do not make
-Chancy unusable merely because some optional capabilities are unsupported.
+The user accepts NativeKernel as the current code default, while allowing a
+release with documented Chancy limitations. This is not a requirement for
+Native/Chancy reliability parity. Requests for a capability a selected backend
+cannot serve must fail clearly rather than being silently ignored. Chancy remains
+opt-in; warn when selected about pre-dispatch fencing and attempt-accounting
+limits, without presenting them as guarantees shared by both backends.
 
 #### Verified review findings and repository evidence
 
@@ -1048,15 +1052,14 @@ integration proof has been recorded. Keep this plan active.
 
 **Task 4 — Define honest Chancy compatibility and reliability policy (P1)**
 
-- Goal: keep Chancy usable while closing the reliability gap; Native and
-  Chancy must provide equivalent claim fencing and bounded pre-dispatch attempt
-  accounting before the framework release gate passes.
+- Goal: keep Chancy usable with an explicit warning about unproven pre-dispatch
+  fencing and bounded attempt accounting; these limitations do not block release
+  when documented and accepted.
 - Required outcomes: emit one clear warning per bootstrap invocation while
   Chancy's pre-dispatch fencing and bounded engine attempt accounting remain
   unproven. The warning names those limits without labeling Chancy generally
-  unreliable. Investigate a supported fencing seam and implement/verify parity
-  or keep the release gate blocked; documentation alone does not close the gap.
-  Correct `docs/reliability.md` and guide claims accordingly.
+  unreliable. Investigate supported ways to improve these guarantees, but do not
+  block release solely on parity. Correct `docs/reliability.md` and guide claims.
 - Constraints: no private Chancy monkey-patching/fork. Do not infer a supported
   claim-id injection seam without proof. If a request/guarantee is not currently
   expressible at an API boundary, document that limitation rather than creating
@@ -1077,11 +1080,11 @@ integration proof has been recorded. Keep this plan active.
   supported fencing seam exists and the existing disconnect test has unsafe
   broad session termination.
 
-**Task 5 — Current Native default and Native/Chancy parity release gate**
+**Task 5 — Current Native default and explicit backend capabilities**
 
-- Goal: distinguish the implemented Native code default from a release decision;
-  require Native/Chancy reliability parity before the release gate passes, and
-  reject unsupported backend-specific options.
+- Goal: distinguish the implemented Native code default from release status;
+  keep Chancy usable with documented reliability limitations, and reject
+  unsupported backend-specific options.
 - Required outcomes: change defaults for CLI worker, CLI scheduler, and
   `run_worker(kernel=None)` together. When `run_worker` creates Native itself,
   it owns migrate/start/stop/close on success, startup failure, and cancellation;
@@ -1097,15 +1100,15 @@ integration proof has been recorded. Keep this plan active.
 - Constraints: do not change job data schema solely to switch defaults. Keep
   SQLite out of production recommendations. Do not silently reinterpret a
   Chancy-only option.
-- Acceptance evidence: Native and Chancy both pass claim-fencing and bounded
-  pre-dispatch attempt-accounting proofs; CLI/parser and bootstrap tests show
-  the implemented default selects Native without silently applying Chancy-only
-  options. Chancy remains explicitly selectable and capability errors are
-  actionable.
+- Acceptance evidence: CLI/parser and bootstrap tests show the implemented
+  default selects Native without silently applying Chancy-only options. Chancy
+  remains explicitly selectable; its unproven pre-dispatch guarantees are
+  documented and warned about. Capability errors are actionable.
 - Verification: CLI/bootstrap tests, both kernel contract suites, worker and
   scheduler integration tests.
 - Ownership: `cli.py`, `worker.py`, kernel selection tests, API docs.
-- Dependencies: Tasks 2-4; Native reliability gate must pass first.
+- Dependencies: Tasks 2-4; Native reliability gate must pass before claiming
+  Native guarantees, but Chancy parity is not a release prerequisite.
 - Progress: CLI and Python worker defaults now select Native; Chancy is explicit
   opt-in; `--queue`/`queues=` is rejected outside Chancy. CLI/bootstrap tests
   pass. Native owned-kernel cleanup on startup failure/cancellation and the
@@ -1170,17 +1173,18 @@ integration proof has been recorded. Keep this plan active.
   covers future and non-dispatchable rows. A due human/external-wait integration
   case and explicit Chancy metric validation remain outstanding.
 
-**Task 8 — Backend parity validation and closeout**
+**Task 8 — Backend capability validation and closeout**
 
-- Goal: complete fresh behavior-level evidence for the current Native default,
-  the required Native/Chancy reliability parity gate, and the supported backend
-  matrix.
-- Acceptance evidence: Native and Chancy both pass claim-fencing, bounded
-  pre-dispatch attempt accounting, cancellation, bulk/workflow, reconnect, stop,
-  dedup, and metric eligibility tests; cutover behavior is rehearsed. SQLite
-  contract tests pass and its limitations are explicit. README, guide,
-  reliability docs, CLI help, and module support notes agree on current
-  defaults, the parity gate, capability gaps, warnings, and cutover status.
+- Goal: complete fresh behavior-level evidence for the current Native default
+  and accurately describe the supported backend matrix and its limitations.
+- Acceptance evidence: Native reliability, cancellation, bulk/workflow,
+  reconnect, stop, dedup, metric eligibility, CLI/API defaults, and cutover
+  behavior have evidence appropriate to their claims. Chancy's tested behavior
+  and known pre-dispatch limitations are explicit; no Native-equivalent fencing
+  or bounded-attempt guarantee is claimed. SQLite contract tests pass and its
+  limitations are explicit. README, guide, reliability docs, CLI help, and
+  module support notes agree on defaults, capability gaps, warnings, and
+  cutover status.
 - Verification: focused suites per task; then full tests with Native default,
   explicit Chancy tests, SQLite contract tests, examples, `ruff check`, `mypy`,
   and `git diff --check`. Fault injection only on isolated/test-owned DBs.
@@ -1203,13 +1207,13 @@ validation, and makes the cutover acceptance alternatives consistent.
 #### Dependency order and decision gates
 
 `1 → 2 → 3`; Task 4 follows Task 1 and can proceed alongside Tasks 2-3 where
-file ownership is separate. Task 5's release gate remains blocked until Native
-and Chancy pass reliability parity and capability gates in Tasks 2-4. Task 6
-tests cutover after the default selection is implemented. Task 7 follows Task 2's eligibility definition and
+file ownership is separate. Task 5 records current defaults and backend
+capability validation; Chancy parity is not a release gate. Task 6 tests cutover
+after the default selection is implemented. Task 7 follows Task 2's eligibility definition and
 can proceed independently of CLI cutover; Task 8 integrates all outputs.
-Chancy claim-identity work is a discovery gate inside Task 4: if no supported
-seam exists, accept and document the limitation; do not block Native default or
-patch private dependency code.
+Chancy claim-identity work is an improvement investigation inside Task 4: if no
+supported seam exists, document the limitation; do not patch private dependency
+code or present Chancy as reliability-equivalent to Native.
 
 #### Risks and recovery
 
@@ -1233,12 +1237,11 @@ patch private dependency code.
 
 ### Decisions
 
-- 2026-11-26: NativeKernel is the current code default, with focused Native
-  tests passing; this is not a release decision. Chancy remains explicitly
-  usable and warns about its unproven pre-dispatch limits. Native/Chancy
-  claim-fencing and bounded attempt-accounting parity is a required release
-  gate, not yet passed. Do not claim the backends are reliability-equivalent
-  until both satisfy that gate. SQLite remains proof/local-only.
+- 2026-11-28: NativeKernel is the current code default. A release may proceed
+  with Chancy's documented pre-dispatch fencing and bounded attempt-accounting
+  limitations; parity is not required. Do not claim the backends are
+  reliability-equivalent. Keep Chancy selectable with an explicit warning.
+  SQLite remains proof/local-only.
 - 2026-11-26: Do not depend on or patch unsupported private Chancy internals for
   claim fencing. If no supported seam proves the claim contract, keep Chancy
   best-effort and state the limitation; Native owns the stronger guarantee.

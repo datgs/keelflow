@@ -112,8 +112,9 @@ same backend. The integration proof for Native enqueue-to-claim is
 `tests/test_native_kernel.py::test_native_claims_and_completes`. To opt
 into Chancy, construct a `chancy.Chancy` client, wrap it with
 `ChancyKernel`, declare its queue, and run the worker with
-`--kernel chancy` or pass that same adapter to `run_worker`. Native/Chancy
-claim-fencing and bounded-attempt parity has not yet passed its release gate.
+`--kernel chancy` or pass that same adapter to `run_worker`. Chancy's
+pre-dispatch fencing and bounded-attempt gaps are accepted limitations, not a
+claim that its reliability matches Native.
 
 When choosing Chancy, the kernel prefix **must not** be `keelflow_` (engine
 prefix) — kernel tables would collide with `keelflow_jobs`.
@@ -783,8 +784,8 @@ Engine dispatch goes through a kernel port (`keelflow.engine.kernel`):
 
 | Backend | Class | Status | Notes |
 |---|---|---|---|
-| native | `NativeKernel` | current default | Claims `keelflow_jobs`; claim-token fencing and bounded pre-handler attempt accounting are tested. No rate limits, pause/resume, worker tags, priority ordering, or Chancy metrics plugins. Native/Chancy reliability parity remains a release gate. |
-| chancy | `ChancyKernel` (wraps `chancy.Chancy`) | opt-in, best-effort | Warns when selected. No proven claim-to-dispatch fencing or bounded engine attempt accounting before `mark_running`; parity gate is not met. |
+| native | `NativeKernel` | current default | Claims `keelflow_jobs`; claim-token fencing and bounded pre-handler attempt accounting are tested. No rate limits, pause/resume, worker tags, priority ordering, or Chancy metrics plugins. |
+| chancy | `ChancyKernel` (wraps `chancy.Chancy`) | supported, opt-in with accepted limits | Warns when selected. No proven claim-to-dispatch fencing or bounded engine attempt accounting before `mark_running`; do not assume Native-equivalent reliability. |
 | sqlite | `SQLiteKernel` (`pip install keelflow[sqlite]`) | local/proof only | Separate table, in-process wakeup, single-writer; engine services remain Postgres-bound. Not a production durability target. |
 
 Kernel contract tests run per backend:

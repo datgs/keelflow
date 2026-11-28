@@ -57,8 +57,9 @@ kernel claims job → dispatch(job_id)
   (redelivery re-runs the handler); exhausted → status `failed`, the
   row is copied to `keelflow_dlq`, and the owning step terminalizes
   (`on_failed` path in `03-workflow.md`). Chancy/dispatch increments at
-  `job_mark_running` but pre-dispatch fencing or bounded attempt
-  accounting is unproven, so claim parity is not guaranteed there.
+  `job_mark_running`; claims abandoned before that point may not consume an
+  engine attempt, and pre-dispatch fencing is unproven. Treat these as accepted
+  Chancy limitations; do not infer Native-equivalent recovery guarantees.
   Without a kernel client configured, dispatch falls back to kernel-managed
   retries. Kernel delivery budget is `max_attempts + 1` so the kernel always grants
   the final delivery needed for engine-side settlement.

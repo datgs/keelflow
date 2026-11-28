@@ -148,15 +148,15 @@ permissions, and transactions.
 
 NativeKernel is the current default for CLI workers, schedulers, and
 `run_worker(kernel=None)`. Chancy remains available as an explicit opt-in.
-Both adapters remain part of the framework, but Native/Chancy claim-fencing
-and bounded-attempt parity is a release gate that has not yet passed; the
-current default does not imply equivalent reliability guarantees. SQLite is
-for local/proof use only and does not make engine storage portable.
+The framework can be released with both adapters available and different
+documented reliability guarantees; parity is not required. Do not infer
+equivalent reliability from the shared kernel interface. SQLite is for
+local/proof use only and does not make engine storage portable.
 
 | Backend | Use | Claim and recovery | Operational limits |
 |---|---|---|---|
 | NativeKernel (default) | Postgres production | Claims `keelflow_jobs`; each claim consumes an attempt and uses a non-reusable execution token. Bounded crash exhaustion is covered by Native tests. | No rate limits, pause/resume, worker tags, priority ordering, or Chancy plugin metrics. `stop(timeout)` may return `False`; keep the worker alive and retry stop after a running handler exits. |
-| Chancy (opt-in) | Deployments that require Chancy queue operations | Adapts Chancy dispatch; Keelflow does not prove stale-claim fencing or bounded engine attempts for crashes before dispatch starts. | Usable with explicit limits and a selection warning; Native/Chancy reliability parity is not yet proven and remains a release gate. Use `--kernel chancy` or pass `ChancyKernel` to `run_worker`. |
+| Chancy (opt-in) | Deployments that require Chancy queue operations | Adapts Chancy dispatch; Keelflow does not prove stale-claim fencing or bounded engine attempts for crashes before dispatch starts. | Supported with explicit limits and a selection warning; these guarantees are weaker than Native's. Use `--kernel chancy` or pass `ChancyKernel` to `run_worker`. |
 | SQLiteKernel | Local and portability proof | Separate SQLite job table; single-writer behavior. | Not production durable; no cross-process notify or Postgres advisory locks. Engine services remain Postgres-bound. |
 
 **Backend cutover:** do not assume Chancy and Native workers or schedulers
