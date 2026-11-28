@@ -7,7 +7,8 @@ runtime signals are the system of record.
 
 - `AGENTS.md`: entry map and authority boundary.
 - `README.md`, `docs/product/`, architecture, and decisions: current intent and
-  constraints.
+  constraints; `docs/principles.md` indexes stated principles and flags open
+  authority questions without creating policy.
 - `docs/plans/`: durable work; `docs/templates/`: optional structures.
 - Code, tests, CI, and runtime signals: executable and observable truth.
 

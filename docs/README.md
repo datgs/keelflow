@@ -9,6 +9,7 @@ Start with the smallest authoritative surface.
 - `architecture-design-brief.md`: historical draft design rationale; use it
   for background, not as the only current authority.
 - `reliability.md`: durability, recovery, backend limits, and upgrade policy.
+- `principles.md`: index of stated framework principles and open authority/review questions; it does not create policy.
 - `security.md`: data access, telemetry, and admin/MCP boundaries.
 - `../spec/`: language-agnostic schema, lifecycle, context, and conformance
   contract.
